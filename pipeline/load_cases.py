@@ -1,4 +1,5 @@
-"""Load the demo, extra and loop cases into Exasol with bulk IMPORT (`make seed`). FR-01 (case half).
+"""Load the cases, their 90-day history and the scoring rules into Exasol with bulk IMPORT (`make seed`).
+FR-01 (case half). History comes from pipeline/gen_history.py (seed 42); scoring rules from config/scoring.yaml.
 
 Uses pyexasol's import_from_iterable, which runs a native IMPORT over HTTP transport: no row-by-row INSERT
 (requirements s8). Reloading is safe: the case tables are truncated first.
@@ -12,11 +13,15 @@ import argparse
 import sys
 from decimal import Decimal
 
-from pipeline.cases import DEMO_CASE, EXTRA_CASES, LOOP_CASE, Case, load_case
+import yaml
+
+from pipeline.cases import DEMO_CASE, EXTRA_CASES, LOOP_CASE, ROOT, Case, load_case
+from pipeline.gen_history import generate as generate_history
 
 SNAPSHOT_TS = "2026-10-18 00:00:00.000"   # opening balances are as of the start of the case day
 CASE_FILES = {"demo_case": DEMO_CASE, "extra_cases": EXTRA_CASES, "loop_case": LOOP_CASE}
-TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT"]
+TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT", "SCORING_CONFIG", "PROFILE_BAND"]
+SCORING = ROOT / "config" / "scoring.yaml"
 
 
 def ts(value: str | None) -> str | None:
@@ -27,7 +32,11 @@ def b(value: bool) -> str:
     return "TRUE" if value else "FALSE"
 
 
-def rows_for(cases: dict[str, Case]) -> dict[str, list[tuple]]:
+def rupees(paise: int) -> str:
+    return f"{paise // 100}.{paise % 100:02d}"
+
+
+def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tuple]]:
     banks: dict[str, tuple] = {}
     accounts: dict[str, tuple] = {}
     out: dict[str, list[tuple]] = {t: [] for t in TABLES}
@@ -53,6 +62,17 @@ def rows_for(cases: dict[str, Case]) -> dict[str, list[tuple]]:
                 c.get("beneficiary_account"), c["lane"], c.get("notice_legal_basis"), b(c["notice_has_amount"]),
                 c.get("ordering_authority"), c.get("ordering_reference"),
             ))
+    if history:
+        all_accounts = [a for case in cases.values() for a in case.accounts]
+        for h in generate_history(all_accounts):
+            out["TXN"].append((h["txn_id"], h["utr"], ts(h["ts"]), h["from"], h["to"], rupees(h["amount_paise"]),
+                               h["channel"], b(h["to"].startswith("EXIT:")), h["exit_identifier"], "history"))
+    scoring = yaml.safe_load(SCORING.read_text(encoding="utf-8"))
+    for name, sig in scoring["signals"].items():
+        out["SCORING_CONFIG"].append((name, sig["weight"], sig["honest_at"], sig["mule_at"],
+                                      sig["mule_sentence"], sig["honest_sentence"]))
+    for band, expected in scoring["profile_band_expected_monthly_credit_inr"].items():
+        out["PROFILE_BAND"].append((band, str(Decimal(str(expected)))))
     out["BANK"] = list(banks.values())
     out["ACCOUNT"] = list(accounts.values())
     own = [r for r in out["BANK"] if r[2] == "TRUE"]
@@ -65,7 +85,7 @@ def load(conn, rows: dict[str, list[tuple]]) -> None:
     for table in TABLES:
         conn.execute(f"TRUNCATE TABLE PH.{table}")
         conn.import_from_iterable(rows[table], ("PH", table))
-        print(f"loaded {len(rows[table]):6} rows into PH.{table}")
+        print(f"loaded {len(rows[table]):7} rows into PH.{table}")
 
 
 def verify(conn, rows: dict[str, list[tuple]]) -> bool:
@@ -74,7 +94,7 @@ def verify(conn, rows: dict[str, list[tuple]]) -> bool:
         n = conn.execute(f"SELECT COUNT(*) FROM PH.{table}").fetchval()
         good = n == len(rows[table])
         ok &= good
-        print(f"{'ok ' if good else 'BAD'} PH.{table:17} db={n:6}  file={len(rows[table]):6}")
+        print(f"{'ok ' if good else 'BAD'} PH.{table:17} db={n:7}  file={len(rows[table]):7}")
     db_sum = Decimal(str(conn.execute("SELECT SUM(amount_inr) FROM PH.TXN").fetchval()))
     file_sum = sum(Decimal(r[5]) for r in rows["TXN"])
     good = db_sum == file_sum

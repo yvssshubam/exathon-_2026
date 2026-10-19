@@ -4,7 +4,8 @@
     python -m pipeline.steps trace CASE_DEMO --bank BANK_Z   # the same case seen from Murugan's bank
     python -m pipeline.steps trace CASE_LOOP --as-of "2026-10-18 23:59:59"
     python -m pipeline.steps attribute CASE_DEMO             # needs the trace first
-    python -m pipeline.steps run CASE_DEMO                   # trace + attribute
+    python -m pipeline.steps score CASE_DEMO                 # needs trace + attribute first
+    python -m pipeline.steps run CASE_DEMO                   # trace + attribute + score
 
 Each run prints what it wrote, so a wrong number can be traced to the step and the statement that made it.
 """
@@ -23,6 +24,7 @@ from pipeline.run_sql import split_statements
 ROOT = Path(__file__).resolve().parents[1]
 STEPS = ROOT / "sql" / "steps"
 DEFAULTS = yaml.safe_load((ROOT / "config" / "case_defaults.yaml").read_text(encoding="utf-8"))
+SCORING = yaml.safe_load((ROOT / "config" / "scoring.yaml").read_text(encoding="utf-8"))
 FMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -143,6 +145,39 @@ def print_attribution(conn, case_id: str) -> None:
                   f"Rs {float(victim):,.2f} of it the victim's ({rule})")
 
 
+def score(conn, case_id: str, as_of: str | None = None) -> dict:
+    """Step 3. Uses the trace and the LIBR attribution, so run those first with the same as_of."""
+    c = complaint(conn, case_id)
+    params = {
+        "case_id": case_id,
+        "as_of": as_of or default_as_of(c["reported_at"]),
+        "mule_band": str(SCORING["bands"]["mule"]),
+        "review_band": str(SCORING["bands"]["review"]),
+    }
+    started = time.perf_counter()
+    run_step(conn, "060_score.sql", params)
+    elapsed = time.perf_counter() - started
+    from pipeline.db import audit
+
+    audit(conn, "score", case_id, f"as_of={params['as_of']}")
+    return {**params, "seconds": elapsed}
+
+
+def print_score(conn, case_id: str) -> None:
+    scores = conn.execute(
+        "SELECT account_id, score, band, stmt_id FROM PH.ACCOUNT_SCORE WHERE case_id = {c} ORDER BY account_id",
+        {"c": case_id}).fetchall()
+    for acc, value, band, stmt in scores:
+        rank_col = "mule_rank" if band in ("MULE", "REVIEW") else "honest_rank"
+        reasons = conn.execute(
+            f"SELECT sentence FROM PH.ACCOUNT_SIGNALS WHERE case_id = {{c}} AND account_id = {{a}} "
+            f"AND {rank_col} <= {int(SCORING['top_reasons'])} ORDER BY {rank_col}",
+            {"c": case_id, "a": acc}).fetchall()
+        print(f"{acc:14} {band:6} score {float(value):.2f}   (statement {stmt})")
+        for (sentence,) in reasons:
+            print(f"    - {sentence}")
+
+
 def print_trace(conn, case_id: str) -> None:
     rows = conn.execute(
         "SELECT hop, from_account, to_account, amount_inr, ts, is_own_bank, is_exit, is_cycle, stmt_id "
@@ -159,7 +194,7 @@ def print_trace(conn, case_id: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["trace", "attribute", "run"])
+    ap.add_argument("step", choices=["trace", "attribute", "score", "run"])
     ap.add_argument("case_id")
     ap.add_argument("--bank", help="bank using the tool (default: OWN_BANK_ID in .env)")
     ap.add_argument("--as-of", help='replay cut-off, "YYYY-MM-DD HH:MM:SS" (default: reported_at + hold_minutes)')
@@ -182,6 +217,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nattribute {args.case_id}  victim {info['victim_tag']}  as_of {info['as_of']}  "
               f"replay from {info['replay_from']}  took {info['seconds']:.2f}s\n")
         print_attribution(conn, args.case_id)
+    if args.step in ("score", "run"):
+        info = score(conn, args.case_id, args.as_of)
+        print(f"\nscore {args.case_id}  as_of {info['as_of']}  took {info['seconds']:.2f}s\n")
+        print_score(conn, args.case_id)
     conn.close()
     return 0
 

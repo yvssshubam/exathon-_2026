@@ -160,3 +160,27 @@ written there. The trace is therefore two statements, both in Exasol:
 2. `CONNECT BY NOCYCLE PRIOR child_txn = parent_txn` walks that table with equality links only, bounded by
    `LEVEL <= max_hops`.
 `TRACE_LINK` is kept per case, so the allowed hops can be inspected when a trail looks wrong.
+
+## D-22 · DEFAULT · How each scoring signal is measured
+
+All over the 90 days before the hold time, from `PH.TXN`, in `sql/steps/060_score.sql`; a Python copy in
+`tests/score_oracle.py` checks the numbers.
+- **Median dwell:** for each credit, minutes until the account's next debit (or until the hold time); the median.
+- **Pass-through:** for each credit, the part of it matched by debits in the next 60 minutes, capped at the credit;
+  summed and divided by all credits. (A plain "outflow within 60 min / inflow" would score a shop's evening sweep as
+  pass-through, because some small payment always arrived in the hour before it.)
+- **Complaint-linked credits:** distinct complaints whose victim paid straight into the account in the last 7 days.
+  Second-layer links are left for later.
+- **Large-payer share:** share of credit value from the top three payers.
+- **Balance retained:** balance at the hold time divided by the victim money that came in (from the LIBR replay),
+  a proxy for "lowest balance after the tainted credit".
+- **Cash or crypto exits:** count of ATM, cash or crypto withdrawals.
+- **Credit vs profile:** credits in the last 30 days divided by the declared band's expected monthly credits.
+Dwell's honest threshold is 6 hours, not "days or weeks" as section 9 suggests, because real shops sweep takings
+daily; mules forward within minutes either way.
+
+## D-23 · DEFAULT · Account history is generated, not stored
+
+`pipeline/gen_history.py` (seed 42) generates 90 days of history for the case accounts in memory when the cases are
+loaded: about 300 small payments a day for merchants such as Murugan, a few large fast-forwarded credits for mules.
+It ends before 18 Oct 2026 00:00, when the opening balances are taken, so the case-day numbers are unchanged.

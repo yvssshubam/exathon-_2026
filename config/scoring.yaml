@@ -1,9 +1,13 @@
 # Mule-or-honest scoring (requirements section 9, step 3). Weights are hand-set for the demo and NOT
 # validated on real data; say so in the README and the deck. An ML model may add one signal, never replace these.
 #
-# Each signal is computed in SQL over the 90 days before the complaint and turned into a mule-likeness m in [0, 1]
-# by straight-line interpolation between `honest_at` (m = 0) and `mule_at` (m = 1), clamped.
-# score = sum(weight * m) / sum(weight).   Each signal's contribution = weight * m / sum(weight).
+# Each signal is computed in SQL (sql/steps/060_score.sql) over the 90 days before the hold time and turned into
+# a mule-likeness m in [0, 1] by straight-line interpolation between `honest_at` (m = 0) and `mule_at` (m = 1),
+# clamped. score = sum(weight * m) / sum(weight). Each signal's contribution = weight * m / sum(weight).
+# Definitions of each signal: docs/DECISIONS.md D-22.
+#
+# Sentences: the mule sentence is used when m >= 0.5, the honest one otherwise. Placeholders filled in SQL:
+#   {v} value rounded to a whole number   {v1} one decimal   {pct} value x 100, whole number   {years} value / 365
 
 window_days: 90
 
@@ -16,55 +20,55 @@ signals:
     weight: 0.15
     honest_at: 365
     mule_at: 90
-    mule_sentence: "The account was opened {value:.0f} days ago."
-    honest_sentence: "The account is {value_years:.1f} years old."
+    mule_sentence: "The account was opened only {v} days ago."
+    honest_sentence: "The account is {years} years old."
   median_dwell_minutes:
     weight: 0.20
-    honest_at: 4320          # 3 days
+    honest_at: 360           # 6 hours: shops sweep takings daily; mules forward within minutes
     mule_at: 30
-    mule_sentence: "Money received usually leaves within {value:.0f} minutes."
-    honest_sentence: "Money received usually stays for days (median {value_days:.1f} days)."
-  pass_through_ratio:        # outflow within 60 minutes of a credit / inflow
+    mule_sentence: "Money it receives usually leaves within {v} minutes."
+    honest_sentence: "Money it receives usually stays for hours or days (median {v} minutes)."
+  pass_through_ratio:        # share of each credit sent on within 60 minutes of arriving, over all credits
     weight: 0.20
     honest_at: 0.2
     mule_at: 0.8
-    mule_sentence: "{value_pct:.0f}% of money received was sent on within an hour."
-    honest_sentence: "Only {value_pct:.0f}% of money received was sent on within an hour."
+    mule_sentence: "{pct}% of the money it received was sent on within an hour."
+    honest_sentence: "Only {pct}% of the money it received was sent on within an hour."
   complaint_linked_credits_7d:
     weight: 0.10
     honest_at: 1
     mule_at: 2
-    mule_sentence: "It received money from {value:.0f} different complaints in 7 days."
-    honest_sentence: "It received money from {value:.0f} complaint in 7 days."
-  large_payer_share:         # share of credit value from the top 3 payers; merchants have many small payers
+    mule_sentence: "It received money from {v} different fraud complaints in the last 7 days."
+    honest_sentence: "It received money from at most one fraud complaint in the last 7 days."
+  large_payer_share:         # share of credit value from the top 3 payers
     weight: 0.10
     honest_at: 0.2
     mule_at: 0.8
-    mule_sentence: "{value_pct:.0f}% of its credits came from just three payers."
-    honest_sentence: "It is paid by many small payers ({payers_per_day:.0f} a day), like a shop."
-  balance_retained_ratio:    # lowest balance after the tainted credit / tainted credit
+    mule_sentence: "{pct}% of the money it received came from just three payers."
+    honest_sentence: "It is paid by many different small payers ({pct}% from its top three), like a shop."
+  balance_retained_ratio:    # balance at the hold time / the victim money that came in
     weight: 0.10
     honest_at: 5.0
     mule_at: 0.05
-    mule_sentence: "The balance fell to almost nothing after the money arrived."
-    honest_sentence: "Its balance stayed far above the payment it received."
-  cash_or_crypto_exits:      # count of ATM / cash / crypto exits in the window
+    mule_sentence: "Its balance is now only {v1} times the victim money it received."
+    honest_sentence: "Its balance stayed far above the payment it received ({v} times larger)."
+  cash_or_crypto_exits:      # ATM / cash / crypto withdrawals in the window
     weight: 0.10
     honest_at: 0
     mule_at: 1
-    mule_sentence: "Money left by {value:.0f} cash or crypto withdrawals."
-    honest_sentence: "There were no cash or crypto withdrawals."
-  credit_vs_profile:         # credits in window / expected credits for the declared profile band
+    mule_sentence: "Money left it through {v} cash or crypto withdrawals."
+    honest_sentence: "No money left it through cash or crypto withdrawals."
+  credit_vs_profile:         # credits in the last 30 days / the declared profile band's expected monthly credits
     weight: 0.05
     honest_at: 1.0
     mule_at: 5.0
-    mule_sentence: "Credits were {value:.1f} times what its declared profile suggests."
-    honest_sentence: "Credits match its declared profile."
+    mule_sentence: "In the last 30 days it received {v1} times what its declared profile suggests."
+    honest_sentence: "What it received matches its declared profile."
 
 profile_band_expected_monthly_credit_inr:
   low: 50000
   medium: 300000
-  high: 3000000
+  high: 5000000
 
 # Not a score signal: a guard applied in step 4 (SOP 9.1(i), 9.1(iii)).
 never_account_hold_types: [nodal, pool, escrow]

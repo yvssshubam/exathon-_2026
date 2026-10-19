@@ -144,18 +144,45 @@ CREATE OR REPLACE TABLE PH.ATTRIBUTION_FLOW (
     stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
 ) COMMENT IS 'Step 2: victim money carried by each transaction. Feeds referral shares and the trail labels.';
 
+CREATE OR REPLACE TABLE PH.SCORING_CONFIG (
+    signal_name     VARCHAR(40)   NOT NULL COMMENT IS 'Signal, as named in config/scoring.yaml',
+    weight          DOUBLE        NOT NULL COMMENT IS 'Hand-set weight (not validated on real data)',
+    honest_at       DOUBLE        NOT NULL COMMENT IS 'Value at which the signal looks fully honest (mule-likeness 0)',
+    mule_at         DOUBLE        NOT NULL COMMENT IS 'Value at which the signal looks fully mule-like (mule-likeness 1)',
+    mule_sentence   VARCHAR(300)  NOT NULL COMMENT IS 'Reason text when the signal looks mule-like',
+    honest_sentence VARCHAR(300)  NOT NULL COMMENT IS 'Reason text when the signal looks honest'
+) COMMENT IS 'Scoring rules loaded from config/scoring.yaml, so the scoring SQL reads them inside Exasol.';
+
+CREATE OR REPLACE TABLE PH.PROFILE_BAND (
+    profile_band          VARCHAR(10)   NOT NULL COMMENT IS 'low, medium or high',
+    expected_monthly_inr  DECIMAL(18,2) NOT NULL COMMENT IS 'Credits per month expected for an account declaring this band'
+) COMMENT IS 'Declared-profile bands used by the credit-vs-profile signal (config/scoring.yaml).';
+
 CREATE OR REPLACE TABLE PH.ACCOUNT_SIGNALS (
-    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case the account was scored for',
-    account_id   VARCHAR(40)   NOT NULL COMMENT IS 'Account scored',
-    as_of        TIMESTAMP     NOT NULL COMMENT IS 'Signals use the 90 days before this moment',
-    signal_name  VARCHAR(40)   NOT NULL COMMENT IS 'Signal from config/scoring.yaml',
-    signal_value DOUBLE                 COMMENT IS 'Raw value of the signal',
-    weight       DOUBLE        NOT NULL COMMENT IS 'Hand-set weight from config/scoring.yaml',
-    mule_likeness DOUBLE                COMMENT IS '0 = honest-like, 1 = mule-like',
-    contribution DOUBLE                 COMMENT IS 'weight * mule_likeness / total weight; contributions sum to the score',
-    sentence     VARCHAR(300)           COMMENT IS 'The signal written as a plain sentence for the reasons',
-    stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+    case_id       VARCHAR(20)   NOT NULL COMMENT IS 'Case the account was scored for',
+    account_id    VARCHAR(40)   NOT NULL COMMENT IS 'Account scored',
+    as_of         TIMESTAMP     NOT NULL COMMENT IS 'Signals use the 90 days before this moment',
+    signal_name   VARCHAR(40)   NOT NULL COMMENT IS 'Signal from config/scoring.yaml',
+    signal_value  DOUBLE                 COMMENT IS 'Raw value of the signal',
+    weight        DOUBLE        NOT NULL COMMENT IS 'Hand-set weight from config/scoring.yaml',
+    mule_likeness DOUBLE                 COMMENT IS '0 = honest-like, 1 = mule-like',
+    contribution  DOUBLE                 COMMENT IS 'weight * mule_likeness / total weight; contributions sum to the score',
+    sentence      VARCHAR(300)           COMMENT IS 'The signal written as a plain sentence for the reasons',
+    mule_rank     DECIMAL(3,0)           COMMENT IS 'Rank of this signal as a reason the account looks like a mule (1 = strongest)',
+    honest_rank   DECIMAL(3,0)           COMMENT IS 'Rank of this signal as a reason the account looks honest (1 = strongest)',
+    stmt_id       DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
 ) COMMENT IS 'Step 3 output: one row per account per signal, so every reason is explainable (FR-08).';
+
+CREATE OR REPLACE TABLE PH.ACCOUNT_SCORE (
+    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    account_id   VARCHAR(40)   NOT NULL COMMENT IS 'Account scored',
+    as_of        TIMESTAMP     NOT NULL COMMENT IS 'Hold time the score is for',
+    score        DOUBLE        NOT NULL COMMENT IS 'Mule score 0..1 (sum of signal contributions)',
+    band         VARCHAR(6)    NOT NULL COMMENT IS 'MULE (>= 0.70), REVIEW (>= 0.40) or HONEST',
+    account_type VARCHAR(10)            COMMENT IS 'savings, current, nodal, pool or escrow',
+    never_account_hold BOOLEAN NOT NULL COMMENT IS 'TRUE for nodal, pool and escrow accounts: never fully held (SOP 9.1(iii))',
+    stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Step 3 output: score and band per account (FR-08).';
 
 CREATE OR REPLACE TABLE PH.RECOMMENDATION (
     case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case',

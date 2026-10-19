@@ -38,7 +38,7 @@ accounts:
      opened_on: "2026-09-20", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
   - {account_id: ACC_C, bank_id: BANK_X, holder: "C", account_type: savings, holder_type: individual,
      opened_on: "2026-10-04", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
-  # D-01 OPEN: section 3 says Bank Z; AT-08 and the demo script need Bank X. Change bank_id here once decided.
+  # D stays at Bank Z (DECISIONS D-01): Bank X refers it on; viewed as Bank Z, it gets the ₹1,000 amount hold.
   - {account_id: ACC_D, bank_id: BANK_Z, holder: "Murugan (Sri Murugan Fuels)", account_type: current, holder_type: merchant,
      opened_on: "2023-10-02", profile_band: high, opening_balance_inr: 819000.00, history: merchant_300_per_day}
 

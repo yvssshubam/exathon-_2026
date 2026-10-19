@@ -4,22 +4,27 @@ Every place where `docs/REQUIREMENTS.md` was ambiguous, self-contradictory, or n
 Status: **OPEN** needs the team's answer; **DEFAULT** is what the code does until someone says otherwise;
 **VERIFY** must be checked against a running Exasol before it is relied on.
 
-## D-01 · OPEN · Which bank is D in, and does the trace continue through other banks?
+## D-01 · DECIDED · Every bank can run the tool; D stays at Bank Z
 
 **Conflict.** Section 3 puts B at Bank Y and D (Murugan) at Bank Z. Section 9 says edges into other banks are
 "kept but not expanded further". But AT-03 expects the trail to reach D and the ATM exit, both of which hang off B
 (Bank Y), and AT-08 expects D to get `AMOUNT_HOLD ₹1,000` while B gets `REFER_OUT`. The demo script also has
-Bank X's officer approving D's hold and issuing Murugan's notice, which only Bank X could do if D were its customer.
+an officer approving D's hold and issuing Murugan's notice, which only D's own bank can do.
 
-**Proposed default.**
-1. The trace expands through every bank present in the synthetic data. This stands in for the cross-bank trail
-   CFCFRMS already returns to each bank (requirements section 3: tracing exists, attribution is the gap). Each
-   edge carries `is_own_bank` of the receiving account.
-2. Actions follow `is_own_bank`: own-bank accounts get hold actions; other-bank accounts get `REFER_OUT` carrying
-   the attributed amount for that bank.
-3. Move D to **Bank X** (one line in `data/demo_case.yaml`), so AT-08 and the demo script hold.
+**Decision** (matches how the real system works: each bank sees only its own accounts and CFCFRMS carries the
+trail between banks).
+1. The bank using the tool is a setting (`OWN_BANK_ID`, and a parameter of every case step), not a fixed bank.
+   The demo can be viewed as Bank X, Y or Z.
+2. The trace follows the money through every bank in the synthetic data. That shared view stands in for the
+   cross-bank trail CFCFRMS already returns to each bank. Each edge records whether the receiving account belongs
+   to the viewing bank.
+3. The viewing bank acts only on its own accounts. For accounts at other banks it emits a referral that carries
+   the victim's share of the amount sent (`REFER_OUT`, table `REFERRAL_OUT.victim_amount_inr`).
+4. D stays at **Bank Z**, as section 3 says. Viewed as Bank X: A and C get holds, B and D get referrals. Viewed as
+   Bank Z: D gets `AMOUNT_HOLD ₹1,000` with a drafted narrowing request (AT-08's expectation for D).
 
-Attribution numbers do not change under any option. Only actions, notices and the trail screen do.
+Attribution numbers do not change. Planned on top (D-17): a "share unknown" fallback when a bank in the chain does
+not use the tool, and a tamper-evident hash chain on referrals.
 
 ## D-02 · DEFAULT · The A→E→A loop for AT-03 lives in its own case
 
@@ -109,3 +114,49 @@ oracle does the same (`tests/test_conservation.py::test_all_cases_together_are_c
 FR-07 asks for a pro rata split between victims (SOP 5(xiii)). LIBR (the default for holds) and PRO_RATA do
 that. FIFO is kept as a tracing rule in its own right, so it splits by arrival order; the report prints the
 rule used. AT-06 is tested under LIBR and PRO_RATA.
+
+## D-16 · DEFAULT · "Ask" runs on a local model, not a hosted AI service
+
+FR-16 (investigator questions in plain English through the Exasol MCP server) is built into the officer console:
+the console's Ask screen sends the question to a local model served by Ollama, which calls the read-only
+`exasol-mcp-server` tools (`execute_exasol_query`, `describe_exasol_tables_and_views`) through the MCP Python SDK.
+No hosted AI service and no paid API are used, so the whole stack runs offline on one laptop at no cost. The screen
+always shows the SQL that ran. Because a small local model writes weaker SQL, every table and column carries a
+COMMENT, and common questions are backed by plain SQL views (for example the repeat-offender view, FR-17) so the
+model only has to select from a view.
+
+## D-17 · PLANNED · Referrals that survive partial adoption and tampering
+
+- **Share unknown.** If an incoming referral carries no victim share (the sending bank does not use the tool), the
+  receiving bank treats the whole amount as possibly the victim's, holds at most that amount (never the whole
+  account) and marks the hop "share unknown".
+- **Hash chain.** Each referral stores a SHA-256 of its own fields plus the previous hop's hash, so a receiving
+  bank, the police or a court can check that the victim's share was passed on unchanged.
+
+## D-18 · DEFAULT · Case steps are parameterised SQL run inside Exasol
+
+Files in `sql/` (numbered) build the database and run once with `make db`. Files in `sql/steps/` are the per-case
+steps (trace, attribute, score, recommend). They take parameters such as `{case_id}` and `{own_bank_id}`, are run
+by `pipeline/steps.py` (later by the API), and do all their work in Exasol; Python only passes parameters.
+
+## D-19 · DEFAULT · When holds are placed
+
+A case's replay and trace stop at `as_of`: by default the complaint's `reported_at` plus `hold_minutes` (3) from
+`config/case_defaults.yaml`. For the demo, 11:10 + 3 minutes = 11:13, the time section 3 gives for holding C.
+
+## D-20 · DEFAULT · One trace row per transaction
+
+`CONNECT BY` returns one row per path, so a transaction reachable along two paths (as in the loop case) appears
+twice. `TRACE_EDGE` keeps one row per transaction: its shortest hop, its first path, and `is_cycle` if any path
+through it revisits an account.
+
+## D-21 · DEFAULT (found on Exasol) · Time rules live in a link table, not in CONNECT BY
+
+Exasol rejects non-equality conditions that mix `PRIOR` and non-`PRIOR` columns inside `CONNECT BY`
+("Feature not supported: Non-equal filter with PRIOR and non PRIOR lookups"), so `t.ts >= PRIOR t.ts` cannot be
+written there. The trace is therefore two statements, both in Exasol:
+1. a set-based join writes `PH.TRACE_LINK` (which transaction can follow which, with the time window, ordering and
+   hold-time rules applied), and
+2. `CONNECT BY NOCYCLE PRIOR child_txn = parent_txn` walks that table with equality links only, bounded by
+   `LEVEL <= max_hops`.
+`TRACE_LINK` is kept per case, so the allowed hops can be inspected when a trail looks wrong.

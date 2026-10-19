@@ -1,0 +1,5 @@
+# Defaults for every case step. Each can be overridden per run (pipeline/steps.py flags, later the API).
+max_hops: 8            # FR-03: follow money at most this many hops from the victim's payment
+window_hours: 72       # FR-03: each hop must happen within this many hours of the previous one
+hold_minutes: 3        # DECISIONS D-19: holds are placed this long after the ticket reaches the bank
+default_rule: LIBR     # requirements s4: LIBR decides holds; PRO_RATA splits between victims

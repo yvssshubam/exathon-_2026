@@ -83,6 +83,17 @@ CREATE OR REPLACE TABLE PH.TRACE_EDGE (
     stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row (traceability, NFR-06)'
 ) COMMENT IS 'Step 1 output: candidate money paths from the complaint''s UTR (CONNECT BY NOCYCLE).';
 
+CREATE OR REPLACE TABLE PH.TRACE_LINK (
+    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case being traced',
+    parent_txn   VARCHAR(40)            COMMENT IS 'Transaction the money arrived by; NULL for the victim''s own payment (the root)',
+    child_txn    VARCHAR(40)   NOT NULL COMMENT IS 'Later transaction out of the same account that may carry that money on',
+    from_account VARCHAR(40)   NOT NULL COMMENT IS 'Sender of child_txn',
+    to_account   VARCHAR(80)   NOT NULL COMMENT IS 'Receiver of child_txn, or an exit pseudo-account',
+    amount_inr   DECIMAL(18,2) NOT NULL COMMENT IS 'Amount of child_txn',
+    ts           TIMESTAMP     NOT NULL COMMENT IS 'Time of child_txn',
+    is_exit      BOOLEAN       NOT NULL COMMENT IS 'TRUE when child_txn leaves the banking system'
+) COMMENT IS 'Step 1a: which transaction can follow which (same account, not earlier, within the hop window, before the hold time). CONNECT BY walks this.';
+
 CREATE OR REPLACE TABLE PH.REFERRAL_OUT (
     case_id     VARCHAR(20)   NOT NULL COMMENT IS 'Case',
     bank_id     VARCHAR(20)   NOT NULL COMMENT IS 'Other bank that received the money',

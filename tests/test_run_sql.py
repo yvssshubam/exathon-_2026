@@ -44,10 +44,10 @@ def test_unterminated_statement_is_an_error():
 
 def test_repo_sql_files_parse_and_are_numbered():
     files = sql_files(ROOT / "sql")
-    assert [p.name for p in files][:2] == ["010_schema.sql", "015_smoke_udf.sql"]
+    assert [p.name for p in files] == ["010_schema.sql", "015_smoke_udf.sql", "050_attribute_udf.sql"]
     schema = split_statements((ROOT / "sql" / "010_schema.sql").read_text())
     tables = [s for s in schema if s.upper().startswith("CREATE OR REPLACE TABLE")]
-    assert len(tables) == 15
+    assert len(tables) == 17
     for stmt in tables:                       # every table carries a COMMENT for the MCP server (s7)
         assert ") COMMENT IS '" in stmt, stmt.splitlines()[0]
     for f in files:

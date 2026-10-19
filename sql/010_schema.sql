@@ -95,15 +95,19 @@ CREATE OR REPLACE TABLE PH.TRACE_LINK (
 ) COMMENT IS 'Step 1a: which transaction can follow which (same account, not earlier, within the hop window, before the hold time). CONNECT BY walks this.';
 
 CREATE OR REPLACE TABLE PH.REFERRAL_OUT (
-    case_id     VARCHAR(20)   NOT NULL COMMENT IS 'Case',
-    bank_id     VARCHAR(20)   NOT NULL COMMENT IS 'Other bank that received the money',
-    account_id  VARCHAR(40)   NOT NULL COMMENT IS 'Account at the other bank',
-    utr         VARCHAR(40)   NOT NULL COMMENT IS 'UTR of the onward transfer',
-    amount_inr  DECIMAL(18,2) NOT NULL COMMENT IS 'Amount transferred',
-    victim_amount_inr DECIMAL(18,2)     COMMENT IS 'How much of it was the victim''s money under the case''s rule',
-    ts          TIMESTAMP     NOT NULL COMMENT IS 'When it moved',
-    created_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP COMMENT IS 'When the simulated CFCFRMS update was written'
-) COMMENT IS 'FR-04: outbound next-hop records, the simulated CFCFRMS trail update.';
+    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    from_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank sending the referral (the bank using the tool)',
+    from_account VARCHAR(40)   NOT NULL COMMENT IS 'Own-bank account the money left from',
+    bank_id      VARCHAR(20)   NOT NULL COMMENT IS 'Other bank that received the money',
+    account_id   VARCHAR(40)   NOT NULL COMMENT IS 'Account at the other bank',
+    txn_id       VARCHAR(40)   NOT NULL COMMENT IS 'Onward transfer',
+    utr          VARCHAR(40)   NOT NULL COMMENT IS 'UTR of the onward transfer',
+    amount_inr   DECIMAL(18,2) NOT NULL COMMENT IS 'Amount transferred',
+    victim_amount_inr DECIMAL(18,2)     COMMENT IS 'How much of it was the victim''s money under trace_rule; NULL = share unknown',
+    trace_rule   VARCHAR(10)   NOT NULL COMMENT IS 'Rule the victim share was computed with',
+    ts           TIMESTAMP     NOT NULL COMMENT IS 'When it moved',
+    stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'FR-04: outbound next-hop records (the simulated CFCFRMS trail update), carrying the victim''s share of each amount.';
 
 CREATE OR REPLACE TABLE PH.ATTRIBUTION (
     case_id           VARCHAR(20)   NOT NULL COMMENT IS 'Case',
@@ -115,10 +119,30 @@ CREATE OR REPLACE TABLE PH.ATTRIBUTION (
     own_funds_inr     DECIMAL(18,2) NOT NULL COMMENT IS 'The holder''s own (clean) money in the account',
     balance_now_inr   DECIMAL(18,2) NOT NULL COMMENT IS 'Total balance as of the hold time',
     as_of             TIMESTAMP     NOT NULL COMMENT IS 'Replay cut-off: the moment holds are placed (DECISIONS D-06)',
-    row_source        VARCHAR(12)   NOT NULL COMMENT IS 'UDF (Exasol) or ORACLE (reference implementation, for testing only)',
+    row_source        VARCHAR(12)   NOT NULL COMMENT IS 'UDF (computed in Exasol by PH.ATTRIBUTE_CASE)',
     session_id        DECIMAL(20,0)          COMMENT IS 'Exasol session that produced this row',
     stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
 ) COMMENT IS 'Step 2 output: the victim''s traceable money per account under each tracing rule.';
+
+CREATE OR REPLACE TABLE PH.ATTRIBUTION_RAW (
+    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    trace_rule   VARCHAR(10)   NOT NULL COMMENT IS 'LIBR, FIFO or PRO_RATA',
+    row_kind     VARCHAR(5)    NOT NULL COMMENT IS 'HOLD (money left in an account), EXIT (left banking), MOVE (carried by a transaction) or SHORT (paid out beyond known balance)',
+    ref_id          VARCHAR(80)   NOT NULL COMMENT IS 'Account, exit or transaction the row is about',
+    component    VARCHAR(40)   NOT NULL COMMENT IS 'clean (the holder''s own money) or a victim tag',
+    paise        DECIMAL(18,0) NOT NULL COMMENT IS 'Amount in paise (integer, exact)',
+    session_id   DECIMAL(20,0)          COMMENT IS 'Exasol session that produced this row',
+    stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Step 2 raw output of the PH.ATTRIBUTE_CASE UDF, kept for inspection; ATTRIBUTION and ATTRIBUTION_FLOW are built from it.';
+
+CREATE OR REPLACE TABLE PH.ATTRIBUTION_FLOW (
+    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    trace_rule   VARCHAR(10)   NOT NULL COMMENT IS 'LIBR, FIFO or PRO_RATA',
+    txn_id       VARCHAR(40)   NOT NULL COMMENT IS 'Transaction',
+    victim_tag   VARCHAR(20)   NOT NULL COMMENT IS 'Victim whose money it carried',
+    victim_inr   DECIMAL(18,2) NOT NULL COMMENT IS 'How much of that victim''s money this transaction carried',
+    stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Step 2: victim money carried by each transaction. Feeds referral shares and the trail labels.';
 
 CREATE OR REPLACE TABLE PH.ACCOUNT_SIGNALS (
     case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case the account was scored for',

@@ -20,8 +20,9 @@ from pipeline.gen_history import generate as generate_history
 
 SNAPSHOT_TS = "2026-10-18 00:00:00.000"   # opening balances are as of the start of the case day
 CASE_FILES = {"demo_case": DEMO_CASE, "extra_cases": EXTRA_CASES, "loop_case": LOOP_CASE}
-TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT", "SCORING_CONFIG", "PROFILE_BAND"]
+TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT", "SCORING_CONFIG", "PROFILE_BAND", "LANE_RULE"]
 SCORING = ROOT / "config" / "scoring.yaml"
+LANES = ROOT / "config" / "lanes.yaml"
 
 
 def ts(value: str | None) -> str | None:
@@ -73,6 +74,10 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tup
                                       sig["mule_sentence"], sig["honest_sentence"]))
     for band, expected in scoring["profile_band_expected_monthly_credit_inr"].items():
         out["PROFILE_BAND"].append((band, str(Decimal(str(expected)))))
+    lanes = yaml.safe_load(LANES.read_text(encoding="utf-8"))["lanes"]
+    for lane, cfg in lanes.items():
+        for d in cfg["deadlines"]:
+            out["LANE_RULE"].append((lane, d["name"], d["anchor"], d["days"], d.get("text"), d.get("sop")))
     out["BANK"] = list(banks.values())
     out["ACCOUNT"] = list(accounts.values())
     own = [r for r in out["BANK"] if r[2] == "TRUE"]

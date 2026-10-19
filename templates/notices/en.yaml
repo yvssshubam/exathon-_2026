@@ -1,0 +1,24 @@
+# Customer notice, English. Fields required by requirements s4 (Rajasthan HC list + RBI draft): UTR, date and
+# time; amount held; whole account or amount only; lane and legal basis; ordering authority and reference;
+# reason in plain words; how to respond and by when; grievance officer and contact. Never the victim's details.
+# $placeholders are filled by pipeline/notices.py.
+title: "NOTICE OF HOLD ON YOUR ACCOUNT"
+dear: "Dear"
+reference_label: "Reference"
+intro: "On $txn_time your account $account_id received $txn_amount (UTR $txn_utr). This payment is linked to a cyber-fraud complaint that has been reported."
+what_label: "What we have done"
+scope_amount: "We have put a hold on $hold_amount only. The rest of your account can be used normally."
+scope_account: "As a last resort, we have put a hold on your whole account."
+why_label: "Why"
+reason_amount: "A payment you received is linked to a reported cyber fraud. Receiving such a payment does not by itself mean you did anything wrong; only this amount is held while the matter is checked."
+reason_account: "The account shows signs of being used to pass on money from frauds: $signals"
+who_label: "Who asked for it"
+authority_A: "$authority (reference $reference). You may contact them about this hold."
+authority_B: "$bank_name on its own, because of unusual activity (draft RBI rules, not yet in force)."
+basis_label: "Legal basis"
+do_label: "What you can do"
+respond_A: "If you think this is wrong, visit your branch with an explanation and any proof, such as a bill for the sale. The bank will send your grievance to the police portal within 7 days of receiving it."
+respond_B: "You can explain within 20 days, by $respond_by. The bank will decide within 10 days of your explanation."
+grievance_label: "Grievance officer"
+closing_amount: "This notice does not accuse you of fraud. Your account stays usable except for the amount held."
+closing_account: "This notice does not accuse you of fraud. You can ask for this hold to be reviewed at any time."

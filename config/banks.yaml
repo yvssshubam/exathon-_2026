@@ -1,0 +1,14 @@
+# Display names and grievance contacts per bank (synthetic; example.com addresses are reserved for examples).
+# The notice must name a grievance officer and contact (requirements s4, RBI draft).
+BANK_X:
+  name: "Bank X"
+  grievance_officer: "Ms. Priya Raman, Nodal Grievance Officer, Bank X"
+  grievance_contact: "grievance@bankx.example.com, 1800-000-0101"
+BANK_Y:
+  name: "Bank Y"
+  grievance_officer: "Mr. Arun Joseph, Nodal Grievance Officer, Bank Y"
+  grievance_contact: "grievance@banky.example.com, 1800-000-0202"
+BANK_Z:
+  name: "Bank Z"
+  grievance_officer: "Ms. Kavitha Subramanian, Nodal Grievance Officer, Bank Z"
+  grievance_contact: "grievance@bankz.example.com, 1800-000-0303"

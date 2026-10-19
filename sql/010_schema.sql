@@ -209,31 +209,46 @@ CREATE OR REPLACE TABLE PH.RECOMMENDATION (
     stmt_id            DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
 ) COMMENT IS 'Step 4 output: what the tool recommends per account. Never a hold by itself; an officer must approve (FR-10).';
 
+CREATE OR REPLACE TABLE PH.LANE_RULE (
+    lane         CHAR(1)       NOT NULL COMMENT IS 'A = police-instructed hold; B = bank''s own suspicion',
+    rule_name    VARCHAR(50)   NOT NULL COMMENT IS 'Deadline name, as in config/lanes.yaml',
+    anchor       VARCHAR(40)   NOT NULL COMMENT IS 'Event that starts the clock (hold_placed, grievance_received, ...) or another deadline (<rule>_due)',
+    days         DECIMAL(4,0)  NOT NULL COMMENT IS 'Calendar days after the anchor (negative = before)',
+    rule_text    VARCHAR(200)           COMMENT IS 'What must happen by then',
+    sop_ref      VARCHAR(20)            COMMENT IS 'MHA SOP paragraph, when Lane A'
+) COMMENT IS 'Legal clocks loaded from config/lanes.yaml, so deadlines are computed inside Exasol (FR-12).';
+
 CREATE OR REPLACE TABLE PH.DECISION (
-    decision_id  DECIMAL(18,0) IDENTITY COMMENT IS 'Decision number; also the hold id for approved holds',
-    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case',
-    account_id   VARCHAR(80)   NOT NULL COMMENT IS 'Account decided on',
-    action_code  VARCHAR(15)   NOT NULL COMMENT IS 'Action approved (or REJECTED)',
-    amount_inr   DECIMAL(18,2)          COMMENT IS 'Amount approved',
-    lane         CHAR(1)       NOT NULL COMMENT IS 'Legal lane of the hold',
-    decided_by   VARCHAR(60)   NOT NULL COMMENT IS 'Officer who decided; never empty (AT-09)',
-    decided_at   TIMESTAMP     NOT NULL COMMENT IS 'When',
-    reason_text  VARCHAR(2000)          COMMENT IS 'Officer''s reason; required for rejections and REVIEW-band approvals',
-    statement_ids VARCHAR(200)          COMMENT IS 'Exasol statement IDs behind the numbers the officer saw'
-) COMMENT IS 'Officer decisions. Append-only. Nothing is held unless it is here.';
+    decision_id     DECIMAL(18,0) IDENTITY COMMENT IS 'Decision number; the hold reference is PH-<decision_id>',
+    case_id         VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank whose officer decided',
+    account_id      VARCHAR(80)   NOT NULL COMMENT IS 'Account decided on',
+    action_code     VARCHAR(15)   NOT NULL COMMENT IS 'AMOUNT_HOLD, ACCOUNT_HOLD, HOLD_MARKER or REFER_OUT approved, or REJECTED',
+    amount_inr      DECIMAL(18,2)          COMMENT IS 'Amount approved (may differ from the recommendation if the officer edited it)',
+    recommended_action VARCHAR(15)         COMMENT IS 'What the tool recommended',
+    recommended_amount DECIMAL(18,2)       COMMENT IS 'Amount the tool recommended',
+    lane            CHAR(1)       NOT NULL COMMENT IS 'Legal lane of the hold',
+    decided_by      VARCHAR(60)   NOT NULL COMMENT IS 'Officer who decided; never empty (AT-09)',
+    decided_at      TIMESTAMP     NOT NULL COMMENT IS 'When the decision took effect (the case''s hold time unless given)',
+    reason_text     VARCHAR(2000)          COMMENT IS 'Officer''s reason; required for rejections, edits, whole-account holds and REVIEW-band approvals',
+    statement_ids   VARCHAR(200)           COMMENT IS 'Exasol statement IDs behind the numbers the officer saw'
+) COMMENT IS 'Officer decisions. Append-only. Nothing is held unless an approval is recorded here (FR-10).';
 
 CREATE OR REPLACE TABLE PH.DEADLINE (
-    decision_id  DECIMAL(18,0) NOT NULL COMMENT IS 'Hold this deadline belongs to (PH.DECISION)',
-    lane         CHAR(1)       NOT NULL COMMENT IS 'Lane whose clock this is',
-    rule_name    VARCHAR(50)   NOT NULL COMMENT IS 'Deadline name from config/lanes.yaml',
-    due_at       TIMESTAMP     NOT NULL COMMENT IS 'When it is due',
-    deadline_status VARCHAR(10) NOT NULL COMMENT IS 'OPEN, DONE or MISSED'
-) COMMENT IS 'Legal clocks per hold (FR-12), from config/lanes.yaml.';
+    decision_id     DECIMAL(18,0) NOT NULL COMMENT IS 'Hold this deadline belongs to (PH.DECISION)',
+    lane            CHAR(1)       NOT NULL COMMENT IS 'Lane whose clock this is',
+    rule_name       VARCHAR(50)   NOT NULL COMMENT IS 'Deadline name from config/lanes.yaml',
+    anchor_at       TIMESTAMP     NOT NULL COMMENT IS 'When the event that started this clock happened',
+    due_at          TIMESTAMP     NOT NULL COMMENT IS 'When it is due',
+    rule_text       VARCHAR(200)           COMMENT IS 'What must happen by then',
+    deadline_status VARCHAR(10)   NOT NULL COMMENT IS 'OPEN, DONE or MISSED',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that computed this deadline'
+) COMMENT IS 'Legal clocks per hold (FR-12), computed from PH.LANE_RULE.';
 
 CREATE OR REPLACE TABLE PH.NOTICE (
     decision_id  DECIMAL(18,0) NOT NULL COMMENT IS 'Hold the notice is about',
     lang         VARCHAR(2)    NOT NULL COMMENT IS 'en, hi or ta',
-    notice_body  VARCHAR(8000) NOT NULL COMMENT IS 'Generated notice text, stored for audit; never contains the victim''s details',
+    notice_body  VARCHAR(8000) NOT NULL COMMENT IS 'Generated notice text, stored for audit; never contains the victim''s details (SOP 9.1(ii))',
     sent_at      TIMESTAMP              COMMENT IS 'When it was (simulated) sent'
 ) COMMENT IS 'Customer notices (FR-11).';
 

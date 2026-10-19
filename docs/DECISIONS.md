@@ -196,3 +196,18 @@ console, the customer notice and the report all word the same numbers the same w
   The victim's own payment (hop 1) is never a referral: the complaint ticket already goes to the bank it reached.
 - The amount held is the amount the trail names for the account, or the attributed amount if the notice names
   none, capped at the balance (SOP 9.1(i)): A ₹500, C ₹80,000, D ₹1,000 with a request to narrow it to ₹500.
+
+## D-25 · DEFAULT · Officer actions, clocks and notices
+
+- `pipeline/officer.py` is the only way to place a hold. It enforces AT-09 (named officer; written reason for a
+  rejection, an edited amount, a whole-account hold or a REVIEW-band approval) and writes `PH.DECISION`
+  append-only, with the Exasol statement IDs behind the numbers the officer saw.
+- Deadlines are computed in Exasol from `PH.LANE_RULE` (loaded from `config/lanes.yaml`): approval starts the
+  `hold_placed` clocks; a grievance starts the `grievance_received` ones; clocks anchored to another deadline
+  (`<rule>_due`) follow automatically.
+- Decision time defaults to the case's hold time (demo: 18 Oct 2026 11:13), so the demo's dates stay fixed.
+- Notices are rendered from `templates/notices/{en,hi,ta}.yaml`. The Hindi and Tamil text was drafted for the demo
+  and should be checked by a native speaker before any real use. The victim's details are never passed to the
+  renderer, so they cannot appear (SOP 9.1(ii)).
+- `PH.COMPLAINT_CHECK` (a view) flags an incomplete notice: no amount, no legal basis (Lane A), no or unknown UTR,
+  or an acknowledgement number that is not 14 digits or does not match its source (FR-02).

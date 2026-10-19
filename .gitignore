@@ -1,0 +1,24 @@
+# Credentials never get committed (NFR-05)
+.env
+secrets.json
+# AMLworld CSVs are downloaded, never committed (requirements s8, s11)
+data/raw/
+*.csv.gz
+data/*.csv
+# Exasol binaries / deployment dirs
+deployment/
+exasol-personal*/
+# Python / Node
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.venv/
+node_modules/
+dist/
+build/
+# Local output
+out/
+*.log
+.DS_Store

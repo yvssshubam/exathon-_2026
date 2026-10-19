@@ -1,0 +1,6 @@
+{
+  "enable_read_query": true,
+  "enable_write_query": false,
+  "default_row_limit": 500,
+  "schemas": { "like_pattern": "PH%" }
+}

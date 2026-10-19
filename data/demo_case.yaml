@@ -1,0 +1,79 @@
+# The section 3 demo case. Invented people and numbers. Synthetic data, MIT.
+# IDs are stable: tests, the video and the deck all depend on them. Do not rename.
+# Amounts are rupees. Times are IST (Asia/Kolkata), stored without zone.
+
+case_id: CASE_DEMO
+complaint:
+  ack_no: "31025101800001"          # 14 digits; starts with 3 because it came via 1930 (requirements s13)
+  source: "1930"
+  victim_account: ACC_LAKSHMI
+  victim_tag: V_LAKSHMI
+  utr: IMPS2026101810020001
+  amount_inr: 200000.00
+  txn_at: "2026-10-18 10:02:00"
+  reported_at: "2026-10-18 11:10:00"
+  beneficiary_account: ACC_A
+  lane: A
+  notice_legal_basis: "S.168 r/w S.94 BNSS"
+  notice_has_amount: true
+  ordering_authority: "Cyber Crime Police Station, Vellore (simulated)"
+  ordering_reference: "VLR/CCPS/2026/1018-01"
+
+# When holds are placed with the tool (D-06). Replay stops here.
+tool_as_of: "2026-10-18 11:13:00"
+
+banks:
+  - {bank_id: BANK_X, name: "Bank X", is_own_bank: true}
+  - {bank_id: BANK_Y, name: "Bank Y", is_own_bank: false}
+  - {bank_id: BANK_Z, name: "Bank Z", is_own_bank: false}
+
+# Opening balance = balance at the start of the case window (10:00 on 18 Oct).
+# history: what pipeline/gen_profiles.py generates BEFORE the window so the scoring signals have 90 days of data.
+accounts:
+  - {account_id: ACC_LAKSHMI, bank_id: BANK_Z, holder: "Lakshmi (victim)", account_type: savings, holder_type: individual,
+     opened_on: "2001-06-14", profile_band: low, opening_balance_inr: null, history: none}
+  - {account_id: ACC_A, bank_id: BANK_X, holder: "A", account_type: savings, holder_type: individual,
+     opened_on: "2026-09-28", profile_band: low, opening_balance_inr: 500.00, history: fast_pass_through}
+  - {account_id: ACC_B, bank_id: BANK_Y, holder: "B", account_type: savings, holder_type: individual,
+     opened_on: "2026-09-20", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
+  - {account_id: ACC_C, bank_id: BANK_X, holder: "C", account_type: savings, holder_type: individual,
+     opened_on: "2026-10-04", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
+  # D-01 OPEN: section 3 says Bank Z; AT-08 and the demo script need Bank X. Change bank_id here once decided.
+  - {account_id: ACC_D, bank_id: BANK_Z, holder: "Murugan (Sri Murugan Fuels)", account_type: current, holder_type: merchant,
+     opened_on: "2023-10-02", profile_band: high, opening_balance_inr: 819000.00, history: merchant_300_per_day}
+
+transactions:
+  # Root: the victim's own payment. Everything downstream is traced from this UTR.
+  - {txn_id: T_DEMO_01, utr: IMPS2026101810020001, ts: "2026-10-18 10:02:00", from: ACC_LAKSHMI, to: ACC_A,
+     amount_inr: 200000.00, channel: IMPS, victim_tag: V_LAKSHMI}
+  - {txn_id: T_DEMO_02, utr: IMPS2026101810060001, ts: "2026-10-18 10:06:00", from: ACC_A, to: ACC_B,
+     amount_inr: 120000.00, channel: IMPS}
+  - {txn_id: T_DEMO_03, utr: IMPS2026101810063001, ts: "2026-10-18 10:06:30", from: ACC_A, to: ACC_C,
+     amount_inr: 80000.00, channel: IMPS}
+  - {txn_id: T_DEMO_04, utr: UPI629181021000001, ts: "2026-10-18 10:21:00", from: ACC_B, to: ACC_D,
+     amount_inr: 1000.00, channel: UPI}
+  - {txn_id: T_DEMO_05, utr: ATM2026101810400001, ts: "2026-10-18 10:40:00", from: ACC_B, to: "EXIT:ATM:BY-ATM-0042",
+     amount_inr: 50000.00, channel: ATM, exit_identifier: "ATM BY-ATM-0042, Katpadi"}
+  - {txn_id: T_DEMO_06, utr: ATM2026101812300001, ts: "2026-10-18 12:30:00", from: ACC_C, to: "EXIT:ATM:BX-ATM-0117",
+     amount_inr: 80000.00, channel: ATM, exit_identifier: "ATM BX-ATM-0117, Gandhi Nagar"}
+
+# Hand-checked answers (requirements section 9, LIBR, as_of = tool_as_of). tests/test_oracle_demo.py asserts these.
+expected_libr:
+  ACC_A: 500.00
+  ACC_B: 69000.00
+  ACC_C: 80000.00
+  ACC_D: 500.00
+  "EXIT:ATM:BY-ATM-0042": 50000.00
+  total: 200000.00
+
+# Section 3 comparison table. tests/test_oracle_demo.py checks the "with tool" side; the baseline simulator checks the other.
+expected_compare:
+  victim_money_held: {baseline: 69500.00, tool: 149500.00}
+  honest_money_locked: {baseline: 819000.00, tool: 0.00}
+
+# Baseline simulator settings (FR-14): one ticket per hop, processed after a delay.
+baseline:
+  first_ticket_at: "2026-10-18 11:10:00"
+  first_hop_delay_minutes: 55     # ticket for A actioned 12:05
+  per_hop_delay_minutes: 60       # next hop (C) actioned 13:05, after its 12:30 cash-out
+  freezes_whole_account_named_in_notice: true

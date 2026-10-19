@@ -1,0 +1,5 @@
+# Store every text file with LF line endings, whatever OS it was edited on.
+# Make, shell scripts and the CI runner (Linux) break on Windows CRLF endings.
+* text=auto eol=lf
+*.png binary
+*.pdf binary

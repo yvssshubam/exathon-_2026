@@ -1,0 +1,41 @@
+# AT-03 loop fixture (DECISIONS D-02, D-08). Kept apart from the demo case so the section 9 numbers stay exact.
+# Money goes A -> E -> back to A, then part of it leaves by ATM. The trace must return the loop with
+# is_cycle = 1 and must not hang.
+case_id: CASE_LOOP
+complaint:
+  ack_no: "21025101800099"
+  source: NCRP
+  victim_account: ACC_LOOP_V
+  victim_tag: V_LOOP
+  utr: IMPS2026101814000099
+  amount_inr: 50000.00
+  txn_at: "2026-10-18 14:00:00"
+  reported_at: "2026-10-18 15:00:00"
+  beneficiary_account: ACC_LOOP_A
+  lane: A
+  notice_legal_basis: "S.168 r/w S.94 BNSS"
+  notice_has_amount: true
+banks:
+  - {bank_id: BANK_X, name: "Bank X", is_own_bank: true}
+  - {bank_id: BANK_Z, name: "Bank Z", is_own_bank: false}
+accounts:
+  - {account_id: ACC_LOOP_V, bank_id: BANK_Z, holder: "Loop victim", account_type: savings, holder_type: individual,
+     opened_on: "2015-01-01", profile_band: low, opening_balance_inr: null, history: none}
+  - {account_id: ACC_LOOP_A, bank_id: BANK_X, holder: "Loop A", account_type: savings, holder_type: individual,
+     opened_on: "2026-10-01", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
+  - {account_id: ACC_LOOP_E, bank_id: BANK_X, holder: "Loop E", account_type: savings, holder_type: individual,
+     opened_on: "2026-10-02", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
+transactions:
+  - {txn_id: T_LOOP_01, utr: IMPS2026101814000099, ts: "2026-10-18 14:00:00", from: ACC_LOOP_V, to: ACC_LOOP_A,
+     amount_inr: 50000.00, channel: IMPS, victim_tag: V_LOOP}
+  - {txn_id: T_LOOP_02, utr: IMPS2026101814050099, ts: "2026-10-18 14:05:00", from: ACC_LOOP_A, to: ACC_LOOP_E,
+     amount_inr: 30000.00, channel: IMPS}
+  - {txn_id: T_LOOP_03, utr: IMPS2026101814100099, ts: "2026-10-18 14:10:00", from: ACC_LOOP_E, to: ACC_LOOP_A,
+     amount_inr: 30000.00, channel: IMPS}
+  - {txn_id: T_LOOP_04, utr: ATM2026101814200099, ts: "2026-10-18 14:20:00", from: ACC_LOOP_A, to: "EXIT:ATM:BX-ATM-0200",
+     amount_inr: 20000.00, channel: ATM, exit_identifier: "ATM BX-ATM-0200"}
+expected_libr:
+  ACC_LOOP_A: 30000.00
+  ACC_LOOP_E: 0.00
+  "EXIT:ATM:BX-ATM-0200": 20000.00
+  total: 50000.00

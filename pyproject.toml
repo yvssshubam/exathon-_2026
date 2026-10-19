@@ -1,0 +1,20 @@
+[project]
+name = "proportionate-holds"
+version = "0.1.0"
+description = "Hold exactly the cyber-fraud victim's money in each account, with written reasons, and leave honest money alone."
+license = "MIT"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not db'"
+markers = ["db: needs a running Exasol Personal ; run with -m db"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+# Whitespace-only rules are skipped: files edited on Windows or saved from a browser often differ only there.
+ignore = ["W291", "W292", "W293", "W391"]

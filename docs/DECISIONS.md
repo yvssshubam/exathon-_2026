@@ -184,3 +184,15 @@ daily; mules forward within minutes either way.
 `pipeline/gen_history.py` (seed 42) generates 90 days of history for the case accounts in memory when the cases are
 loaded: about 300 small payments a day for merchants such as Murugan, a few large fast-forwarded credits for mules.
 It ends before 18 Oct 2026 00:00, when the opening balances are taken, so the case-day numbers are unchanged.
+
+## D-24 · DEFAULT · Recommendations are structured columns; the wording is generated from them
+
+`PH.RECOMMENDATION` stores the action, amounts, band, lane, legal basis, a `reason_code` naming which rule of
+requirements s9 step 4 fired, and flags for the drafted requests (narrowing, seizure), last resort and a required
+officer comment, instead of a free-form `reasons_json`. `pipeline/explain.py` turns a row into plain sentences, so the
+console, the customer notice and the report all word the same numbers the same way. Two further choices:
+- An account at another bank gets `REFER_OUT` only when the viewing bank's own account paid it; accounts further
+  down the trail get `NONE` ("the bank that paid it refers it"), matching how CFCFRMS passes the trail bank to bank.
+  The victim's own payment (hop 1) is never a referral: the complaint ticket already goes to the bank it reached.
+- The amount held is the amount the trail names for the account, or the attributed amount if the notice names
+  none, capped at the balance (SOP 9.1(i)): A ₹500, C ₹80,000, D ₹1,000 with a request to narrow it to ₹500.

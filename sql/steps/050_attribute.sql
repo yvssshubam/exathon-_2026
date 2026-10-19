@@ -10,6 +10,7 @@
 --   3. Builds PH.ATTRIBUTION (per account and rule: this victim, other victims, own money, balance)
 --      and PH.ATTRIBUTION_FLOW (victim money carried by each transaction).
 --   4. Writes PH.REFERRAL_OUT: money that left the viewing bank for another bank, with the victim's share (FR-04).
+--      The victim's own payment (hop 1) is not a referral: the complaint ticket already goes to that bank.
 
 DELETE FROM PH.ATTRIBUTION_RAW WHERE case_id = {case_id};
 
@@ -97,5 +98,6 @@ JOIN PH.ACCOUNT ta ON ta.account_id = e.to_account
 LEFT JOIN PH.ATTRIBUTION_FLOW f
        ON f.case_id = e.case_id AND f.txn_id = e.txn_id AND f.trace_rule = {rule} AND f.victim_tag = {victim_tag}
 WHERE e.case_id = {case_id}
+  AND e.hop > 1                 -- hop 1 is the victim's own payment: the complaint ticket already names that account
   AND fa.bank_id = {own_bank_id}
   AND ta.bank_id <> {own_bank_id};

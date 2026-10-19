@@ -5,7 +5,9 @@
     python -m pipeline.steps trace CASE_LOOP --as-of "2026-10-18 23:59:59"
     python -m pipeline.steps attribute CASE_DEMO             # needs the trace first
     python -m pipeline.steps score CASE_DEMO                 # needs trace + attribute first
-    python -m pipeline.steps run CASE_DEMO                   # trace + attribute + score
+    python -m pipeline.steps recommend CASE_DEMO             # needs trace + attribute + score first
+    python -m pipeline.steps run CASE_DEMO                   # all four steps
+    python -m pipeline.steps run CASE_DEMO --bank BANK_Z     # Murugan's bank: D gets "hold Rs 1,000 only"
 
 Each run prints what it wrote, so a wrong number can be traced to the step and the statement that made it.
 """
@@ -25,6 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 STEPS = ROOT / "sql" / "steps"
 DEFAULTS = yaml.safe_load((ROOT / "config" / "case_defaults.yaml").read_text(encoding="utf-8"))
 SCORING = yaml.safe_load((ROOT / "config" / "scoring.yaml").read_text(encoding="utf-8"))
+LANES = yaml.safe_load((ROOT / "config" / "lanes.yaml").read_text(encoding="utf-8"))["lanes"]
+REC_COLUMNS = ("account_id", "bank_id", "hop", "action_code", "amount_inr", "notice_amount_inr", "victim_amount_inr",
+               "other_victims_inr", "balance_now_inr", "band", "score", "lane", "trace_rule", "legal_basis",
+               "reason_code", "draft_narrowing", "draft_seizure", "last_resort", "needs_comment", "stmt_id")
 FMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -115,7 +121,7 @@ def attribute(conn, case_id: str, bank: str, as_of: str | None = None, rule: str
     return {**params, "seconds": elapsed}
 
 
-def print_attribution(conn, case_id: str) -> None:
+def print_attribution(conn, case_id: str, bank: str) -> None:
     rows = conn.execute(
         "SELECT account_id, trace_rule, victim_amount_inr, other_victims_inr, own_funds_inr, stmt_id "
         "FROM PH.ATTRIBUTION WHERE case_id = {c}", {"c": case_id}).fetchall()
@@ -137,9 +143,10 @@ def print_attribution(conn, case_id: str) -> None:
         print(f"(statement {rows[0][5]})")
     refs = conn.execute(
         "SELECT from_bank_id, from_account, bank_id, account_id, amount_inr, victim_amount_inr, trace_rule "
-        "FROM PH.REFERRAL_OUT WHERE case_id = {c} ORDER BY ts", {"c": case_id}).fetchall()
+        "FROM PH.REFERRAL_OUT WHERE case_id = {c} AND from_bank_id = {b} ORDER BY ts",
+        {"c": case_id, "b": bank}).fetchall()
     if refs:
-        print("\nreferrals to other banks (simulated CFCFRMS update):")
+        print(f"\nreferrals from {bank} to other banks (simulated CFCFRMS update):")
         for fb, fa, bank, acc, amount, victim, rule in refs:
             print(f"  {fb} {fa} -> {bank} {acc}: Rs {float(amount):,.2f} sent, "
                   f"Rs {float(victim):,.2f} of it the victim's ({rule})")
@@ -178,6 +185,44 @@ def print_score(conn, case_id: str) -> None:
             print(f"    - {sentence}")
 
 
+def recommend(conn, case_id: str, bank: str, rule: str | None = None) -> dict:
+    """Step 4. Uses trace, attribution (incl. referrals for this bank) and scores."""
+    params = {
+        "case_id": case_id,
+        "own_bank_id": bank,
+        "rule": rule or DEFAULTS["default_rule"],
+        "lane_a_basis": LANES["A"]["legal_basis"] + " (MHA SOP for NCRP-CFCFRMS)",
+        "lane_b_basis": LANES["B"]["legal_basis"],
+    }
+    started = time.perf_counter()
+    run_step(conn, "070_recommend.sql", params)
+    elapsed = time.perf_counter() - started
+    from pipeline.db import audit
+
+    audit(conn, "recommend", case_id, f"bank={bank} rule={params['rule']}")
+    return {**params, "seconds": elapsed}
+
+
+def recommendations(conn, case_id: str, bank: str) -> list[dict]:
+    rows = conn.execute(
+        f"SELECT {', '.join(REC_COLUMNS)} FROM PH.RECOMMENDATION "
+        "WHERE case_id = {c} AND viewing_bank_id = {b} ORDER BY hop, account_id",
+        {"c": case_id, "b": bank}).fetchall()
+    return [dict(zip(REC_COLUMNS, r, strict=True)) for r in rows]
+
+
+def print_recommendations(conn, case_id: str, bank: str) -> None:
+    from pipeline.explain import explain, headline
+
+    for rec in recommendations(conn, case_id, bank):
+        band = f"{rec['band']} {float(rec['score']):.2f}" if rec["band"] else "-"
+        print(f"{rec['account_id']:24} {headline(rec):34} [{band}]  (statement {rec['stmt_id']})")
+        for line in explain(rec):
+            print(f"    - {line}")
+        if rec["legal_basis"]:
+            print(f"    basis: {rec['legal_basis']}")
+
+
 def print_trace(conn, case_id: str) -> None:
     rows = conn.execute(
         "SELECT hop, from_account, to_account, amount_inr, ts, is_own_bank, is_exit, is_cycle, stmt_id "
@@ -194,7 +239,7 @@ def print_trace(conn, case_id: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["trace", "attribute", "score", "run"])
+    ap.add_argument("step", choices=["trace", "attribute", "score", "recommend", "run"])
     ap.add_argument("case_id")
     ap.add_argument("--bank", help="bank using the tool (default: OWN_BANK_ID in .env)")
     ap.add_argument("--as-of", help='replay cut-off, "YYYY-MM-DD HH:MM:SS" (default: reported_at + hold_minutes)')
@@ -216,11 +261,16 @@ def main(argv: list[str] | None = None) -> int:
         info = attribute(conn, args.case_id, bank, args.as_of, args.rule)
         print(f"\nattribute {args.case_id}  victim {info['victim_tag']}  as_of {info['as_of']}  "
               f"replay from {info['replay_from']}  took {info['seconds']:.2f}s\n")
-        print_attribution(conn, args.case_id)
+        print_attribution(conn, args.case_id, bank)
     if args.step in ("score", "run"):
         info = score(conn, args.case_id, args.as_of)
         print(f"\nscore {args.case_id}  as_of {info['as_of']}  took {info['seconds']:.2f}s\n")
         print_score(conn, args.case_id)
+    if args.step in ("recommend", "run"):
+        info = recommend(conn, args.case_id, bank, args.rule)
+        print(f"\nrecommend {args.case_id}  viewed as {bank}  rule {info['rule']}  took {info['seconds']:.2f}s"
+              "\n(nothing is held until an officer approves)\n")
+        print_recommendations(conn, args.case_id, bank)
     conn.close()
     return 0
 

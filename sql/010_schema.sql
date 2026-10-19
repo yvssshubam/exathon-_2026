@@ -185,15 +185,29 @@ CREATE OR REPLACE TABLE PH.ACCOUNT_SCORE (
 ) COMMENT IS 'Step 3 output: score and band per account (FR-08).';
 
 CREATE OR REPLACE TABLE PH.RECOMMENDATION (
-    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case',
-    account_id   VARCHAR(80)   NOT NULL COMMENT IS 'Account or exit',
-    action_code  VARCHAR(15)   NOT NULL COMMENT IS 'AMOUNT_HOLD, ACCOUNT_HOLD, REFER_OUT, HOLD_MARKER or NONE',
-    amount_inr   DECIMAL(18,2)          COMMENT IS 'Amount to hold, when the action is an amount hold',
-    score        DOUBLE                 COMMENT IS 'Mule score 0..1',
-    band         VARCHAR(6)             COMMENT IS 'MULE, REVIEW or HONEST',
-    reasons_json VARCHAR(4000)          COMMENT IS 'Rule used, attributed amount, band, top signals, legal basis, drafted requests',
-    stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
-) COMMENT IS 'Step 4 output: what the tool recommends. Never a hold by itself; an officer must approve (FR-10).';
+    case_id            VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    viewing_bank_id    VARCHAR(20)   NOT NULL COMMENT IS 'Bank using the tool; it acts only on its own accounts (DECISIONS D-01)',
+    account_id         VARCHAR(80)   NOT NULL COMMENT IS 'Account or exit the money reached',
+    bank_id            VARCHAR(20)            COMMENT IS 'Bank holding the account (NULL for exits)',
+    hop                DECIMAL(3,0)  NOT NULL COMMENT IS 'Hops from the victim''s payment (1 = first-layer account)',
+    action_code        VARCHAR(15)   NOT NULL COMMENT IS 'AMOUNT_HOLD, ACCOUNT_HOLD, REFER_OUT, HOLD_MARKER or NONE',
+    amount_inr         DECIMAL(18,2)          COMMENT IS 'Amount to hold, or the victim share to refer',
+    notice_amount_inr  DECIMAL(18,2)          COMMENT IS 'Amount the trail names for this account (traced inflows; DECISIONS D-07)',
+    victim_amount_inr  DECIMAL(18,2)          COMMENT IS 'This victim''s money in the account under trace_rule',
+    other_victims_inr  DECIMAL(18,2)          COMMENT IS 'Other victims'' money in the account',
+    balance_now_inr    DECIMAL(18,2)          COMMENT IS 'Balance at the hold time',
+    band               VARCHAR(6)             COMMENT IS 'MULE, REVIEW or HONEST (NULL for exits)',
+    score              DOUBLE                 COMMENT IS 'Mule score 0..1',
+    lane               CHAR(1)       NOT NULL COMMENT IS 'A = police-instructed (MHA SOP, in force); B = bank''s own suspicion (RBI draft)',
+    trace_rule         VARCHAR(10)   NOT NULL COMMENT IS 'Tracing rule the victim amount uses',
+    legal_basis        VARCHAR(200)           COMMENT IS 'Legal basis of the recommended action',
+    reason_code        VARCHAR(30)   NOT NULL COMMENT IS 'Which rule of requirements s9 step 4 produced the action',
+    draft_narrowing    BOOLEAN       NOT NULL COMMENT IS 'TRUE: draft a request to the police to narrow the hold to the traceable amount',
+    draft_seizure      BOOLEAN       NOT NULL COMMENT IS 'TRUE: draft a request to the police for an S.106 BNSS seizure (Lane A, mule)',
+    last_resort        BOOLEAN       NOT NULL COMMENT IS 'TRUE: whole-account hold, flagged last resort (Lane B, mule)',
+    needs_comment      BOOLEAN       NOT NULL COMMENT IS 'TRUE: the officer must write a comment before approving (REVIEW band)',
+    stmt_id            DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Step 4 output: what the tool recommends per account. Never a hold by itself; an officer must approve (FR-10).';
 
 CREATE OR REPLACE TABLE PH.DECISION (
     decision_id  DECIMAL(18,0) IDENTITY COMMENT IS 'Decision number; also the hold id for approved holds',

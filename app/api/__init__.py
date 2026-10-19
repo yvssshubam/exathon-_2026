@@ -1,0 +1,1 @@
+"""FastAPI service over the Exasol pipeline. Run with: python -m app.api"""

@@ -211,3 +211,11 @@ console, the customer notice and the report all word the same numbers the same w
   renderer, so they cannot appear (SOP 9.1(ii)).
 - `PH.COMPLAINT_CHECK` (a view) flags an incomplete notice: no amount, no legal basis (Lane A), no or unknown UTR,
   or an acknowledgement number that is not 14 digits or does not match its source (FR-02).
+
+## D-26 · DEFAULT · The API is a thin router
+
+`app/api/main.py` (FastAPI) opens one Exasol session per request, calls `pipeline/steps.py` (which runs the SQL in
+Exasol) and `pipeline/officer.py` (which enforces the approval rules), and shapes JSON for the console. It holds no
+business rules of its own and has no route that places a hold without an officer's approval. Officer identity is a
+name in the request: login and permissions are production security, out of scope (requirements s1). The victim's
+account is never returned by the case or account endpoints, only by the victim's own status view.

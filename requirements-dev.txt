@@ -2,3 +2,5 @@
 pytest>=8.0
 hypothesis>=6.100
 ruff>=0.6
+httpx>=0.27     # API test client on older Starlette
+httpx2>=2.14    # API test client on Starlette 1.9+ (avoids its httpx deprecation warning)

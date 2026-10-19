@@ -9,6 +9,8 @@ requires-python = ">=3.11"
 testpaths = ["tests"]
 addopts = "-m 'not db'"
 markers = ["db: needs a running Exasol Personal ; run with -m db"]
+# Raised inside Starlette's TestClient with newer anyio releases; not our code, and harmless.
+filterwarnings = ["ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning"]
 
 [tool.ruff]
 line-length = 120
@@ -18,3 +20,7 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "B", "UP"]
 # Whitespace-only rules are skipped: files edited on Windows or saved from a browser often differ only there.
 ignore = ["W291", "W292", "W293", "W391"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency markers are meant to be used as argument defaults.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]

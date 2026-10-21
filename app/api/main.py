@@ -27,7 +27,6 @@ ROOT = Path(__file__).resolve().parents[2]
 BANKS = yaml.safe_load((ROOT / "config" / "banks.yaml").read_text(encoding="utf-8"))
 RULES = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
 SCORING = yaml.safe_load((ROOT / "config" / "scoring.yaml").read_text(encoding="utf-8"))
-DESK_OPENS, DESK_CLOSES = 10, 18          # hours; a ticket outside them is one today's desk would not see
 
 app = FastAPI(title="Proportionate Holds API", version="0.2.0",
               description="A golden-hour copilot for the bank nodal officer: the agent works every ticket the moment "
@@ -106,10 +105,9 @@ def bank_name(bank_id: str | None) -> str | None:
 
 
 def after_hours(ts: str | None) -> bool:
-    if not ts:
-        return False
-    hour = int(str(ts)[11:13])
-    return hour < DESK_OPENS or hour >= DESK_CLOSES
+    from pipeline.today import after_hours as outside_desk_hours
+
+    return outside_desk_hours(ts)
 
 
 def present(action: dict, names: dict | None = None) -> dict:
@@ -162,7 +160,7 @@ def config():
         "legal_basis": RULES["legal_basis"],
         "lane": RULES["lane_a"],
         "model": {"enabled": llm["enabled"], "name": llm["model"] if llm["enabled"] else None},
-        "desk_hours": [DESK_OPENS, DESK_CLOSES],
+        "desk_hours": [10, 18],
     }
 
 
@@ -232,6 +230,8 @@ def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
                   AND p.entry_kind = 'EXIT') AS exits,
                (SELECT COUNT(*) FROM PH.PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.viewing_bank_id = {b}
                   AND p.entry_kind = 'ONWARD') AS onward,
+               (SELECT COUNT(*) FROM PH.PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.viewing_bank_id = {b}
+                  AND p.entry_kind = 'KYC') AS kyc,
                (SELECT COUNT(*) FROM PH.CASE_ACTION a WHERE a.case_id = t.case_id AND a.viewing_bank_id = {b}
                   AND a.act_mode = 'OFFICER' AND a.action_status IN ('PROPOSED', 'WAITING')) AS waiting
         FROM PH.TICKET t
@@ -242,12 +242,21 @@ def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     for d in done:
         d["after_hours"] = after_hours(d["received_at"])
     waiting = [present(a, names) for a in rows(conn, """
-        SELECT case_id, account_id, bank_id, hop, action_code, act_mode, amount_inr, current_hold_inr,
-               victim_amount_inr, other_victims_inr, balance_now_inr, trail_amount_inr, band, score, reason_code,
-               legal_basis, action_status, stmt_id
-        FROM PH.CASE_ACTION
-        WHERE viewing_bank_id = {b} AND act_mode = 'OFFICER' AND action_status IN ('PROPOSED', 'WAITING')
-        ORDER BY case_id, hop, account_id, action_code""", {"b": bank})]
+        SELECT a.case_id, a.account_id, a.bank_id, a.hop, a.action_code, a.act_mode, a.amount_inr, a.current_hold_inr,
+               a.victim_amount_inr, a.other_victims_inr, a.balance_now_inr, a.trail_amount_inr, a.band, a.score,
+               a.reason_code, a.legal_basis, a.action_status, a.stmt_id,
+               acc.opened_on, acc.account_type, acc.holder_type, ca.pass_through, ca.cash_exits, ca.complaint_links,
+               t.received_at, h.placed_at AS held_since
+        FROM PH.CASE_ACTION a
+        JOIN PH.TICKET t ON t.case_id = a.case_id
+        LEFT JOIN PH.ACCOUNT acc ON acc.account_id = a.account_id
+        LEFT JOIN PH.CASE_ACCOUNT ca ON ca.case_id = a.case_id AND ca.viewing_bank_id = a.viewing_bank_id
+                                    AND ca.account_id = a.account_id
+        LEFT JOIN (SELECT case_id, account_id, MIN(placed_at) AS placed_at FROM PH.HOLD_LEDGER
+                   WHERE placed_by = 'agent' GROUP BY case_id, account_id) h
+               ON h.case_id = a.case_id AND h.account_id = a.account_id
+        WHERE a.viewing_bank_id = {b} AND a.act_mode = 'OFFICER' AND a.action_status IN ('PROPOSED', 'WAITING')
+        ORDER BY a.case_id, a.hop, a.account_id, a.action_code""", {"b": bank})]
     kyc = rows(conn, "SELECT entry_id, case_id, account_id FROM PH.PORTAL_ENTRY WHERE viewing_bank_id = {b} "
                      "AND entry_kind = 'KYC' AND entry_status = 'DRAFT' ORDER BY case_id, account_id", {"b": bank})
     for k in kyc:
@@ -275,6 +284,7 @@ def case_detail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn
     c["paid_inr"] = number(conn.execute("SELECT SUM(t.amount_inr) FROM PH.TXN t JOIN PH.COMPLAINT c "
                                         "ON c.utr = t.utr WHERE c.case_id = {c}", {"c": case_id}).fetchval(), 2)
     c["after_hours"] = after_hours((c["ticket"] or {}).get("received_at"))
+    c["paid_channel"] = conn.execute("SELECT MIN(channel) FROM PH.TXN WHERE utr = {u}", {"u": c["utr"]}).fetchval()
     return c
 
 
@@ -370,9 +380,23 @@ def account_panel(case_id: str, account_id: str, bank: str = Query("BANK_X"), co
                            "decided_by, decided_at, reason_text, statement_ids FROM PH.DECISION WHERE case_id = {c} "
                            "AND account_id = {a} AND viewing_bank_id = {b} ORDER BY decision_id",
                      {"c": case_id, "a": account_id, "b": bank})
+    flows = rows(conn, """
+        SELECT e.from_account, e.to_account, e.amount_inr, e.ts, e.is_exit, t.exit_identifier,
+               COALESCE(f.victim_inr, 0) AS victim_inr
+        FROM PH.TRACE_EDGE e JOIN PH.TXN t ON t.txn_id = e.txn_id
+        JOIN PH.COMPLAINT c ON c.case_id = e.case_id
+        LEFT JOIN PH.ATTRIBUTION_FLOW f ON f.case_id = e.case_id AND f.txn_id = e.txn_id AND f.trace_rule = 'LIBR'
+                                       AND f.victim_tag = c.victim_tag
+        WHERE e.case_id = {c} AND (e.to_account = {a} OR e.from_account = {a}) ORDER BY e.ts""",
+                 {"c": case_id, "a": account_id})
+    for f in flows:
+        f["from_name"] = names.get(f["from_account"], f["from_account"])
+        f["to_name"] = f["exit_identifier"] if f["is_exit"] else names.get(f["to_account"], f["to_account"])
     return {"case_id": case_id, "account_id": account_id, "bank": bank, "account": account, "split": split,
             "facts": facts, "evidence": score, "reasons": reasons, "signals": signals, "actions": acts,
-            "holds": holds, "decisions": decisions}
+            "holds": holds, "decisions": decisions,
+            "inflows": [f for f in flows if f["to_account"] == account_id],
+            "outflows": [f for f in flows if f["from_account"] == account_id]}
 
 
 @app.get("/api/cases/{case_id}/log")
@@ -461,6 +485,18 @@ def send_kyc(case_id: str, entry_id: int, body: Send, bank: str = Query("BANK_X"
     except officer.DecisionError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"decision_id": decision_id}
+
+
+@app.get("/api/day")
+def day(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """Today's desk vs the agent, summed over every ticket the agent has worked (the Review band)."""
+    from pipeline.today import day_summary
+
+    check_bank(bank)
+    try:
+        return day_summary(conn, bank)
+    except steps.StepFailed as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/holds")

@@ -86,9 +86,13 @@ python -m app.api                                     # API on http://127.0.0.1:
 cd app/web && npm install && npm run dev              # console on http://localhost:5173
 ```
 
-In the console: **Morning review** → *Work the queued tickets* replays the night; open `CASE_DEMO` to see the money
-trail, the agent log (every tool call with its Exasol statement IDs) and the paperwork; decide the waiting proposals;
-**Compare** shows today's desk and the agent on the same night. *Reset the demo* puts every ticket back in the queue.
+In the console, **Review** opens with what the agent already did and a band of before/after figures for the day.
+*Replay the day* (demo controls, bottom of the page) lets the agent work every queued ticket. The decisions are
+grouped by account: honest customers whose hold can be cut to the victim's share, and mule accounts that could be
+frozen whole (one approval covers every ticket that names the account). Open a ticket to see where the money went,
+hop by hop, with the account's evidence and your buttons on the right; the agent's log (every tool call with its
+Exasol statement IDs) and the paperwork are below. **Before / after** replays today's manual process on the same
+ticket, or the whole day. *Reset* puts every ticket back in the queue.
 
 From a terminal instead:
 

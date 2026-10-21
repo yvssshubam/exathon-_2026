@@ -189,6 +189,54 @@ def compare(conn, case_id: str, bank: str) -> dict:
     }
 
 
+DESK_HOURS = (10, 18)
+
+
+def after_hours(ts: str | None) -> bool:
+    if not ts:
+        return False
+    hour = int(str(ts)[11:13])
+    return hour < DESK_HOURS[0] or hour >= DESK_HOURS[1]
+
+
+def day_summary(conn, bank: str) -> dict:
+    """Today's desk vs the agent over every ticket the agent has worked (the Review band and the Whole day tab).
+    An account frozen whole in several tickets' replays counts once, at its largest."""
+    worked = [c for (c,) in conn.execute(
+        "SELECT t.case_id FROM PH.TICKET t JOIN PH.AGENT_RUN r ON r.run_id = t.run_id "
+        "WHERE r.run_status = 'DONE' ORDER BY t.received_at, t.case_id").fetchall()]
+    tickets, frozen_today = [], {}
+    for case_id in worked:
+        c = compare(conn, case_id, bank)
+        for a in c["today"]["accounts"]:
+            if a["action"] == "WHOLE_FREEZE" and a["honest_locked_inr"] > 0:
+                frozen_today[a["account_id"]] = max(frozen_today.get(a["account_id"], 0), a["honest_locked_inr"])
+        tickets.append({
+            "case_id": case_id, "received_at": c["received_at"], "after_hours": after_hours(c["received_at"]),
+            "victim_paid_inr": c["victim_paid_inr"],
+            "today_victim_held_inr": c["today"]["victim_held_inr"],
+            "tool_victim_held_inr": c["tool"]["victim_held_inr"],
+            "today_honest_locked_inr": c["today"]["honest_locked_inr"],
+            "tool_honest_locked_overnight_inr": c["tool"]["honest_locked_overnight_inr"],
+            "tool_honest_locked_now_inr": c["tool"]["honest_locked_now_inr"],
+            "today_minutes": c["today"]["minutes_to_first_hold"], "tool_minutes": c["tool"]["minutes_to_first_hold"]})
+    s = lambda key: round(sum(t[key] or 0 for t in tickets), 2)  # noqa: E731
+    night = [t for t in tickets if t["after_hours"]]
+    return {
+        "tickets": tickets, "worked": len(tickets), "night": len(night),
+        "victim_paid_inr": s("victim_paid_inr"),
+        "today": {"victim_held_inr": s("today_victim_held_inr"),
+                  "honest_locked_inr": round(sum(frozen_today.values()), 2),
+                  "accounts_frozen_whole": len(frozen_today),
+                  "night_minutes": [t["today_minutes"] for t in night if t["today_minutes"] is not None]},
+        "tool": {"victim_held_inr": s("tool_victim_held_inr"),
+                 "honest_locked_overnight_inr": s("tool_honest_locked_overnight_inr"),
+                 "honest_locked_now_inr": s("tool_honest_locked_now_inr"),
+                 "max_minutes": max((t["tool_minutes"] or 0 for t in tickets), default=None),
+                 "night_minutes": [t["tool_minutes"] for t in night if t["tool_minutes"] is not None]},
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import json

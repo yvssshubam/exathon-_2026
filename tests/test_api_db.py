@@ -37,6 +37,7 @@ def test_the_morning_after_the_2_13_ticket():
     panel = client.get("/api/cases/CASE_DEMO/accounts/ACC_D").json()
     assert panel["split"]["victim_amount_inr"] == 500.0 and len(panel["reasons"]) == 3
     assert [h["amount_inr"] for h in panel["holds"]] == [1000.0]
+    assert [(f["from_name"], f["amount_inr"], f["victim_inr"]) for f in panel["inflows"]] == [("C", 1000.0, 500.0)]
 
     refused = client.post("/api/cases/CASE_DEMO/accounts/ACC_C/approve",
                           json={"action_code": "PROPOSE_FULL_FREEZE", "officer": "priya"})
@@ -44,6 +45,11 @@ def test_the_morning_after_the_2_13_ticket():
     ok = client.post("/api/cases/CASE_DEMO/accounts/ACC_D/approve",
                      json={"action_code": "PROPOSE_NARROW", "officer": "priya"})
     assert ok.status_code == 200
+
+    day = client.get("/api/day").json()
+    assert day["worked"] == 1 and day["night"] == 1
+    assert day["today"]["honest_locked_inr"] == 819500.0 and day["today"]["accounts_frozen_whole"] == 1
+    assert day["tool"]["victim_held_inr"] == 80000.0
 
     cmp = client.get("/api/cases/CASE_DEMO/compare", params={"refresh": True}).json()
     assert cmp["today"]["honest_locked_inr"] == 819500.0 and cmp["tool"]["honest_locked_now_inr"] == 0.0

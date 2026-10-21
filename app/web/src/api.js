@@ -11,7 +11,7 @@ async function call(method, path, body) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data);
-    throw new Error(detail || `The API answered ${res.status}`);
+    throw Object.assign(new Error(detail || `The API answered ${res.status}`), { status: res.status });
   }
   return data;
 }
@@ -32,6 +32,7 @@ export const api = {
   approve: (caseId, acc, body) => call("POST", `/cases/${caseId}/accounts/${encodeURIComponent(acc)}/approve`, body),
   reject: (caseId, acc, body) => call("POST", `/cases/${caseId}/accounts/${encodeURIComponent(acc)}/reject`, body),
   sendKyc: (caseId, entryId, body) => call("POST", `/cases/${caseId}/paperwork/${entryId}/send`, body),
+  day: () => call("GET", "/day"),
   holds: () => call("GET", "/holds"),
   decisions: () => call("GET", "/decisions"),
   audit: () => call("GET", "/audit"),

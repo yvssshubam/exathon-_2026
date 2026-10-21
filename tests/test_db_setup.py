@@ -33,8 +33,9 @@ def test_demo_case_loaded_exactly(conn):
         "SELECT txn_id, amount_inr, is_exit FROM PH.TXN WHERE txn_id LIKE 'T_DEMO_%' ORDER BY ts, txn_id"
     ).fetchall()
     assert [(r[0], float(r[1]), r[2]) for r in rows] == [
-        ("T_DEMO_01", 200000.0, False), ("T_DEMO_02", 120000.0, False), ("T_DEMO_03", 80000.0, False),
-        ("T_DEMO_04", 1000.0, False), ("T_DEMO_05", 50000.0, True), ("T_DEMO_06", 80000.0, True),
+        ("T_DEMO_01", 200000.0, False), ("T_DEMO_02", 70000.0, False), ("T_DEMO_03", 80000.0, False),
+        ("T_DEMO_04", 1000.0, False), ("T_DEMO_05", 50000.0, True), ("T_DEMO_06", 29500.0, True),
+        ("T_DEMO_07", 50000.0, True),
     ]
     assert conn.execute("SELECT COUNT(*) FROM PH.BANK WHERE is_own_bank").fetchval() == 1
     assert float(conn.execute(
@@ -44,3 +45,10 @@ def test_demo_case_loaded_exactly(conn):
 def test_audit_log_has_statement_ids(conn):
     n = conn.execute("SELECT COUNT(*) FROM PH.AUDIT_LOG WHERE stmt_id > 0 AND session_id IS NOT NULL").fetchval()
     assert n >= 1
+
+def test_every_ticket_is_queued_and_kyc_is_synthetic(conn):
+    assert conn.execute("SELECT COUNT(*) FROM PH.TICKET").fetchval() == conn.execute(
+        "SELECT COUNT(*) FROM PH.COMPLAINT").fetchval()
+    assert conn.execute("SELECT MIN(received_at) FROM PH.TICKET WHERE case_id = 'CASE_DEMO'").fetchval() is not None
+    assert conn.execute("SELECT COUNT(*) FROM PH.ACCOUNT WHERE pan NOT LIKE 'SYNTH%' "
+                        "OR email NOT LIKE '%@example.com'").fetchval() == 0

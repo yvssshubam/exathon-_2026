@@ -1,13 +1,21 @@
 # Problem statement
 
-Bank fraud desks can't hold exactly the money a cyber-fraud victim lost in each account it passed through,
-because stolen and honest money mix and the split is worked out by hand, one hop at a time. If this worked,
-victims would get more back sooner and honest customers would keep using their accounts.
+A bank's fraud desk can't act on a cyber-fraud ticket within the golden hour, because finding the payment, holding
+it and reporting every onward hop is done by hand, one hop at a time, and stops when the desk closes; with no rule
+for how much of a mixed balance is the victim's, the desk freezes whole accounts to be safe. If this worked, more of
+each victim's money would be held at the first accounts it reached, and honest receivers further down the trail
+would not be frozen.
 
-**Who:** the bank's nodal officer who receives a police hold request for a cyber-fraud complaint, and through
-that officer, the victim and every honest customer whose account the money touched.
+**Who:** the bank nodal officer who receives the police ticket for a cyber-fraud complaint (CFCFRMS), and through
+that officer the victim and every honest customer the money passes through.
 
-**Why it matters:** ₹22,495 crore was lost to cyber fraud in India in 2025 across 28.15 lakh cases. Of ₹7,647
-crore put on hold between April 2021 and November 2025, only ₹167 crore (2.18%) had reached victims. Meanwhile
-whole accounts of shopkeepers are frozen over a single payment: one High Court settled 105 petitions against
-account freezes in a single judgment in August 2026.
+**Why it matters** (sources in [PROBLEM_DISCOVERY.md](PROBLEM_DISCOVERY.md)):
+
+- Only about 29% of reported money was put under lien nationally in the first half of 2026. In Rajasthan a
+  night-time complaint missed the hold because bank representatives work banking hours.
+- Of ₹7,647 crore saved under the old process, only ₹167 crore (about 2.18%) had been restored to victims.
+- The notice warns of action under S.201 BNS for not complying, and nothing happens for holding too much, so
+  over-freezing is the rational choice. High Courts in Rajasthan, Allahabad, Delhi, Madhya Pradesh and Telangana
+  keep ordering amount-only liens instead of whole-account freezes.
+- Deep layers hit honest accounts: one Kochi firm was frozen at layers 9 and 10 of a trail over genuine payments.
+  Money held at the first account never reaches them.

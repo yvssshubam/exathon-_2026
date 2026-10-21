@@ -1,42 +1,26 @@
-"""Config files say what the requirements say (sections 4, 7 and 9). Cheap tests, but they catch silent edits."""
+"""Config files say what the design says (docs/DESIGN.md, requirements s7, s9). Cheap tests that catch silent edits."""
 import json
 from pathlib import Path
 
 import yaml
 
 CONFIG = Path(__file__).resolve().parents[1] / "config"
-lanes = yaml.safe_load((CONFIG / "lanes.yaml").read_text(encoding="utf-8"))["lanes"]
+rules = yaml.safe_load((CONFIG / "rules.yaml").read_text(encoding="utf-8"))
 scoring = yaml.safe_load((CONFIG / "scoring.yaml").read_text(encoding="utf-8"))
 
 
-def days(lane: str) -> dict[str, int]:
-    return {d["name"]: d["days"] for d in lanes[lane]["deadlines"]}
+def test_rules_split_automatic_and_officer():
+    assert set(rules["automatic"]) & set(rules["officer"]) == set()
+    assert "PROPOSE_FULL_FREEZE" in rules["officer"]
+    assert not any("FREEZE" in name for name in rules["automatic"])
 
 
-def test_lane_a_clock_matches_sop():          # AT-11, Lane A: 7, 15, 90
-    d = days("A")
-    assert d["forward_grievance"] == 7
-    assert d["officer_decision"] == 15
-    assert d["hold_removal"] == 90
-    assert d["trail_update_to_cfcfrms"] == 7
-    assert d["district_review"] == d["state_review"] == 15
-    assert lanes["A"]["extension_days"] == 90
-
-
-def test_lane_b_clock_matches_rbi_draft():   # AT-11, Lane B: 20, 30, 60
-    d = days("B")
-    assert d["customer_explanation"] == 20
-    assert d["bank_decision_no_explanation"] == 30
-    assert d["bank_decision_after_explanation"] == 10
-    assert d["max_hold_without_police"] == 60
-    assert d["police_instruction"] == 30
-
-
-def test_lane_rules():
-    assert lanes["A"]["in_force"] is True and lanes["B"]["in_force"] is False
-    assert lanes["A"]["account_hold_allowed"] is False
-    assert lanes["B"]["trigger_min_inr"] == 1000
-    assert lanes["A"]["interim_custody_threshold_inr"] == 50000
+def test_full_freeze_evidence_and_legal_bases():
+    ev = rules["full_freeze_evidence"]
+    assert ev == {"complaint_links_min": 2, "pass_through_min": 0.8, "cash_exits_min": 2}
+    assert "S.168" in rules["legal_basis"]["hold"] and "9.1(i)" in rules["legal_basis"]["hold"]
+    assert "Rajasthan" in rules["legal_basis"]["freeze"]
+    assert rules["today_defaults"]["freezes_whole_account"] is True
 
 
 def test_scoring_weights_and_bands():

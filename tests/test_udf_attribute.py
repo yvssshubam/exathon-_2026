@@ -85,13 +85,13 @@ def test_udf_matches_oracle_on_case_files(rule, path):
     assert_same(rule, oracle_txns(case), case.opening_paise())
 
 
-def test_udf_gives_section_9_libr_numbers():
+def test_udf_gives_the_hand_checked_libr_numbers():
     case = load_case(DEMO_CASE)
     txns = [t for t in oracle_txns(case) if t.ts <= case.tool_as_of]
     holds, exits, _ = run_udf("LIBR", txns, case.opening_paise())
     for acc in ("ACC_A", "ACC_B", "ACC_C", "ACC_D"):
         assert holds[acc].get("V_LAKSHMI", 0) == paise(case.expected_libr[acc]), acc
-    assert exits["EXIT:ATM:BY-ATM-0042"]["V_LAKSHMI"] == paise(50000)
+    assert exits["EXIT:ATM:BX-ATM-0042"]["V_LAKSHMI"] == paise(50000)
 
 
 def test_udf_rejects_unknown_rule():

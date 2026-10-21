@@ -18,3 +18,15 @@ jobs:
         run: python -m pipeline.gen_extra_cases --check
       - name: Tests (no database needed)
         run: python -m pytest -q
+  console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/web/package-lock.json
+      - name: Build the officer console
+        working-directory: app/web
+        run: npm ci --no-audit --no-fund && npm run build

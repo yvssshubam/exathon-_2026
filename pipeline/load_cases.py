@@ -1,5 +1,7 @@
 """Load the cases, their 90-day history and the scoring rules into Exasol with bulk IMPORT (`make seed`).
 FR-01 (case half). History comes from pipeline/gen_history.py (seed 42); scoring rules from config/scoring.yaml.
+Every complaint also lands in PH.TICKET as QUEUED: the simulated CFCFRMS queue the agent works (pipeline/agent.py).
+KYC details are synthetic and derived from the account ID (never real people, never a real PAN).
 
 Uses pyexasol's import_from_iterable, which runs a native IMPORT over HTTP transport: no row-by-row INSERT
 (requirements s8). Reloading is safe: the case tables are truncated first.
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import zlib
 from decimal import Decimal
 
 import yaml
@@ -20,9 +23,12 @@ from pipeline.gen_history import generate as generate_history
 
 SNAPSHOT_TS = "2026-10-18 00:00:00.000"   # opening balances are as of the start of the case day
 CASE_FILES = {"demo_case": DEMO_CASE, "extra_cases": EXTRA_CASES, "loop_case": LOOP_CASE}
-TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT", "SCORING_CONFIG", "PROFILE_BAND", "LANE_RULE"]
+TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT", "TICKET", "SCORING_CONFIG", "PROFILE_BAND"]
+# Work tables emptied on every load, so a reload is a clean slate for the agent (make demo-reset).
+WORK_TABLES = ["TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT", "ATTRIBUTION", "ATTRIBUTION_RAW", "ATTRIBUTION_FLOW",
+               "ACCOUNT_SIGNALS", "ACCOUNT_SCORE", "CASE_ACCOUNT", "CASE_ACTION", "CHECK_RESULT", "HOLD_LEDGER",
+               "PORTAL_ENTRY", "DECISION", "AGENT_RUN", "AGENT_STEP", "TODAY_RAW", "TODAY_OUTCOME"]
 SCORING = ROOT / "config" / "scoring.yaml"
-LANES = ROOT / "config" / "lanes.yaml"
 
 
 def ts(value: str | None) -> str | None:
@@ -37,6 +43,19 @@ def rupees(paise: int) -> str:
     return f"{paise // 100}.{paise % 100:02d}"
 
 
+def synthetic_kyc(account: dict) -> tuple:
+    """customer_id, ifsc, mobile, email, address, pan: deterministic, obviously synthetic (a case may give its own)."""
+    k = account.get("kyc") or {}
+    n = zlib.crc32(account["account_id"].encode())
+    bank = account["bank_id"][-1]
+    return (k.get("customer_id", f"CUST{n % 10**8:08d}"),
+            k.get("ifsc", f"BNK{bank}0{n % 10**6:06d}"),
+            k.get("mobile", f"+91 9XXXX X{n % 10**4:04d}"),
+            k.get("email", f"{account['account_id'].lower()}@example.com"),
+            k.get("address", "Synthetic address, Vellore, Tamil Nadu"),
+            k.get("pan", f"SYNTH{n % 10**4:04d}X"))
+
+
 def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tuple]]:
     banks: dict[str, tuple] = {}
     accounts: dict[str, tuple] = {}
@@ -48,7 +67,8 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tup
             if a["account_id"] in accounts:
                 raise ValueError(f"account {a['account_id']} defined in two case files")
             accounts[a["account_id"]] = (a["account_id"], a["bank_id"], a.get("holder"), a["opened_on"],
-                                         a["account_type"], a["holder_type"], a["profile_band"], a.get("history"))
+                                         a["account_type"], a["holder_type"], a["profile_band"], a.get("history"),
+                                         *synthetic_kyc(a))
             if a.get("opening_balance_inr") is not None:
                 opening = str(Decimal(str(a["opening_balance_inr"])))
                 out["BALANCE_SNAPSHOT"].append((a["account_id"], SNAPSHOT_TS, opening))
@@ -63,6 +83,7 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tup
                 c.get("beneficiary_account"), c["lane"], c.get("notice_legal_basis"), b(c["notice_has_amount"]),
                 c.get("ordering_authority"), c.get("ordering_reference"),
             ))
+            out["TICKET"].append((c["case_id"], ts(c["reported_at"]), "QUEUED", None, None))
     if history:
         all_accounts = [a for case in cases.values() for a in case.accounts]
         for h in generate_history(all_accounts):
@@ -74,10 +95,6 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tup
                                       sig["mule_sentence"], sig["honest_sentence"]))
     for band, expected in scoring["profile_band_expected_monthly_credit_inr"].items():
         out["PROFILE_BAND"].append((band, str(Decimal(str(expected)))))
-    lanes = yaml.safe_load(LANES.read_text(encoding="utf-8"))["lanes"]
-    for lane, cfg in lanes.items():
-        for d in cfg["deadlines"]:
-            out["LANE_RULE"].append((lane, d["name"], d["anchor"], d["days"], d.get("text"), d.get("sop")))
     out["BANK"] = list(banks.values())
     out["ACCOUNT"] = list(accounts.values())
     own = [r for r in out["BANK"] if r[2] == "TRUE"]
@@ -87,6 +104,8 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tup
 
 
 def load(conn, rows: dict[str, list[tuple]]) -> None:
+    for table in WORK_TABLES:
+        conn.execute(f"TRUNCATE TABLE PH.{table}")
     for table in TABLES:
         conn.execute(f"TRUNCATE TABLE PH.{table}")
         conn.import_from_iterable(rows[table], ("PH", table))
@@ -107,11 +126,11 @@ def verify(conn, rows: dict[str, list[tuple]]) -> bool:
     print(f"{'ok ' if good else 'BAD'} SUM(TXN.amount_inr)    db={db_sum}  file={file_sum}")
     demo = conn.execute(
         "SELECT COUNT(*) FROM PH.TXN WHERE txn_id LIKE 'T_DEMO_%' AND ts BETWEEN "
-        "TIMESTAMP '2026-10-18 10:00:00' AND TIMESTAMP '2026-10-18 12:30:00'"
+        "TIMESTAMP '2026-10-18 01:52:00' AND TIMESTAMP '2026-10-18 05:10:00'"
     ).fetchval()
-    good = demo == 6
+    good = demo == 7
     ok &= good
-    print(f"{'ok ' if good else 'BAD'} demo case transactions with correct times: {demo} of 6")
+    print(f"{'ok ' if good else 'BAD'} demo case transactions with correct times: {demo} of 7")
     return ok
 
 

@@ -22,4 +22,4 @@ def test_generated_case_is_well_formed():
         assert len(c["ack_no"]) == 14 and c["ack_no"][0] == ("3" if c["source"] == "1930" else "2")
         root = [t for t in case.txns if t.utr == c["utr"]]
         assert len(root) == 1 and root[0].victim_tag == c["victim_tag"]
-    assert {c["lane"] for c in case.complaints} == {"A", "B"}
+    assert {c["lane"] for c in case.complaints} == {"A"}            # police-instructed tickets only

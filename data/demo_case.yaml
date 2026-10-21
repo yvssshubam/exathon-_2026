@@ -1,17 +1,21 @@
-# The section 3 demo case. Invented people and numbers. Synthetic data, MIT.
+# The demo case: a cyber-fraud ticket that reaches the bank at 2:13 a.m. Invented people and numbers. Synthetic, MIT.
 # IDs are stable: tests, the video and the deck all depend on them. Do not rename.
 # Amounts are rupees. Times are IST (Asia/Kolkata), stored without zone.
+#
+# Bank X runs the tool. A, C and Murugan's fuel pump (D) bank with Bank X; B is at Bank Y; the victim at Bank Z.
+# The transactions are what happens when nobody acts on the ticket until the desk opens: the replay cut-off
+# (DECISIONS D-06) decides how much of it the tool gets to stop.
 
 case_id: CASE_DEMO
 complaint:
-  ack_no: "31025101800001"          # 14 digits; starts with 3 because it came via 1930 (requirements s13)
+  ack_no: "31025101800001"          # 14 digits; starts with 3 because it came via 1930
   source: "1930"
   victim_account: ACC_LAKSHMI
   victim_tag: V_LAKSHMI
-  utr: IMPS2026101810020001
+  utr: IMPS2026101801520001
   amount_inr: 200000.00
-  txn_at: "2026-10-18 10:02:00"
-  reported_at: "2026-10-18 11:10:00"
+  txn_at: "2026-10-18 01:52:00"
+  reported_at: "2026-10-18 02:13:00"   # the ticket reaches Bank X's CFCFRMS queue
   beneficiary_account: ACC_A
   lane: A
   notice_legal_basis: "S.168 r/w S.94 BNSS"
@@ -19,61 +23,78 @@ complaint:
   ordering_authority: "Cyber Crime Police Station, Vellore (simulated)"
   ordering_reference: "VLR/CCPS/2026/1018-01"
 
-# When holds are placed with the tool (D-06). Replay stops here.
-tool_as_of: "2026-10-18 11:13:00"
+# When the agent's holds land (DECISIONS D-19: ticket + hold_minutes). Replay stops here.
+tool_as_of: "2026-10-18 02:16:00"
 
 banks:
   - {bank_id: BANK_X, name: "Bank X", is_own_bank: true}
   - {bank_id: BANK_Y, name: "Bank Y", is_own_bank: false}
   - {bank_id: BANK_Z, name: "Bank Z", is_own_bank: false}
 
-# Opening balance = balance at the start of the case window (10:00 on 18 Oct).
-# history: what pipeline/gen_profiles.py generates BEFORE the window so the scoring signals have 90 days of data.
+# Opening balance = balance at the start of the case day (18 Oct 00:00).
+# history: what pipeline/gen_history.py generates BEFORE that, so the account evidence has 90 days to read.
 accounts:
   - {account_id: ACC_LAKSHMI, bank_id: BANK_Z, holder: "Lakshmi (victim)", account_type: savings, holder_type: individual,
      opened_on: "2001-06-14", profile_band: low, opening_balance_inr: null, history: none}
   - {account_id: ACC_A, bank_id: BANK_X, holder: "A", account_type: savings, holder_type: individual,
-     opened_on: "2026-09-28", profile_band: low, opening_balance_inr: 500.00, history: fast_pass_through}
+     opened_on: "2026-09-28", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
   - {account_id: ACC_B, bank_id: BANK_Y, holder: "B", account_type: savings, holder_type: individual,
      opened_on: "2026-09-20", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
   - {account_id: ACC_C, bank_id: BANK_X, holder: "C", account_type: savings, holder_type: individual,
-     opened_on: "2026-10-04", profile_band: low, opening_balance_inr: 0.00, history: fast_pass_through}
-  # D stays at Bank Z (DECISIONS D-01): Bank X refers it on; viewed as Bank Z, it gets the ₹1,000 amount hold.
-  - {account_id: ACC_D, bank_id: BANK_Z, holder: "Murugan (Sri Murugan Fuels)", account_type: current, holder_type: merchant,
-     opened_on: "2023-10-02", profile_band: high, opening_balance_inr: 819000.00, history: merchant_300_per_day}
+     opened_on: "2026-10-04", profile_band: low, opening_balance_inr: 500.00, history: fast_pass_through}
+  - {account_id: ACC_D, bank_id: BANK_X, holder: "Murugan (Sri Murugan Fuels)", account_type: current,
+     holder_type: merchant, opened_on: "2023-10-02", profile_band: high, opening_balance_inr: 819000.00,
+     history: merchant_300_per_day}
 
 transactions:
   # Root: the victim's own payment. Everything downstream is traced from this UTR.
-  - {txn_id: T_DEMO_01, utr: IMPS2026101810020001, ts: "2026-10-18 10:02:00", from: ACC_LAKSHMI, to: ACC_A,
+  - {txn_id: T_DEMO_01, utr: IMPS2026101801520001, ts: "2026-10-18 01:52:00", from: ACC_LAKSHMI, to: ACC_A,
      amount_inr: 200000.00, channel: IMPS, victim_tag: V_LAKSHMI}
-  - {txn_id: T_DEMO_02, utr: IMPS2026101810060001, ts: "2026-10-18 10:06:00", from: ACC_A, to: ACC_B,
-     amount_inr: 120000.00, channel: IMPS}
-  - {txn_id: T_DEMO_03, utr: IMPS2026101810063001, ts: "2026-10-18 10:06:30", from: ACC_A, to: ACC_C,
+  - {txn_id: T_DEMO_02, utr: IMPS2026101801550001, ts: "2026-10-18 01:55:00", from: ACC_A, to: ACC_B,
+     amount_inr: 70000.00, channel: IMPS}
+  - {txn_id: T_DEMO_03, utr: IMPS2026101801553001, ts: "2026-10-18 01:55:30", from: ACC_A, to: ACC_C,
      amount_inr: 80000.00, channel: IMPS}
-  - {txn_id: T_DEMO_04, utr: UPI629181021000001, ts: "2026-10-18 10:21:00", from: ACC_B, to: ACC_D,
+  - {txn_id: T_DEMO_04, utr: UPI629180204000001, ts: "2026-10-18 02:04:00", from: ACC_C, to: ACC_D,
      amount_inr: 1000.00, channel: UPI}
-  - {txn_id: T_DEMO_05, utr: ATM2026101810400001, ts: "2026-10-18 10:40:00", from: ACC_B, to: "EXIT:ATM:BY-ATM-0042",
-     amount_inr: 50000.00, channel: ATM, exit_identifier: "ATM BY-ATM-0042, Katpadi"}
-  - {txn_id: T_DEMO_06, utr: ATM2026101812300001, ts: "2026-10-18 12:30:00", from: ACC_C, to: "EXIT:ATM:BX-ATM-0117",
-     amount_inr: 80000.00, channel: ATM, exit_identifier: "ATM BX-ATM-0117, Gandhi Nagar"}
+  - {txn_id: T_DEMO_05, utr: ATM2026101802070001, ts: "2026-10-18 02:07:00", from: ACC_C, to: "EXIT:ATM:BX-ATM-0042",
+     amount_inr: 50000.00, channel: ATM, exit_identifier: "ATM BX-ATM-0042, Katpadi"}
+  # After the ticket. With the tool these never happen (the money is already held); without it they do.
+  - {txn_id: T_DEMO_06, utr: ATM2026101804300001, ts: "2026-10-18 04:30:00", from: ACC_C, to: "EXIT:ATM:BX-ATM-0117",
+     amount_inr: 29500.00, channel: ATM, exit_identifier: "ATM BX-ATM-0117, Gandhi Nagar"}
+  - {txn_id: T_DEMO_07, utr: CRYPTO2026101805100001, ts: "2026-10-18 05:10:00", from: ACC_A,
+     to: "EXIT:CRYPTO:0x5e1d0a77c3", amount_inr: 50000.00, channel: CRYPTO,
+     exit_identifier: "Crypto exchange deposit, wallet 0x5e1d0a77c3"}
 
-# Hand-checked answers (requirements section 9, LIBR, as_of = tool_as_of). tests/test_oracle_demo.py asserts these.
+# Hand-checked answers (LIBR, as_of = tool_as_of). tests/test_oracle_demo.py asserts these.
+#   A sent 70,000 to B and 80,000 to C; 50,000 of the victim's money is still there.
+#   C had 500 of its own; under LIBR its own money left first, inside the 1,000 diesel payment to D.
+#   So of D's 1,000 credit only 500 is the victim's. D's own 8,19,000 never mixes with it.
 expected_libr:
-  ACC_A: 500.00
-  ACC_B: 69000.00
-  ACC_C: 80000.00
+  ACC_A: 50000.00
+  ACC_B: 70000.00
+  ACC_C: 29500.00
   ACC_D: 500.00
-  "EXIT:ATM:BY-ATM-0042": 50000.00
+  "EXIT:ATM:BX-ATM-0042": 50000.00
   total: 200000.00
 
-# Section 3 comparison table. tests/test_oracle_demo.py checks the "with tool" side; the baseline simulator checks the other.
-expected_compare:
-  victim_money_held: {baseline: 69500.00, tool: 149500.00}
-  honest_money_locked: {baseline: 819000.00, tool: 0.00}
+# What the agent does at 2:13 a.m. (rules in config/rules.yaml; tests/rules_oracle.py checks them).
+expected_actions:
+  ACC_A: {automatic: MANDATORY_HOLD, amount_inr: 50000.00}
+  ACC_B: {automatic: ONWARD_ENTRY, amount_inr: 70000.00}
+  ACC_C: {automatic: MANDATORY_HOLD, amount_inr: 29500.00}
+  ACC_D: {automatic: MANDATORY_HOLD, amount_inr: 1000.00, officer: PROPOSE_NARROW, proposed_inr: 500.00}
+  "EXIT:ATM:BX-ATM-0042": {automatic: RECORD_EXIT, amount_inr: 50000.00}
 
-# Baseline simulator settings (FR-14): one ticket per hop, processed after a delay.
-baseline:
-  first_ticket_at: "2026-10-18 11:10:00"
-  first_hop_delay_minutes: 55     # ticket for A actioned 12:05
-  per_hop_delay_minutes: 60       # next hop (C) actioned 13:05, after its 12:30 cash-out
-  freezes_whole_account_named_in_notice: true
+# Today vs the tool, on the same transactions (Compare screen). Bank X's view.
+expected_compare:
+  victim_money_held: {today: 500.00, tool: 80000.00}
+  honest_money_locked: {today: 819500.00, tool_overnight: 500.00, tool_after_review: 0.00}
+  minutes_ticket_to_first_hold: {today: 487, tool: 3}
+
+# How today's desk works (FR-14 baseline): nothing happens until the desk opens; then each account on the trail
+# is looked up in turn, and every account named in the trail is debit-frozen whole (the over-freeze incentive).
+today:
+  desk_opens: "2026-10-18 10:00:00"
+  first_lookup_minutes: 20        # ticket read, passed to the core banking team, UTR found: A actioned 10:20
+  per_account_minutes: 15         # each further account on the trail takes this long
+  freezes_whole_account: true

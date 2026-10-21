@@ -48,7 +48,7 @@ def test_repo_sql_files_parse_and_are_numbered():
                                    "090_views.sql"]
     schema = split_statements((ROOT / "sql" / "010_schema.sql").read_text())
     tables = [s for s in schema if s.upper().startswith("CREATE OR REPLACE TABLE")]
-    assert len(tables) == 21
+    assert len(tables) == 27
     for stmt in tables:                       # every table carries a COMMENT for the MCP server (s7)
         assert ") COMMENT IS '" in stmt, stmt.splitlines()[0]
     for f in files:
@@ -63,6 +63,6 @@ def test_seed_rows_are_consistent():
         assert txn[4] in accounts or txn[4].startswith(("EXIT:", "EXT_"))
         assert txn[2].endswith(".000")
     assert len(rows["SCORING_CONFIG"]) == 8 and len(rows["PROFILE_BAND"]) == 3
-    assert {r[0] for r in rows["LANE_RULE"]} == {"A", "B"}
+    assert [r[2] for r in rows["TICKET"]] == ["QUEUED"] * len(rows["COMPLAINT"])
     assert sum(1 for r in rows["BANK"] if r[2] == "TRUE") == 1
     assert len(rows["COMPLAINT"]) == 22       # 1 demo + 20 extra + 1 loop

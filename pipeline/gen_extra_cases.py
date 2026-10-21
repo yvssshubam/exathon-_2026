@@ -109,7 +109,7 @@ def generate(seed: int = SEED) -> dict:
                 add(v, n, t2 + timedelta(minutes=rng.randint(1, 30)), dest, rng.choice(merchants), spend, "UPI")
             t += timedelta(minutes=rng.randint(1, 4))
 
-        lane = "B" if v in (7, 14) else "A"
+        lane = "A"                     # police-instructed holds only (docs/DESIGN.md: Lane B is out of scope)
         source = rng.choice(["1930", "NCRP"])
         complaints.append({
             "case_id": f"CASE_X{v:02d}",
@@ -119,7 +119,7 @@ def generate(seed: int = SEED) -> dict:
             "amount_inr": float(amount), "txn_at": t0.strftime(FMT),
             "reported_at": (t0 + timedelta(minutes=rng.randint(30, 180))).strftime(FMT),
             "beneficiary_account": mule, "lane": lane,
-            "notice_legal_basis": "S.168 r/w S.94 BNSS" if lane == "A" else "RBI KYC draft (bank suspicion)",
+            "notice_legal_basis": "S.168 r/w S.94 BNSS",
             "notice_has_amount": True,
         })
 

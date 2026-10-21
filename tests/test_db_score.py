@@ -1,4 +1,4 @@
-"""AT-07 against Exasol: D is HONEST, A, B and C are MULE, each with three reason sentences, and the SQL's
+"""AT-07 against Exasol: D reads HONEST, A, B and C read MULE, each with three reason sentences, and the SQL's
 signal values match the Python reference (tests/score_oracle.py)."""
 import pytest
 

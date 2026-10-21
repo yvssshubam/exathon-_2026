@@ -1,0 +1,25 @@
+{
+  "name": "proportionate-holds-console",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Officer console for Proportionate Holds. Talks only to the API (python -m app.api).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "dependencies": {
+    "@fontsource/atkinson-hyperlegible-mono": "^5.2.0",
+    "@fontsource/atkinson-hyperlegible-next": "^5.2.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.0",
+    "vite": "^7.1.0"
+  }
+}

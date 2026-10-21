@@ -1,14 +1,15 @@
 """Run the per-case steps in Exasol (DECISIONS D-18). Python only passes parameters; the work is SQL in sql/steps/.
 
-    python -m pipeline.steps trace CASE_DEMO                 # viewed as OWN_BANK_ID from .env (default BANK_X)
-    python -m pipeline.steps trace CASE_DEMO --bank BANK_Z   # the same case seen from Murugan's bank
-    python -m pipeline.steps trace CASE_LOOP --as-of "2026-10-18 23:59:59"
-    python -m pipeline.steps attribute CASE_DEMO             # needs the trace first
-    python -m pipeline.steps score CASE_DEMO                 # needs trace + attribute first
-    python -m pipeline.steps recommend CASE_DEMO             # needs trace + attribute + score first
-    python -m pipeline.steps run CASE_DEMO                   # all four steps
-    python -m pipeline.steps run CASE_DEMO --bank BANK_Z     # Murugan's bank: D gets "hold Rs 1,000 only"
+These are the database halves of the agent's tools (pipeline/agent.py runs them in order and logs each one).
+Run them by hand to inspect a single step:
 
+    python -m pipeline.steps trace CASE_DEMO                 # viewed as OWN_BANK_ID from .env (default BANK_X)
+    python -m pipeline.steps attribute CASE_DEMO             # needs the trace first
+    python -m pipeline.steps score CASE_DEMO                 # account evidence; needs trace + attribute
+    python -m pipeline.steps actions CASE_DEMO               # the rules engine + the checker; changes nothing
+    python -m pipeline.steps run CASE_DEMO                   # all of the above (still changes nothing)
+
+Holds and portal entries are written only by the agent (python -m pipeline.agent), after the checker passes.
 Each run prints what it wrote, so a wrong number can be traced to the step and the statement that made it.
 """
 from __future__ import annotations
@@ -27,11 +28,15 @@ ROOT = Path(__file__).resolve().parents[1]
 STEPS = ROOT / "sql" / "steps"
 DEFAULTS = yaml.safe_load((ROOT / "config" / "case_defaults.yaml").read_text(encoding="utf-8"))
 SCORING = yaml.safe_load((ROOT / "config" / "scoring.yaml").read_text(encoding="utf-8"))
-LANES = yaml.safe_load((ROOT / "config" / "lanes.yaml").read_text(encoding="utf-8"))["lanes"]
-REC_COLUMNS = ("account_id", "bank_id", "hop", "action_code", "amount_inr", "notice_amount_inr", "victim_amount_inr",
-               "other_victims_inr", "balance_now_inr", "band", "score", "lane", "trace_rule", "legal_basis",
-               "reason_code", "draft_narrowing", "draft_seizure", "last_resort", "needs_comment", "stmt_id")
+RULES = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
+ACTION_COLUMNS = ("account_id", "bank_id", "hop", "action_code", "act_mode", "amount_inr", "current_hold_inr",
+                  "victim_amount_inr", "other_victims_inr", "balance_now_inr", "trail_amount_inr", "band", "score",
+                  "reason_code", "legal_basis", "action_status", "stmt_id")
 FMT = "%Y-%m-%d %H:%M:%S"
+
+
+class StepFailed(RuntimeError):
+    """A step could not run; the message says which file and statement, and why."""
 
 
 def complaint(conn, case_id: str) -> dict:
@@ -40,7 +45,7 @@ def complaint(conn, case_id: str) -> dict:
         {"case_id": case_id},
     ).fetchone()
     if row is None:
-        raise SystemExit(f"No complaint {case_id!r} in PH.COMPLAINT. Load cases: python -m pipeline.load_cases")
+        raise StepFailed(f"No complaint {case_id!r} in PH.COMPLAINT. Load cases: python -m pipeline.load_cases")
     keys = ("case_id", "utr", "reported_at", "lane", "victim_tag")
     return dict(zip(keys, row, strict=True))
 
@@ -61,7 +66,7 @@ def run_step(conn, file_name: str, params: dict) -> list:
             results.append(conn.execute(stmt, params))
         except Exception as exc:
             first = stmt.splitlines()[0][:90]
-            raise SystemExit(f"FAILED {file_name} statement {i}: {first}\n{exc}") from exc
+            raise StepFailed(f"FAILED {file_name} statement {i}: {first}\n{exc}") from exc
     return results
 
 
@@ -95,7 +100,7 @@ def attribute(conn, case_id: str, bank: str, as_of: str | None = None, rule: str
     as_of = as_of or default_as_of(c["reported_at"])
     traced = conn.execute("SELECT COUNT(*) FROM PH.TRACE_EDGE WHERE case_id = {c}", {"c": case_id}).fetchval()
     if not traced:
-        raise SystemExit(f"No trace for {case_id}. Run: python -m pipeline.steps trace {case_id}")
+        raise StepFailed(f"No trace for {case_id}. Run: python -m pipeline.steps trace {case_id}")
     root_ts = _ts(conn.execute("SELECT MIN(ts) FROM PH.TXN WHERE utr = {u}", {"u": c["utr"]}).fetchval())
     snapshot = conn.execute(
         "SELECT MAX(ts) FROM PH.BALANCE_SNAPSHOT WHERE ts <= TO_TIMESTAMP({r}, 'YYYY-MM-DD HH24:MI:SS') "
@@ -185,42 +190,72 @@ def print_score(conn, case_id: str) -> None:
             print(f"    - {sentence}")
 
 
-def recommend(conn, case_id: str, bank: str, rule: str | None = None) -> dict:
-    """Step 4. Uses trace, attribution (incl. referrals for this bank) and scores."""
+def actions(conn, case_id: str, bank: str) -> dict:
+    """The rules engine (070). Uses trace, attribution, referrals and account evidence.
+    Writes PH.CASE_ACCOUNT and PH.CASE_ACTION; places nothing."""
+    ev = RULES["full_freeze_evidence"]
     params = {
         "case_id": case_id,
         "own_bank_id": bank,
-        "rule": rule or DEFAULTS["default_rule"],
-        "lane_a_basis": LANES["A"]["legal_basis"] + " (MHA SOP for NCRP-CFCFRMS)",
-        "lane_b_basis": LANES["B"]["legal_basis"],
+        "basis_hold": RULES["legal_basis"]["hold"],
+        "basis_narrow": RULES["legal_basis"]["narrow"],
+        "basis_freeze": RULES["legal_basis"]["freeze"],
+        "basis_trail": RULES["legal_basis"]["trail"],
+        "freeze_links_min": str(ev["complaint_links_min"]),
+        "freeze_pass_min": str(ev["pass_through_min"]),
+        "freeze_cash_min": str(ev["cash_exits_min"]),
     }
     started = time.perf_counter()
-    run_step(conn, "070_recommend.sql", params)
+    run_step(conn, "070_actions.sql", params)
     elapsed = time.perf_counter() - started
     from pipeline.db import audit
 
-    audit(conn, "recommend", case_id, f"bank={bank} rule={params['rule']}")
+    audit(conn, "actions", case_id, f"bank={bank}")
     return {**params, "seconds": elapsed}
 
 
-def recommendations(conn, case_id: str, bank: str) -> list[dict]:
+def check(conn, case_id: str, bank: str) -> list[dict]:
+    """The checker (075): conservation and policy checks. Any failure stops every change-making tool."""
+    run_step(conn, "075_check.sql", {"case_id": case_id, "own_bank_id": bank})
+    from pipeline.db import audit
+
+    audit(conn, "check", case_id, f"bank={bank}")
+    return checks(conn, case_id, bank)
+
+
+def case_actions(conn, case_id: str, bank: str) -> list[dict]:
     rows = conn.execute(
-        f"SELECT {', '.join(REC_COLUMNS)} FROM PH.RECOMMENDATION "
-        "WHERE case_id = {c} AND viewing_bank_id = {b} ORDER BY hop, account_id",
+        f"SELECT {', '.join(ACTION_COLUMNS)} FROM PH.CASE_ACTION "
+        "WHERE case_id = {c} AND viewing_bank_id = {b} ORDER BY hop, account_id, act_mode, action_code",
         {"c": case_id, "b": bank}).fetchall()
-    return [dict(zip(REC_COLUMNS, r, strict=True)) for r in rows]
+    return [dict(zip(ACTION_COLUMNS, r, strict=True)) for r in rows]
 
 
-def print_recommendations(conn, case_id: str, bank: str) -> None:
+def checks(conn, case_id: str, bank: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT check_name, check_passed, detail, stmt_id FROM PH.CHECK_RESULT "
+        "WHERE case_id = {c} AND viewing_bank_id = {b} ORDER BY check_name", {"c": case_id, "b": bank}).fetchall()
+    return [{"check_name": n, "check_passed": bool(p), "detail": d, "stmt_id": s} for n, p, d, s in rows]
+
+
+def execute(conn, case_id: str, bank: str, file_name: str, placed_at: str) -> None:
+    """Run one change-making tool (081..084). The SQL itself refuses to act unless the checker passed."""
+    run_step(conn, file_name, {"case_id": case_id, "own_bank_id": bank, "placed_at": placed_at})
+
+
+def print_actions(conn, case_id: str, bank: str) -> None:
     from pipeline.explain import explain, headline
 
-    for rec in recommendations(conn, case_id, bank):
-        band = f"{rec['band']} {float(rec['score']):.2f}" if rec["band"] else "-"
-        print(f"{rec['account_id']:24} {headline(rec):34} [{band}]  (statement {rec['stmt_id']})")
-        for line in explain(rec):
+    for a in case_actions(conn, case_id, bank):
+        if a["act_mode"] == "INFO":
+            continue
+        who = "agent  " if a["act_mode"] == "AUTOMATIC" else "officer"
+        print(f"{a['account_id']:24} {who}  {headline(a):44} [{a['action_status']}]  (statement {a['stmt_id']})")
+        for line in explain(a):
             print(f"    - {line}")
-        if rec["legal_basis"]:
-            print(f"    basis: {rec['legal_basis']}")
+    print()
+    for c in checks(conn, case_id, bank):
+        print(f"check {c['check_name']:22} {'PASS' if c['check_passed'] else 'FAIL'}  {c['detail']}")
 
 
 def print_trace(conn, case_id: str) -> None:
@@ -239,7 +274,7 @@ def print_trace(conn, case_id: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("step", choices=["trace", "attribute", "score", "recommend", "run"])
+    ap.add_argument("step", choices=["trace", "attribute", "score", "actions", "run"])
     ap.add_argument("case_id")
     ap.add_argument("--bank", help="bank using the tool (default: OWN_BANK_ID in .env)")
     ap.add_argument("--as-of", help='replay cut-off, "YYYY-MM-DD HH:MM:SS" (default: reported_at + hold_minutes)')
@@ -252,6 +287,17 @@ def main(argv: list[str] | None = None) -> int:
 
     bank = args.bank or settings()["own_bank_id"]
     conn = connect()
+    try:
+        _run_cli(conn, args, bank)
+    except StepFailed as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+def _run_cli(conn, args, bank: str) -> None:
     if args.step in ("trace", "run"):
         info = trace(conn, args.case_id, bank, args.as_of, args.max_hops, args.window_hours)
         print(f"trace {args.case_id}  viewed as {bank}  as_of {info['as_of']}  "
@@ -266,13 +312,12 @@ def main(argv: list[str] | None = None) -> int:
         info = score(conn, args.case_id, args.as_of)
         print(f"\nscore {args.case_id}  as_of {info['as_of']}  took {info['seconds']:.2f}s\n")
         print_score(conn, args.case_id)
-    if args.step in ("recommend", "run"):
-        info = recommend(conn, args.case_id, bank, args.rule)
-        print(f"\nrecommend {args.case_id}  viewed as {bank}  rule {info['rule']}  took {info['seconds']:.2f}s"
-              "\n(nothing is held until an officer approves)\n")
-        print_recommendations(conn, args.case_id, bank)
-    conn.close()
-    return 0
+    if args.step in ("actions", "run"):
+        info = actions(conn, args.case_id, bank)
+        check(conn, args.case_id, bank)
+        print(f"\nactions {args.case_id}  viewed as {bank}  took {info['seconds']:.2f}s"
+              "\n(nothing is held here: the agent places the automatic holds after the checker passes)\n")
+        print_actions(conn, args.case_id, bank)
 
 
 if __name__ == "__main__":

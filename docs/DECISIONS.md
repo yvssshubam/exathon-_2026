@@ -209,6 +209,10 @@ console, the customer notice and the report all word the same numbers the same w
 - Notices are rendered from `templates/notices/{en,hi,ta}.yaml`. The Hindi and Tamil text was drafted for the demo
   and should be checked by a native speaker before any real use. The victim's details are never passed to the
   renderer, so they cannot appear (SOP 9.1(ii)).
+- Words that come from the data (bank and holder names, police station, legal section, grievance officer and title)
+  are translated through each template's `terms` list, and the mule signals are worded from its
+  `signal_sentences`, so a Hindi or Tamil notice contains no English beyond identifiers (UTR, account number,
+  reference number, e-mail) and acronyms (BNSS, RBI, KYC). A test checks this.
 - `PH.COMPLAINT_CHECK` (a view) flags an incomplete notice: no amount, no legal basis (Lane A), no or unknown UTR,
   or an acknowledgement number that is not 14 digits or does not match its source (FR-02).
 
@@ -219,3 +223,17 @@ Exasol) and `pipeline/officer.py` (which enforces the approval rules), and shape
 business rules of its own and has no route that places a hold without an officer's approval. Officer identity is a
 name in the request: login and permissions are production security, out of scope (requirements s1). The victim's
 account is never returned by the case or account endpoints, only by the victim's own status view.
+
+## D-27 · DEFAULT · The officer console
+
+`app/web` is a React app built with Vite. It talks only to the API (Vite forwards `/api` to port 8000), holds no
+business rules, and uses hash routes (`#/cases`, `#/case/<id>/<account>`, `#/decisions`, `#/deadlines`,
+`#/victim/<id>`) so no router library is needed.
+- One visual idea runs through every screen: an account's balance drawn as a bar split into the victim's share
+  (violet, held) and the holder's own money (green, stays usable). Rust marks money that left the banking system.
+- The trail is drawn top to bottom, one row per hop, so it fits beside the account panel on a laptop screen.
+- "Working at" picks the viewing bank (Bank X/Y/Z, DECISIONS D-01); the officer's name is remembered in the browser
+  as a convenience only. Every approval still sends the name, and the API rejects an empty one.
+- The engine words amounts as "Rs 1,19,500" (safe in any terminal); the console shows "₹1,19,500".
+- Fonts are bundled from npm (Atkinson Hyperlegible for legibility, Noto Sans for Hindi and Tamil notices), so the
+  console works offline.

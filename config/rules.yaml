@@ -1,0 +1,53 @@
+# What the agent may do on its own, and what waits for the officer (docs/DESIGN.md, "Automatic vs officer").
+# Configuration, not code: sql/steps/070_actions.sql reads these values as parameters, and tests/rules_oracle.py
+# applies the same table in plain Python.
+#
+# The principle: the agent does what the rules already require, instantly and at any hour; the officer decides what
+# the rules leave to judgment. The agent never places a full freeze on its own.
+
+lane_a:
+  name: "Police-instructed hold"
+  source: "MHA I4C SOP for NCRP-CFCFRMS, 2 Jan 2026 (judicially monitored, SC order 9 Feb 2026)"
+  legal_basis: "S.168 read with S.94 BNSS"
+
+legal_basis:
+  hold: "S.168 r/w S.94 BNSS: hold the reported amount, or the part of it available (SOP 6.1(j), 9.1(i))"
+  narrow: "Amount-only lien sized to the money traceable to the victim (SOP 5(xii), 9.1(i); Delhi HC, Neelkanth Pharma)"
+  freeze: "Whole-account freeze at the bank's or IO's discretion (I4C FAQ); exceptional cases only (Rajasthan HC, 20 Aug 2026)"
+  trail: "Trail update to CFCFRMS: onward transfers, exits and KYC (SOP 6.1(k), 9.1(i))"
+
+# Automatic: the bank cannot refuse these, so the agent does them the moment the ticket lands.
+automatic:
+  MANDATORY_HOLD: "Own-bank account with money left: lien up to the amount the trail names, capped at the balance"
+  HOLD_MARKER: "First-layer own-bank account with nothing left (not nodal, pool or escrow): catch later credits"
+  RECORD_EXIT: "Money left banking from an own-bank account: file the exit with its identifiers"
+  ONWARD_ENTRY: "Money moved from an own-bank account to another bank: file the onward entry with the victim's share"
+  KYC_PACKET: "Draft the holder's KYC for every own-bank account held (sent by the officer; due within a week)"
+
+# Officer: judgment calls. The agent prepares the proposal and the reasons; nothing changes until approved.
+officer:
+  PROPOSE_NARROW: "Likely honest receiver (HONEST or REVIEW evidence), or a nodal/pool/escrow account, holding less victim money than the mandatory hold: narrow the lien to the victims' money"
+  PROPOSE_FULL_FREEZE: "Mule-like account whose history shows the exceptional pattern courts accept: propose a whole-account freeze, with the reasons written down"
+  CONFIRM_HOLD: "Borderline evidence (REVIEW) and nothing to narrow: the officer confirms the hold"
+
+# The pattern that justifies proposing a full freeze (Rajasthan HC: a deliberately operated mule account, or repeated
+# suspicious credits followed by onward transfers). Evidence band MULE plus EITHER of these.
+full_freeze_evidence:
+  complaint_links_min: 2        # money from 2+ fraud complaints in 7 days
+  pass_through_min: 0.8         # OR: 80%+ of credits sent on within an hour ...
+  cash_exits_min: 2             # ... and 2+ cash or crypto withdrawals in 90 days
+
+# Never, whoever asks: the checker refuses these (sql/steps/075_check.sql).
+forbidden:
+  - "A full freeze placed by the agent"
+  - "A full freeze on a nodal, pool or escrow account"
+  - "A hold above the balance, or above the amount the trail names"
+  - "A hold on another bank's account"
+  - "Any change at all when the victim's money does not reconcile to the paisa"
+
+# Today's desk, for the Compare screen (each case file can override; data/demo_case.yaml does).
+today_defaults:
+  desk_opens: "10:00"
+  first_lookup_minutes: 20
+  per_account_minutes: 15
+  freezes_whole_account: true

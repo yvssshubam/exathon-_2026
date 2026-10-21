@@ -1,3 +1,9 @@
+> **This is the first build spec, kept for its domain research (sections 4, 7, 13).** The build now follows the
+> golden-hour redesign in [DESIGN.md](DESIGN.md), from the problem discovery in
+> [PROBLEM_DISCOVERY.md](PROBLEM_DISCOVERY.md). Where they differ, DESIGN.md wins: Lane B, notices, deadlines, the
+> victim view and investigator Q&A are cut, and the agent places the mandatory holds itself
+> ([DECISIONS.md](DECISIONS.md) D-27 to D-36).
+
 # Idea D — Proportionate Holds: Build Requirements
 
 ## 1. How to use this doc

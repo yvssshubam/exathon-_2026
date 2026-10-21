@@ -1,7 +1,8 @@
-"""The API exposes every console screen's data and no way to hold money without an officer (no database needed)."""
+"""The API exposes every console screen's data and no way to freeze an account without an officer
+(no database needed)."""
 from fastapi.testclient import TestClient
 
-from app.api.main import app, get_conn, rows
+from app.api.main import after_hours, app, get_conn, rows
 
 
 def paths():
@@ -10,27 +11,27 @@ def paths():
 
 def test_every_screen_has_its_route():
     expected = {
-        ("GET", "/api/health"), ("GET", "/api/config"), ("GET", "/api/cases"), ("GET", "/api/tickets"),
-        ("POST", "/api/cases/{case_id}/run"), ("GET", "/api/cases/{case_id}"),
-        ("GET", "/api/cases/{case_id}/trail"), ("GET", "/api/cases/{case_id}/recommendations"),
-        ("GET", "/api/cases/{case_id}/accounts/{account_id}"),
+        ("GET", "/api/health"), ("GET", "/api/config"), ("GET", "/api/queue"), ("POST", "/api/queue/work"),
+        ("POST", "/api/tickets/{case_id}/work"), ("GET", "/api/inbox"), ("GET", "/api/cases/{case_id}"),
+        ("GET", "/api/cases/{case_id}/trail"), ("GET", "/api/cases/{case_id}/actions"),
+        ("GET", "/api/cases/{case_id}/accounts/{account_id}"), ("GET", "/api/cases/{case_id}/log"),
+        ("GET", "/api/cases/{case_id}/paperwork"), ("GET", "/api/cases/{case_id}/compare"),
         ("POST", "/api/cases/{case_id}/accounts/{account_id}/approve"),
         ("POST", "/api/cases/{case_id}/accounts/{account_id}/reject"),
-        ("POST", "/api/decisions/{decision_id}/grievance"), ("GET", "/api/decisions"),
-        ("GET", "/api/decisions/{decision_id}/notice"), ("GET", "/api/deadlines"),
-        ("GET", "/api/cases/{case_id}/victim"), ("GET", "/api/audit"),
+        ("POST", "/api/cases/{case_id}/paperwork/{entry_id}/send"), ("GET", "/api/holds"),
+        ("GET", "/api/decisions"), ("GET", "/api/audit"), ("POST", "/api/demo/reset"),
     }
     assert expected <= paths()
 
 
-def test_no_auto_approve_anywhere():
-    assert not any("auto" in p.lower() for _, p in paths())
+def test_no_freeze_route_and_no_auto_approve():
+    assert not any("freeze" in p.lower() or "auto" in p.lower() for _, p in paths())
 
 
 def test_config_without_database():
     body = TestClient(app).get("/api/config").json()
     assert {b["bank_id"] for b in body["banks"]} == {"BANK_X", "BANK_Y", "BANK_Z"}
-    assert body["lanes"]["B"]["in_force"] is False
+    assert "PROPOSE_FULL_FREEZE" in body["officer"] and "MANDATORY_HOLD" in body["automatic"]
 
 
 def test_bare_address_opens_docs_without_a_cacheable_redirect():
@@ -57,10 +58,15 @@ def test_decimal_columns_come_back_as_numbers():
     assert rows(Conn(), "SELECT 1") == [{"a": 500, "b": 80000.0, "c": "500", "d": None}]
 
 
-def test_approve_requires_an_officer_field():
+def test_approve_requires_an_officer_and_an_action():
     app.dependency_overrides[get_conn] = lambda: None     # no database: the request must fail validation first
     try:
-        r = TestClient(app).post("/api/cases/CASE_DEMO/accounts/ACC_C/approve", json={})
+        r = TestClient(app).post("/api/cases/CASE_DEMO/accounts/ACC_D/approve", json={"officer": "priya"})
     finally:
         app.dependency_overrides.clear()
     assert r.status_code == 422
+
+
+def test_desk_hours():
+    assert after_hours("2026-10-18 02:13:00") and after_hours("2026-10-18 21:00:00")
+    assert not after_hours("2026-10-18 11:47:00")

@@ -55,8 +55,9 @@ class Case:
     txns: list[TxnRow]
     tool_as_of: str | None = None
     expected_libr: dict = field(default_factory=dict)
+    expected_actions: dict = field(default_factory=dict)
     expected_compare: dict = field(default_factory=dict)
-    baseline: dict = field(default_factory=dict)
+    today: dict = field(default_factory=dict)
 
     def opening_paise(self) -> dict[str, int]:
         return {
@@ -99,8 +100,9 @@ def load_case(path: Path = DEMO_CASE) -> Case:
         txns=[_txn(t) for t in raw["transactions"]],
         tool_as_of=raw.get("tool_as_of"),
         expected_libr=raw.get("expected_libr", {}),
+        expected_actions=raw.get("expected_actions", {}),
         expected_compare=raw.get("expected_compare", {}),
-        baseline=raw.get("baseline", {}),
+        today=raw.get("today", {}),
     )
     _check(case)
     return case

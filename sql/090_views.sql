@@ -6,7 +6,7 @@ CREATE OR REPLACE VIEW PH.COMPLAINT_CHECK (
     case_id          COMMENT IS 'Case',
     ack_no           COMMENT IS 'NCRP acknowledgement number',
     complaint_source COMMENT IS '1930, NCRP or branch',
-    lane             COMMENT IS 'A = police-instructed hold; B = bank''s own suspicion',
+    lane             COMMENT IS 'A = police-instructed hold (the only lane this build works)',
     utr              COMMENT IS 'UTR of the victim''s payment',
     amount_inr       COMMENT IS 'Amount reported',
     notice_status    COMMENT IS 'VALID or INCOMPLETE',

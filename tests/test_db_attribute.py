@@ -35,15 +35,15 @@ def demo_rows(conn):
     return attribution(conn, "CASE_DEMO")
 
 
-@pytest.mark.parametrize("account", ["ACC_A", "ACC_B", "ACC_C", "ACC_D", "EXIT:ATM:BY-ATM-0042"])
-def test_libr_equals_section_9(demo_rows, account):                                   # AT-04
+@pytest.mark.parametrize("account", ["ACC_A", "ACC_B", "ACC_C", "ACC_D", "EXIT:ATM:BX-ATM-0042"])
+def test_libr_equals_the_hand_checked_table(demo_rows, account):                    # AT-04
     assert demo_rows[("LIBR", account)][0] == paise(demo.expected_libr[account])
 
 
 @pytest.mark.parametrize("rule", ["LIBR", "FIFO", "PRO_RATA"])
 def test_every_rule_equals_the_oracle(demo_rows, rule):                              # AT-04
     o = oracle_run(demo, rule, demo.tool_as_of)
-    for acc in ("ACC_A", "ACC_B", "ACC_C", "ACC_D", "EXIT:ATM:BY-ATM-0042"):
+    for acc in ("ACC_A", "ACC_B", "ACC_C", "ACC_D", "EXIT:ATM:BX-ATM-0042"):
         assert demo_rows[(rule, acc)][0] == o.tainted(acc, "V_LAKSHMI"), (rule, acc)
 
 
@@ -52,22 +52,11 @@ def test_demo_conserves_to_the_paisa(demo_rows, rule):                          
     assert sum(v[0] for (r, _), v in demo_rows.items() if r == rule) == paise(200000)
 
 
-def test_referral_from_bank_x_carries_the_victims_share(conn, demo_rows):             # FR-04
+def test_onward_share_from_bank_x_to_bank_y(conn, demo_rows):                       # FR-04
     refs = conn.execute(
         "SELECT account_id, amount_inr, victim_amount_inr FROM PH.REFERRAL_OUT "
         "WHERE case_id = 'CASE_DEMO' AND from_bank_id = 'BANK_X'").fetchall()
-    assert [(r[0], float(r[1]), float(r[2])) for r in refs] == [("ACC_B", 120000.0, 119500.0)]
-
-
-def test_referral_from_bank_y_to_murugan(conn):                                       # DECISIONS D-01
-    trace(conn, "CASE_DEMO", "BANK_Y")
-    attribute(conn, "CASE_DEMO", "BANK_Y")
-    refs = conn.execute(
-        "SELECT account_id, amount_inr, victim_amount_inr FROM PH.REFERRAL_OUT "
-        "WHERE case_id = 'CASE_DEMO' AND from_bank_id = 'BANK_Y'").fetchall()
-    assert [(r[0], float(r[1]), float(r[2])) for r in refs] == [("ACC_D", 1000.0, 500.0)]
-    trace(conn, "CASE_DEMO", "BANK_X")
-    attribute(conn, "CASE_DEMO", "BANK_X")
+    assert [(r[0], float(r[1]), float(r[2])) for r in refs] == [("ACC_B", 70000.0, 70000.0)]
 
 
 def test_all_20_extra_victims_conserved(conn):                                       # AT-05, AT-06

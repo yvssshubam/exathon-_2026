@@ -1,78 +1,132 @@
 # Proportionate Holds
 
-When a cyber-fraud complaint reaches a bank, Proportionate Holds traces the victim's money through every account
-it touched, works out how much of each account's balance is really the victim's, scores each account as likely
-mule or honest receiver, and recommends either holding that exact amount or (rarely, with reasons) the whole
-account. An officer approves every hold. Honest customers keep using their accounts.
+A golden-hour copilot for the bank nodal officer. When a cyber-fraud ticket reaches the bank, at any hour, an agent
+works it at once: it follows the victim's money through the bank, works out how much of each account is really the
+victim's, places the holds the rules require (amount only), files the onward entries and exits, and leaves the
+officer a short list of judgment calls, each sized to the victim's share and written up with its reasons.
 
-Built for **ExaThon India 2026** (Track 01: Money, Risk & Regulation). Tracing, attribution, scoring and the audit
-trail all run inside **Exasol Personal**: SQL `CONNECT BY NOCYCLE` for the trace, a Python 3 UDF for the
-attribution rules, set-based SQL for scoring.
-
-> **Status: work in progress.** The attribution rules are implemented and tested in a reference oracle;
-> the Exasol pipeline, API and console are being built.
+Built for **ExaThon India 2026** (Track 01: Money, Risk & Regulation). Every number is computed in
+**Exasol Personal**: the trace (`CONNECT BY NOCYCLE`), the victim's share (a Python UDF), the account evidence, the
+rules engine, the checker, the hold ledger and the "today's desk" replay. The agent only orders the tools.
 
 ## Problem statement
 
-Bank fraud desks can't hold exactly the money a cyber-fraud victim lost in each account it passed through,
-because stolen and honest money mix and the split is worked out by hand, one hop at a time. If this worked,
-victims would get more back sooner and honest customers would keep using their accounts.
+A bank's fraud desk can't act on a cyber-fraud ticket within the golden hour, because finding the payment, holding
+it and reporting every onward hop is done by hand, one hop at a time, and stops when the desk closes; with no rule
+for how much of a mixed balance is the victim's, the desk freezes whole accounts to be safe. If this worked, more of
+each victim's money would be held at the first accounts it reached, and honest receivers further down the trail
+would not be frozen.
 
-## The demo case in one table
+How we got there: [docs/PROBLEM_DISCOVERY.md](docs/PROBLEM_DISCOVERY.md) (the journey, 36 pain points, why Phase 1).
+What we built: [docs/DESIGN.md](docs/DESIGN.md).
 
-| | Without the tool | With the tool |
+## The 2:13 a.m. ticket
+
+Lakshmi pays a fake officer ₹2,00,000 at 01:52; the ticket reaches Bank X at 02:13. Today it waits for the desk to
+open at 10:00, by which time two accounts have cashed out and the desk freezes a fuel station's whole account over a
+₹1,000 diesel sale. With the agent:
+
+| On this ticket, at Bank X | Today's desk | With the agent |
 | --- | --- | --- |
-| Victim's money held | ₹69,500 | ₹1,49,500 |
-| Honest money locked | ₹8,19,000 (a fuel station's whole account) | ₹0 (lien on ₹1,000 only) |
-| Time to trace every hop inside the bank | about 2 hours | seconds |
+| Victim's money held | ₹500 | ₹80,000 |
+| Honest money locked | ₹8,19,500 (Murugan's whole account) | ₹500 overnight, ₹0 after the officer narrows it |
+| Ticket to first action | 8 h 7 min | 3 min |
+| Bank Y gets its onward ticket | 10:35 | 02:16 |
+
+At 9 a.m. the officer sees what was done overnight and three decisions waiting: narrow Murugan's hold to the ₹500
+that is traceable to the victim, and whole-account freezes proposed (never placed) for two mule-like accounts.
+
+**The agent orchestrates, the database calculates, the rules permit, the officer decides.** The agent can place
+only the holds the bank is required to place; a deterministic checker (conservation to the paisa, policy rules) must
+pass first; there is no full-freeze tool. An optional local model can choose the order of the tools and word the
+summary, and the fixed order takes over whenever it fails ([DESIGN.md](docs/DESIGN.md#where-ai-fits)).
 
 ## Data is synthetic
 
-No real bank data, customer data or employer data is used. Background traffic is IBM's public, synthetic
-AMLworld dataset (downloaded by a script, never committed); the demo case and 20 extra victims are invented and
-generated with a fixed seed. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+No real bank, customer or employer data. The demo ticket and 20 extra victims are invented (fixed seed 42); account
+histories and KYC details are generated, with obviously fake identifiers. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Quick start (no database needed)
 
 ```sh
-python3 -m venv .venv && . .venv/bin/activate
-make install
-make check           # lint + 64 tests: the section 9 numbers, conservation for 21 victims, property tests
-make oracle          # the demo case under LIBR, FIFO and pro rata, side by side
+python3 -m venv .venv && . .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
+python -m pytest -q                                   # oracle, rules, agent and API tests
+python -m tests.show_case                             # the demo case under LIBR, FIFO and pro rata
 ```
 
 ## Full setup (Exasol Personal)
 
-Prerequisites: macOS 15+ on Apple Silicon with 8 GB RAM, Linux amd64/arm64 with Podman, or Windows amd64
-(the launcher offers Podman). Python 3.11+. No cloud account.
+Prerequisites: macOS 15+ on Apple Silicon with 8 GB RAM, Linux amd64/arm64 with Podman, or Windows amd64 (the
+launcher offers Podman). Python 3.11+, Node 20.19+ or 22.12+ for the console. No cloud account, nothing to pay for.
 
 ```sh
-make setup           # installs the exasol launcher, `exasol install local`, `exasol slc install python3`
-# copy host:port (and fingerprint, if shown) from `exasol info` into .env
-make doctor          # every check should say PASS
-make check-db        # builds schema PH, loads the cases, runs the DB tests
+make setup            # exasol launcher, `exasol install local`, `exasol slc install python3` (macOS/Linux)
+# copy host:port (and fingerprint, if shown) from `exasol info` into .env (start from .env.example)
+make doctor           # every check should say PASS
+make check-db         # builds schema PH, loads the cases, runs the database tests (incl. the 2:13 a.m. run)
+```
+
+Without `make` (Windows PowerShell), the same steps are:
+
+```sh
+python -m pipeline.doctor
+python -m pipeline.run_sql sql              # build schema PH
+python -m pipeline.load_cases --verify      # load the cases; every ticket QUEUED
+python -m pytest -q -m db
 ```
 
 Exasol Personal is used under its EULA and is not redistributed here; the `exasol` launcher is MIT.
 
+## Run it
+
+```sh
+python -m app.api                                     # API on http://127.0.0.1:8000 (docs at /docs)
+cd app/web && npm install && npm run dev              # console on http://localhost:5173
+```
+
+In the console: **Morning review** → *Work the queued tickets* replays the night; open `CASE_DEMO` to see the money
+trail, the agent log (every tool call with its Exasol statement IDs) and the paperwork; decide the waiting proposals;
+**Compare** shows today's desk and the agent on the same night. *Reset the demo* puts every ticket back in the queue.
+
+From a terminal instead:
+
+```sh
+python -m pipeline.agent CASE_DEMO                    # the agent works the 2:13 a.m. ticket and prints its log
+python -m pipeline.officer waiting                    # what is waiting for the officer
+python -m pipeline.officer approve CASE_DEMO ACC_D PROPOSE_NARROW --officer priya
+python -m pipeline.today CASE_DEMO                    # today's desk vs the agent, as JSON
+```
+
+**Optional local model** (free, offline): install [Ollama](https://ollama.com), `ollama pull qwen2.5:7b`, set
+`PH_LLM=ollama` in `.env`, then `python -m pipeline.agent CASE_DEMO --mode llm` (or *With the model* in the ticket
+queue). The holds come out the same; the log shows which tool the model chose at each step.
+
 ## Repository
 
 ```
-config/      lanes.yaml (legal clocks), scoring.yaml (signals, weights), mcp_settings.json (read-only)
-data/        demo_case.yaml, extra_cases.yaml (generated, seed 42), loop_case.yaml
-sql/         numbered, idempotent SQL run in order by `make db`
-pipeline/    loaders, SQL runner, doctor, generators
-tests/       oracle.py (reference implementation) and its tests
-docs/        REQUIREMENTS.md, DECISIONS.md, PROBLEM_STATEMENT.md
+config/      rules.yaml (automatic vs officer, legal bases), scoring.yaml (signals), banks.yaml, mcp_settings.json
+data/        demo_case.yaml (the 2:13 a.m. ticket), extra_cases.yaml (generated, seed 42), loop_case.yaml
+sql/         schema and views (make db); sql/steps/ the agent's tools, run inside Exasol
+pipeline/    agent.py (the agent), steps.py, officer.py, today.py (Compare), llm.py (optional local model),
+             loaders, generators, doctor
+app/api/     FastAPI service the console talks to
+app/web/     officer console (React + Vite)
+tests/       oracles (attribution, scoring, rules) and their tests; -m db tests run against Exasol
+docs/        PROBLEM_STATEMENT.md, PROBLEM_DISCOVERY.md, DESIGN.md, DECISIONS.md, REQUIREMENTS.md (first spec)
 ```
 
 ## Limits
 
 - The tool cannot make victims report faster or skip police checks, FIRs or court orders.
-- A real bank sees only its own accounts; other banks' hops arrive via CFCFRMS. The demo simulates that boundary.
+- A real bank sees only its own accounts; other banks' hops arrive via CFCFRMS. The demo simulates that boundary
+  with a shared synthetic dataset, and the next bank's outcome depends on how that bank works its ticket.
 - Cash already withdrawn is gone; the tool records where it left.
-- Lane B follows an RBI **draft** (11 Sep 2026) that is not in force.
-- Scoring weights are hand-set for the demo, not validated on real data.
+- Today's desk in Compare is a stated model (desk hours, lookup times, whole-account freezes), not a measurement.
+- Scoring weights are hand-set for the demo, not validated on real data; they inform the rules and are never shown
+  as a verdict.
+- Releasing a mandatory hold, notices to holders and the refund stage are out of scope.
 
 ## Licence
 

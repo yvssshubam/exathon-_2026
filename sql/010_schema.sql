@@ -1,4 +1,4 @@
--- 010_schema.sql — schema PH (Proportionate Holds). Requirements section 8.
+-- 010_schema.sql — schema PH (Proportionate Holds). docs/DESIGN.md has the picture; requirements section 8 the origin.
 -- Idempotent: `make db` rebuilds everything from scratch (CREATE OR REPLACE). `make seed` reloads the cases.
 -- Every table and column has a COMMENT so the Exasol MCP server can describe them (requirements s7).
 -- Money is DECIMAL(18,2) rupees (NFR-03). Times are IST, stored as TIMESTAMP without zone.
@@ -11,7 +11,7 @@ OPEN SCHEMA PH;
 CREATE OR REPLACE TABLE PH.BANK (
     bank_id      VARCHAR(20)  NOT NULL COMMENT IS 'Bank identifier, e.g. BANK_X',
     bank_name    VARCHAR(100) NOT NULL COMMENT IS 'Display name',
-    is_own_bank  BOOLEAN      NOT NULL COMMENT IS 'TRUE for the bank running the tool; its accounts can be held directly, others get an outbound referral',
+    is_own_bank  BOOLEAN      NOT NULL COMMENT IS 'TRUE for the bank running the tool; its accounts can be held directly, others get an onward entry',
     CONSTRAINT pk_bank PRIMARY KEY (bank_id) DISABLE
 ) COMMENT IS 'Banks present in the synthetic data. Exactly one has is_own_bank = TRUE.';
 
@@ -24,6 +24,12 @@ CREATE OR REPLACE TABLE PH.ACCOUNT (
     holder_type     VARCHAR(20)  NOT NULL COMMENT IS 'individual, merchant or business',
     profile_band    VARCHAR(10)  NOT NULL COMMENT IS 'Declared income/turnover band: low, medium, high; feeds the credit-vs-profile signal',
     history_profile VARCHAR(30)           COMMENT IS 'Which synthetic history the generator gives this account (fast_pass_through, merchant_300_per_day, none)',
+    customer_id     VARCHAR(20)           COMMENT IS 'Synthetic customer ID; accounts of one customer share it (KYC packet)',
+    ifsc            VARCHAR(11)           COMMENT IS 'Synthetic branch code (KYC packet)',
+    mobile          VARCHAR(20)           COMMENT IS 'Synthetic, masked mobile number (KYC packet)',
+    email           VARCHAR(100)          COMMENT IS 'Synthetic e-mail at example.com (KYC packet)',
+    address         VARCHAR(200)          COMMENT IS 'Synthetic address (KYC packet)',
+    pan             VARCHAR(20)           COMMENT IS 'Synthetic PAN placeholder, never a real PAN (KYC packet)',
     CONSTRAINT pk_account PRIMARY KEY (account_id) DISABLE
 ) COMMENT IS 'Accounts with synthetic KYC and profile. Exit pseudo-accounts (EXIT:...) are never in this table.';
 
@@ -59,7 +65,7 @@ CREATE OR REPLACE TABLE PH.COMPLAINT (
     txn_at              TIMESTAMP              COMMENT IS 'When the victim paid',
     reported_at         TIMESTAMP     NOT NULL COMMENT IS 'When the ticket reached this bank',
     beneficiary_account VARCHAR(40)            COMMENT IS 'First account that received the victim''s money',
-    lane                CHAR(1)       NOT NULL COMMENT IS 'A = police-instructed hold (MHA SOP, in force); B = bank''s own suspicion (RBI draft, not in force)',
+    lane                CHAR(1)       NOT NULL COMMENT IS 'A = police-instructed hold (MHA SOP). The only lane this build works (docs/DESIGN.md)',
     notice_legal_basis  VARCHAR(100)           COMMENT IS 'Legal provision cited by the notice; NULL makes the notice incomplete (FR-02)',
     notice_has_amount   BOOLEAN       NOT NULL COMMENT IS 'Whether the notice states the disputed amount',
     ordering_authority  VARCHAR(200)           COMMENT IS 'Police unit that ordered the hold; may be shared with the holder',
@@ -107,7 +113,7 @@ CREATE OR REPLACE TABLE PH.REFERRAL_OUT (
     trace_rule   VARCHAR(10)   NOT NULL COMMENT IS 'Rule the victim share was computed with',
     ts           TIMESTAMP     NOT NULL COMMENT IS 'When it moved',
     stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
-) COMMENT IS 'FR-04: outbound next-hop records (the simulated CFCFRMS trail update), carrying the victim''s share of each amount.';
+) COMMENT IS 'Money that left the viewing bank for another bank, with the victim''s share: the source of onward entries.';
 
 CREATE OR REPLACE TABLE PH.ATTRIBUTION (
     case_id           VARCHAR(20)   NOT NULL COMMENT IS 'Case',
@@ -184,73 +190,181 @@ CREATE OR REPLACE TABLE PH.ACCOUNT_SCORE (
     stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
 ) COMMENT IS 'Step 3 output: score and band per account (FR-08).';
 
-CREATE OR REPLACE TABLE PH.RECOMMENDATION (
-    case_id            VARCHAR(20)   NOT NULL COMMENT IS 'Case',
-    viewing_bank_id    VARCHAR(20)   NOT NULL COMMENT IS 'Bank using the tool; it acts only on its own accounts (DECISIONS D-01)',
-    account_id         VARCHAR(80)   NOT NULL COMMENT IS 'Account or exit the money reached',
-    bank_id            VARCHAR(20)            COMMENT IS 'Bank holding the account (NULL for exits)',
-    hop                DECIMAL(3,0)  NOT NULL COMMENT IS 'Hops from the victim''s payment (1 = first-layer account)',
-    action_code        VARCHAR(15)   NOT NULL COMMENT IS 'AMOUNT_HOLD, ACCOUNT_HOLD, REFER_OUT, HOLD_MARKER or NONE',
-    amount_inr         DECIMAL(18,2)          COMMENT IS 'Amount to hold, or the victim share to refer',
-    notice_amount_inr  DECIMAL(18,2)          COMMENT IS 'Amount the trail names for this account (traced inflows; DECISIONS D-07)',
-    victim_amount_inr  DECIMAL(18,2)          COMMENT IS 'This victim''s money in the account under trace_rule',
-    other_victims_inr  DECIMAL(18,2)          COMMENT IS 'Other victims'' money in the account',
-    balance_now_inr    DECIMAL(18,2)          COMMENT IS 'Balance at the hold time',
-    band               VARCHAR(6)             COMMENT IS 'MULE, REVIEW or HONEST (NULL for exits)',
-    score              DOUBLE                 COMMENT IS 'Mule score 0..1',
-    lane               CHAR(1)       NOT NULL COMMENT IS 'A = police-instructed (MHA SOP, in force); B = bank''s own suspicion (RBI draft)',
-    trace_rule         VARCHAR(10)   NOT NULL COMMENT IS 'Tracing rule the victim amount uses',
-    legal_basis        VARCHAR(200)           COMMENT IS 'Legal basis of the recommended action',
-    reason_code        VARCHAR(30)   NOT NULL COMMENT IS 'Which rule of requirements s9 step 4 produced the action',
-    draft_narrowing    BOOLEAN       NOT NULL COMMENT IS 'TRUE: draft a request to the police to narrow the hold to the traceable amount',
-    draft_seizure      BOOLEAN       NOT NULL COMMENT IS 'TRUE: draft a request to the police for an S.106 BNSS seizure (Lane A, mule)',
-    last_resort        BOOLEAN       NOT NULL COMMENT IS 'TRUE: whole-account hold, flagged last resort (Lane B, mule)',
-    needs_comment      BOOLEAN       NOT NULL COMMENT IS 'TRUE: the officer must write a comment before approving (REVIEW band)',
-    stmt_id            DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
-) COMMENT IS 'Step 4 output: what the tool recommends per account. Never a hold by itself; an officer must approve (FR-10).';
+-- ---------------------------------------------------------------- the agent's ticket work (docs/DESIGN.md)
 
-CREATE OR REPLACE TABLE PH.LANE_RULE (
-    lane         CHAR(1)       NOT NULL COMMENT IS 'A = police-instructed hold; B = bank''s own suspicion',
-    rule_name    VARCHAR(50)   NOT NULL COMMENT IS 'Deadline name, as in config/lanes.yaml',
-    anchor       VARCHAR(40)   NOT NULL COMMENT IS 'Event that starts the clock (hold_placed, grievance_received, ...) or another deadline (<rule>_due)',
-    days         DECIMAL(4,0)  NOT NULL COMMENT IS 'Calendar days after the anchor (negative = before)',
-    rule_text    VARCHAR(200)           COMMENT IS 'What must happen by then',
-    sop_ref      VARCHAR(20)            COMMENT IS 'MHA SOP paragraph, when Lane A'
-) COMMENT IS 'Legal clocks loaded from config/lanes.yaml, so deadlines are computed inside Exasol (FR-12).';
+-- Tables from the first design that the golden-hour design cut (docs/DESIGN.md, "What gets cut"). Dropped so the
+-- MCP server and the console never describe stale objects on a database built by an older version.
+DROP TABLE IF EXISTS PH.RECOMMENDATION;
+DROP TABLE IF EXISTS PH.LANE_RULE;
+DROP TABLE IF EXISTS PH.DEADLINE;
+DROP TABLE IF EXISTS PH.NOTICE;
+
+CREATE OR REPLACE TABLE PH.TICKET (
+    case_id         VARCHAR(20)   NOT NULL COMMENT IS 'Complaint the ticket is for (PH.COMPLAINT)',
+    received_at     TIMESTAMP     NOT NULL COMMENT IS 'When the ticket reached this bank''s CFCFRMS queue (simulated clock, IST)',
+    ticket_status   VARCHAR(10)   NOT NULL COMMENT IS 'QUEUED, WORKING, DONE, SENT_BACK (incomplete notice) or FAILED',
+    picked_up_at    TIMESTAMP              COMMENT IS 'When the agent picked it up (simulated clock)',
+    run_id          DECIMAL(18,0)          COMMENT IS 'Agent run that worked it (PH.AGENT_RUN)',
+    CONSTRAINT pk_ticket PRIMARY KEY (case_id) DISABLE
+) COMMENT IS 'Simulated CFCFRMS queue at the bank. The agent picks each ticket up the moment it lands, at any hour.';
+
+CREATE OR REPLACE TABLE PH.CASE_ACCOUNT (
+    case_id           VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    viewing_bank_id   VARCHAR(20)   NOT NULL COMMENT IS 'Bank working the ticket; it acts only on its own accounts (DECISIONS D-01)',
+    account_id        VARCHAR(80)   NOT NULL COMMENT IS 'Account or exit the money reached',
+    bank_id           VARCHAR(20)            COMMENT IS 'Bank holding the account (NULL for exits)',
+    hop               DECIMAL(3,0)  NOT NULL COMMENT IS 'Hops from the victim''s payment (1 = first-layer account)',
+    is_exit           BOOLEAN       NOT NULL COMMENT IS 'TRUE when this is where money left banking',
+    is_own_bank       BOOLEAN       NOT NULL COMMENT IS 'TRUE when the account is at the viewing bank',
+    paid_by_own_bank  BOOLEAN       NOT NULL COMMENT IS 'TRUE when one of the viewing bank''s accounts paid it (after the victim''s own payment)',
+    never_full        BOOLEAN       NOT NULL COMMENT IS 'TRUE for nodal, pool and escrow accounts: amount only, never the whole account (SOP 9.1(iii))',
+    trail_amount_inr  DECIMAL(18,2)          COMMENT IS 'Sum of traced payments into the account: the amount the trail names for it (DECISIONS D-07)',
+    victim_amount_inr DECIMAL(18,2)          COMMENT IS 'This victim''s money in it at the hold time (LIBR)',
+    other_victims_inr DECIMAL(18,2)          COMMENT IS 'Other victims'' money in it (LIBR)',
+    balance_now_inr   DECIMAL(18,2)          COMMENT IS 'Balance at the hold time',
+    hold_amount_inr   DECIMAL(18,2)          COMMENT IS 'Mandatory hold: the trail amount, never more than the balance (SOP 9.1(i))',
+    onward_share_inr  DECIMAL(18,2)          COMMENT IS 'Victim money the viewing bank sent to this other-bank account (onward entry)',
+    band              VARCHAR(6)             COMMENT IS 'Account evidence summary: MULE, REVIEW or HONEST (input to the rules, not a verdict)',
+    score             DOUBLE                 COMMENT IS 'Mule-likeness 0..1 from PH.ACCOUNT_SCORE',
+    pass_through      DOUBLE                 COMMENT IS 'Share of credits sent on within an hour (90 days)',
+    cash_exits        DOUBLE                 COMMENT IS 'Cash or crypto withdrawals (90 days)',
+    complaint_links   DOUBLE                 COMMENT IS 'Distinct fraud complaints that paid into it in 7 days',
+    stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Rules engine input: every fact the action rules read, one row per account on the trail.';
+
+CREATE OR REPLACE TABLE PH.CASE_ACTION (
+    case_id           VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    viewing_bank_id   VARCHAR(20)   NOT NULL COMMENT IS 'Bank working the ticket',
+    account_id        VARCHAR(80)   NOT NULL COMMENT IS 'Account or exit',
+    bank_id           VARCHAR(20)            COMMENT IS 'Bank holding the account',
+    hop               DECIMAL(3,0)  NOT NULL COMMENT IS 'Hops from the victim''s payment',
+    action_code       VARCHAR(20)   NOT NULL COMMENT IS 'MANDATORY_HOLD, HOLD_MARKER, RECORD_EXIT, ONWARD_ENTRY, NONE (automatic) or PROPOSE_NARROW, PROPOSE_FULL_FREEZE, CONFIRM_HOLD (officer)',
+    act_mode          VARCHAR(10)   NOT NULL COMMENT IS 'AUTOMATIC (the rules require it; the agent does it at any hour), OFFICER (a judgment call; only proposed) or INFO',
+    amount_inr        DECIMAL(18,2)          COMMENT IS 'Amount to hold, record or report; for proposals, the proposed amount',
+    current_hold_inr  DECIMAL(18,2)          COMMENT IS 'For proposals: the mandatory hold already on the account',
+    victim_amount_inr DECIMAL(18,2)          COMMENT IS 'This victim''s money in the account (LIBR)',
+    other_victims_inr DECIMAL(18,2)          COMMENT IS 'Other victims'' money in the account',
+    balance_now_inr   DECIMAL(18,2)          COMMENT IS 'Balance at the hold time',
+    trail_amount_inr  DECIMAL(18,2)          COMMENT IS 'Amount the trail names for the account',
+    band              VARCHAR(6)             COMMENT IS 'Account evidence summary (input, not a label shown as a verdict)',
+    score             DOUBLE                 COMMENT IS 'Mule-likeness 0..1',
+    reason_code       VARCHAR(30)   NOT NULL COMMENT IS 'Which rule in config/rules.yaml produced the action',
+    legal_basis       VARCHAR(300)           COMMENT IS 'Legal basis of the action',
+    action_status     VARCHAR(10)   NOT NULL COMMENT IS 'TO_DO, DONE (automatic); PROPOSED, WAITING, APPROVED, EDITED, REJECTED (officer); INFO',
+    stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Rules engine output: what is allowed for each account, and whether the agent does it or the officer decides.';
+
+CREATE OR REPLACE TABLE PH.CHECK_RESULT (
+    case_id         VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank working the ticket',
+    check_name      VARCHAR(40)   NOT NULL COMMENT IS 'conservation, holds_within_balance, holds_within_trail, automatic_allowed, own_accounts_only, never_full_respected',
+    check_passed    BOOLEAN       NOT NULL COMMENT IS 'TRUE when the check passed. Any FALSE stops every change-making step',
+    detail          VARCHAR(500)           COMMENT IS 'The numbers behind the check',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'The checker: deterministic policy and conservation checks run before the agent may change anything (maker-checker).';
+
+CREATE OR REPLACE TABLE PH.HOLD_LEDGER (
+    hold_id         DECIMAL(18,0) IDENTITY COMMENT IS 'Hold number; reference PH-H<hold_id>',
+    case_id         VARCHAR(20)   NOT NULL COMMENT IS 'Case the hold is for',
+    viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank that placed it',
+    account_id      VARCHAR(80)   NOT NULL COMMENT IS 'Account held',
+    hold_kind       VARCHAR(15)   NOT NULL COMMENT IS 'LIEN (amount only), ACCOUNT_FREEZE (whole account) or MARKER (catch later credits, first layer)',
+    amount_inr      DECIMAL(18,2)          COMMENT IS 'Amount under lien; for a freeze, the balance it locked',
+    placed_at       TIMESTAMP     NOT NULL COMMENT IS 'When the hold took effect (simulated clock for the agent; officer decisions at the time they were made)',
+    placed_by       VARCHAR(60)   NOT NULL COMMENT IS 'agent, or the officer who approved it',
+    hold_status     VARCHAR(10)   NOT NULL COMMENT IS 'ACTIVE or REPLACED (by a narrower or wider hold)',
+    replaced_by     DECIMAL(18,0)          COMMENT IS 'Hold (hold_id) that replaced this one',
+    action_code     VARCHAR(20)   NOT NULL COMMENT IS 'Action that led to it',
+    reason_text     VARCHAR(2000)          COMMENT IS 'Why, in words (officer comment for officer holds)',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'Simulated core banking hold ledger. The agent can write only MANDATORY_HOLD liens and first-layer markers; anything wider needs an officer.';
+
+CREATE OR REPLACE TABLE PH.PORTAL_ENTRY (
+    entry_id          DECIMAL(18,0) IDENTITY COMMENT IS 'Entry number',
+    case_id           VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    viewing_bank_id   VARCHAR(20)   NOT NULL COMMENT IS 'Bank filing it',
+    entry_kind        VARCHAR(10)   NOT NULL COMMENT IS 'ONWARD (money moved to another bank), EXIT (money left banking) or KYC (holder details)',
+    from_account      VARCHAR(80)            COMMENT IS 'Own-bank account the money left from',
+    account_id        VARCHAR(80)   NOT NULL COMMENT IS 'Receiving account, exit, or the account whose KYC this is',
+    bank_id           VARCHAR(20)            COMMENT IS 'Receiving bank (ONWARD) or holding bank (KYC)',
+    txn_id            VARCHAR(40)            COMMENT IS 'Transaction reported',
+    utr               VARCHAR(40)            COMMENT IS 'UTR reported',
+    channel           VARCHAR(10)            COMMENT IS 'IMPS, UPI, ATM, CRYPTO ...',
+    amount_inr        DECIMAL(18,2)          COMMENT IS 'Amount moved',
+    victim_amount_inr DECIMAL(18,2)          COMMENT IS 'How much of it was the victim''s money (LIBR); the next bank sizes its hold with it',
+    moved_at          TIMESTAMP              COMMENT IS 'When the money moved',
+    detail            VARCHAR(2000)          COMMENT IS 'Exit identifiers (ATM ID, wallet) or the KYC packet text',
+    entry_status      VARCHAR(10)   NOT NULL COMMENT IS 'FILED (sent to CFCFRMS) or DRAFT (waiting for the officer)',
+    filed_at          TIMESTAMP              COMMENT IS 'When it was filed (simulated clock for the agent)',
+    filed_by          VARCHAR(60)            COMMENT IS 'agent or the officer',
+    stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'Simulated CFCFRMS entries: onward transfers (one new ticket per receiving bank), exits and KYC packets (SOP 6.1(k), 9.1(i)).';
 
 CREATE OR REPLACE TABLE PH.DECISION (
-    decision_id     DECIMAL(18,0) IDENTITY COMMENT IS 'Decision number; the hold reference is PH-<decision_id>',
-    case_id         VARCHAR(20)   NOT NULL COMMENT IS 'Case',
-    viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank whose officer decided',
-    account_id      VARCHAR(80)   NOT NULL COMMENT IS 'Account decided on',
-    action_code     VARCHAR(15)   NOT NULL COMMENT IS 'AMOUNT_HOLD, ACCOUNT_HOLD, HOLD_MARKER or REFER_OUT approved, or REJECTED',
-    amount_inr      DECIMAL(18,2)          COMMENT IS 'Amount approved (may differ from the recommendation if the officer edited it)',
-    recommended_action VARCHAR(15)         COMMENT IS 'What the tool recommended',
-    recommended_amount DECIMAL(18,2)       COMMENT IS 'Amount the tool recommended',
-    lane            CHAR(1)       NOT NULL COMMENT IS 'Legal lane of the hold',
-    decided_by      VARCHAR(60)   NOT NULL COMMENT IS 'Officer who decided; never empty (AT-09)',
-    decided_at      TIMESTAMP     NOT NULL COMMENT IS 'When the decision took effect (the case''s hold time unless given)',
-    reason_text     VARCHAR(2000)          COMMENT IS 'Officer''s reason; required for rejections, edits, whole-account holds and REVIEW-band approvals',
-    statement_ids   VARCHAR(200)           COMMENT IS 'Exasol statement IDs behind the numbers the officer saw'
-) COMMENT IS 'Officer decisions. Append-only. Nothing is held unless an approval is recorded here (FR-10).';
+    decision_id        DECIMAL(18,0) IDENTITY COMMENT IS 'Decision number',
+    case_id            VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    viewing_bank_id    VARCHAR(20)   NOT NULL COMMENT IS 'Bank whose officer decided',
+    account_id         VARCHAR(80)   NOT NULL COMMENT IS 'Account decided on',
+    action_code        VARCHAR(20)   NOT NULL COMMENT IS 'Proposal decided: PROPOSE_NARROW, PROPOSE_FULL_FREEZE, CONFIRM_HOLD, or SEND_KYC',
+    decision_outcome   VARCHAR(10)   NOT NULL COMMENT IS 'APPROVED, EDITED or REJECTED',
+    amount_inr         DECIMAL(18,2)          COMMENT IS 'Amount the officer approved (may differ from the proposal when EDITED)',
+    proposed_amount    DECIMAL(18,2)          COMMENT IS 'Amount the agent proposed',
+    decided_by         VARCHAR(60)   NOT NULL COMMENT IS 'Officer; never empty',
+    decided_at         TIMESTAMP     NOT NULL COMMENT IS 'When the officer decided',
+    reason_text        VARCHAR(2000)          COMMENT IS 'Officer''s reason: required for rejections, edits and full freezes',
+    statement_ids      VARCHAR(200)           COMMENT IS 'Exasol statement IDs behind the numbers the officer saw'
+) COMMENT IS 'Officer decisions on the agent''s proposals. Append-only.';
 
-CREATE OR REPLACE TABLE PH.DEADLINE (
-    decision_id     DECIMAL(18,0) NOT NULL COMMENT IS 'Hold this deadline belongs to (PH.DECISION)',
-    lane            CHAR(1)       NOT NULL COMMENT IS 'Lane whose clock this is',
-    rule_name       VARCHAR(50)   NOT NULL COMMENT IS 'Deadline name from config/lanes.yaml',
-    anchor_at       TIMESTAMP     NOT NULL COMMENT IS 'When the event that started this clock happened',
-    due_at          TIMESTAMP     NOT NULL COMMENT IS 'When it is due',
-    rule_text       VARCHAR(200)           COMMENT IS 'What must happen by then',
-    deadline_status VARCHAR(10)   NOT NULL COMMENT IS 'OPEN, DONE or MISSED',
-    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that computed this deadline'
-) COMMENT IS 'Legal clocks per hold (FR-12), computed from PH.LANE_RULE.';
+CREATE OR REPLACE TABLE PH.AGENT_RUN (
+    run_id          DECIMAL(18,0) IDENTITY COMMENT IS 'Run number',
+    case_id         VARCHAR(20)   NOT NULL COMMENT IS 'Ticket worked',
+    viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank the agent works for',
+    run_mode        VARCHAR(10)   NOT NULL COMMENT IS 'pipeline (fixed order) or llm (a local model picks the next tool; the pipeline takes over if it fails)',
+    model_name      VARCHAR(100)           COMMENT IS 'Local model used in llm mode',
+    sim_started_at  TIMESTAMP     NOT NULL COMMENT IS 'Simulated clock when the ticket was picked up',
+    sim_holds_at    TIMESTAMP              COMMENT IS 'Simulated clock when the mandatory holds landed',
+    wall_started_at TIMESTAMP              COMMENT IS 'Real time the run started',
+    wall_seconds    DOUBLE                 COMMENT IS 'Real seconds the whole run took',
+    run_status      VARCHAR(12)            COMMENT IS 'DONE, SENT_BACK, CHECK_FAILED or FAILED',
+    summary_text    VARCHAR(4000)          COMMENT IS 'Case summary for the officer''s morning review'
+) COMMENT IS 'One row per agent run over a ticket.';
 
-CREATE OR REPLACE TABLE PH.NOTICE (
-    decision_id  DECIMAL(18,0) NOT NULL COMMENT IS 'Hold the notice is about',
-    lang         VARCHAR(2)    NOT NULL COMMENT IS 'en, hi or ta',
-    notice_body  VARCHAR(8000) NOT NULL COMMENT IS 'Generated notice text, stored for audit; never contains the victim''s details (SOP 9.1(ii))',
-    sent_at      TIMESTAMP              COMMENT IS 'When it was (simulated) sent'
-) COMMENT IS 'Customer notices (FR-11).';
+CREATE OR REPLACE TABLE PH.AGENT_STEP (
+    run_id      DECIMAL(18,0) NOT NULL COMMENT IS 'Run (PH.AGENT_RUN)',
+    step_no     DECIMAL(4,0)  NOT NULL COMMENT IS 'Order within the run',
+    tool_name   VARCHAR(40)   NOT NULL COMMENT IS 'Tool called',
+    chosen_by   VARCHAR(10)   NOT NULL COMMENT IS 'pipeline, llm, fallback (pipeline took over from the model) or runtime (the checker, always run)',
+    can_change  BOOLEAN       NOT NULL COMMENT IS 'TRUE for the tools that write holds or portal entries',
+    result_text VARCHAR(2000)          COMMENT IS 'What the tool found or did, in one line',
+    stmt_ids    VARCHAR(400)           COMMENT IS 'Exasol statement IDs the tool ran',
+    wall_ms     DECIMAL(9,0)           COMMENT IS 'Real milliseconds the tool took'
+) COMMENT IS 'Append-only log of every tool call the agent made, with the Exasol statements behind it.';
+
+-- ---------------------------------------------------------------- today's process, for the Compare screen
+
+CREATE OR REPLACE TABLE PH.TODAY_RAW (
+    case_id      VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    probe_id     VARCHAR(80)   NOT NULL COMMENT IS 'Account whose action time this replay was cut at',
+    row_kind     VARCHAR(5)    NOT NULL COMMENT IS 'HOLD, EXIT, MOVE or SHORT (as PH.ATTRIBUTION_RAW)',
+    ref_id       VARCHAR(80)   NOT NULL COMMENT IS 'Account, exit or transaction',
+    component    VARCHAR(40)   NOT NULL COMMENT IS 'clean or a victim tag',
+    paise        DECIMAL(18,0) NOT NULL COMMENT IS 'Amount in paise',
+    stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'LIBR replay cut at the moment today''s desk would reach each account (attribution UDF, same as step 2).';
+
+CREATE OR REPLACE TABLE PH.TODAY_OUTCOME (
+    case_id           VARCHAR(20)   NOT NULL COMMENT IS 'Case',
+    viewing_bank_id   VARCHAR(20)   NOT NULL COMMENT IS 'Bank',
+    account_id        VARCHAR(80)   NOT NULL COMMENT IS 'Own-bank account on the trail',
+    hop               DECIMAL(3,0)  NOT NULL COMMENT IS 'Hops from the victim''s payment',
+    action_at         TIMESTAMP     NOT NULL COMMENT IS 'When today''s desk reaches it (desk opening + lookups)',
+    balance_then_inr  DECIMAL(18,2)          COMMENT IS 'Balance at that moment',
+    victim_then_inr   DECIMAL(18,2)          COMMENT IS 'Victim money still in it at that moment (LIBR)',
+    today_action      VARCHAR(15)   NOT NULL COMMENT IS 'WHOLE_FREEZE, LIEN or NOTHING_LEFT',
+    locked_inr        DECIMAL(18,2)          COMMENT IS 'Money locked by today''s action',
+    honest_locked_inr DECIMAL(18,2)          COMMENT IS 'Locked money that is not victims'' money',
+    stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Simulated baseline: the same ticket worked by today''s desk (bank hours, one lookup at a time, whole-account freezes).';
 
 CREATE OR REPLACE TABLE PH.AUDIT_LOG (
     event_id     DECIMAL(18,0) IDENTITY COMMENT IS 'Event number',

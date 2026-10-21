@@ -1,13 +1,17 @@
-"""Turn a recommendation row into plain sentences (requirements s10: plain words over jargon).
+"""Turn an action row into plain sentences: plain words over jargon, action first, reasons after.
 
-The numbers all come from PH.RECOMMENDATION (computed in Exasol); this module only words them. The console,
-notices and report reuse it, so an officer, a holder and a court read the same reasons.
+Every number comes from PH.CASE_ACTION (computed in Exasol); this module only words it. The console, the agent's
+case summary and the officer's review all use it, so the same numbers are always worded the same way.
+The question each account's reasons answer is not "is this a mule?" but "how much should we hold here, and can we
+defend it?" (docs/DESIGN.md).
 """
 from __future__ import annotations
 
 from decimal import Decimal
 
 BANK_NAMES = {"BANK_X": "Bank X", "BANK_Y": "Bank Y", "BANK_Z": "Bank Z"}
+AUTOMATIC = ("MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY")
+PROPOSALS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "CONFIRM_HOLD")
 
 
 def inr(amount) -> str:
@@ -32,54 +36,87 @@ def bank_name(bank_id: str | None) -> str:
     return BANK_NAMES.get(bank_id or "", bank_id or "another bank")
 
 
-def headline(rec: dict) -> str:
-    """One short line for a list or a button: 'Hold Rs 1,000 only', 'Refer Rs 1,19,500 to Bank Y'."""
-    action, amount = rec["action_code"], rec.get("amount_inr")
-    if action == "AMOUNT_HOLD":
-        return f"Hold {inr(amount)} only"
-    if action == "ACCOUNT_HOLD":
-        return "Hold the whole account (last resort)"
-    if action == "REFER_OUT":
-        return f"Refer {inr(amount)} to {bank_name(rec.get('bank_id'))}"
-    if action == "HOLD_MARKER":
-        return "Mark to catch later credits"
-    return "No action" if not rec["account_id"].startswith("EXIT:") else "Record the exit"
+def _d(value) -> Decimal:
+    return Decimal(str(value or 0))
 
 
-def explain(rec: dict) -> list[str]:
-    """Plain sentences for one PH.RECOMMENDATION row (dict with its column names in lower case)."""
-    action, code = rec["action_code"], rec["reason_code"]
+def headline(a: dict) -> str:
+    """One short line for a list or a button."""
+    code, amount = a["action_code"], a.get("amount_inr")
+    if code == "MANDATORY_HOLD":
+        return f"Held {inr(amount)} (amount only)"
+    if code == "HOLD_MARKER":
+        return "Marked to catch later credits"
+    if code == "RECORD_EXIT":
+        return f"Exit recorded: {inr(amount)} of the victim's money"
+    if code == "ONWARD_ENTRY":
+        return f"Onward entry to {bank_name(a.get('bank_id'))}: {inr(amount)}"
+    if code == "PROPOSE_NARROW":
+        return f"Narrow the hold to {inr(amount)}?"
+    if code == "PROPOSE_FULL_FREEZE":
+        return "Freeze the whole account?"
+    if code == "CONFIRM_HOLD":
+        return f"Confirm the {inr(amount)} hold?"
+    if str(a.get("account_id", "")).startswith("EXIT:"):
+        return "Exit at another bank"
+    return "No action here"
+
+
+def explain(a: dict) -> list[str]:
+    """Plain sentences for one PH.CASE_ACTION row (dict with its column names in lower case)."""
+    code, reason = a["action_code"], a.get("reason_code")
+    victim, others = _d(a.get("victim_amount_inr")), _d(a.get("other_victims_inr"))
     out: list[str] = []
-    if action == "AMOUNT_HOLD":
-        out.append(f"Hold {inr(rec['amount_inr'])} only, not the whole account.")
-        if rec.get("draft_narrowing"):
-            out.append(f"Only {inr(rec['victim_amount_inr'])} of it can be traced to the victim's money "
-                       f"({rec['trace_rule']} rule). A request asking the police to narrow the hold to that amount "
-                       f"has been drafted.")
-        if rec.get("draft_seizure"):
-            out.append("The account shows strong signs of being used as a mule account. Freezing the whole account "
-                       "needs a police seizure order under S.106 BNSS after an FIR, so a request for one has been "
-                       "drafted instead.")
-        if code == "NODAL_POOL_ESCROW":
-            out.append("This is a nodal, pool or escrow account, so only the amount is held, never the account.")
-    elif action == "ACCOUNT_HOLD":
-        out.append(f"Hold the whole account ({inr(rec['balance_now_inr'])}) as a last resort, under the RBI draft "
-                   f"rules for suspected mule accounts. The reasons below must be shared with the holder.")
-    elif action == "REFER_OUT":
-        out.append(f"The money left for {bank_name(rec.get('bank_id'))}. Send the onward trail through CFCFRMS, "
-                   f"including that {inr(rec['amount_inr'])} of it was the victim's money.")
-    elif action == "HOLD_MARKER":
-        out.append("Nothing is left in this first-layer account. Mark it so that money arriving later is held.")
-    elif code == "EXIT":
-        out.append("The money left the banking system here, so it cannot be held. The exit and its identifiers "
-                   "are recorded for the police.")
-    elif code == "OTHER_BANK_DOWNSTREAM":
-        out.append(f"This account is at {bank_name(rec.get('bank_id'))}. The bank that paid it refers it onward.")
+    if code == "MANDATORY_HOLD":
+        trail, balance = _d(a.get("trail_amount_inr")), _d(a.get("balance_now_inr"))
+        if trail > balance:
+            out.append(f"The trail names {inr(trail)} arriving here; only {inr(balance)} was left, so all of it is "
+                       f"held. The rules require this hold (SOP 9.1(i)), so the agent placed it at once.")
+        else:
+            out.append(f"The trail names {inr(trail)} arriving here, so {inr(a.get('amount_inr'))} is held: the "
+                       f"amount only, not the account. The rules require this hold (SOP 9.1(i)), so the agent "
+                       f"placed it at once.")
+        if victim < _d(a.get("amount_inr")):
+            out.append(f"Only {inr(victim)} of it can be traced to the victim's money (lowest-balance rule).")
+        if reason == "NODAL_POOL_ESCROW":
+            out.append("This is a nodal, pool or escrow account: only ever the amount, never the account.")
+    elif code == "HOLD_MARKER":
+        out.append("Nothing is left in this first-layer account. It is marked so that money arriving later is held "
+                   "(SOP 9.1(i)). The victim is not told about an empty account.")
+    elif code == "RECORD_EXIT":
+        out.append(f"{inr(a.get('amount_inr'))} of the victim's money left banking here. It cannot be held; the exit "
+                   f"and its identifiers were filed on the portal for the police.")
+    elif code == "ONWARD_ENTRY":
+        out.append(f"The money moved on to {bank_name(a.get('bank_id'))}. The onward entry was filed with the "
+                   f"victim's share ({inr(a.get('amount_inr'))}), so that bank gets its ticket now and can size its "
+                   f"hold.")
+    elif code == "PROPOSE_NARROW":
+        held = _d(a.get("current_hold_inr"))
+        out.append(f"The mandatory hold here is {inr(held)}, but only {inr(victim + others)} of it is victims' money "
+                   f"(lowest-balance rule). The rest is the holder's own.")
+        if reason == "NODAL_POOL_ESCROW":
+            out.append("This is a nodal, pool or escrow account, so the hold should stay as small as the trail allows.")
+        else:
+            out.append("The account's history reads like an honest receiver, so narrowing the lien to the victims' "
+                       "money is proposed. Receiving one tainted payment is not complicity (AP HC, 22 Jun 2026).")
+    elif code == "PROPOSE_FULL_FREEZE":
+        out.append("The account's history shows the exceptional pattern courts accept for a whole-account freeze "
+                   "(Rajasthan HC, 20 Aug 2026). A label alone is not a reason, so the evidence is listed below.")
+        if reason == "REPEATED_COMPLAINTS":
+            out.append("It received money from more than one fraud complaint in the last 7 days.")
+        else:
+            out.append("Most of the money it receives is sent on within the hour, and some leaves as cash or crypto.")
+        out.append("A freeze also stops money that arrives later from being moved. Only an officer can place it.")
+    elif code == "CONFIRM_HOLD":
+        out.append("The account's evidence is borderline. The amount-only hold stays; please confirm it after a look.")
+    elif reason == "EXIT_AT_OTHER_BANK":
+        out.append("The money left banking from another bank's account; that bank files the exit.")
+    elif reason == "OTHER_BANK_DOWNSTREAM":
+        out.append(f"This account is at {bank_name(a.get('bank_id'))}, further down the trail. The bank that paid it "
+                   f"files the onward entry.")
     else:
         out.append("There is no money left here to hold.")
-    if rec.get("other_victims_inr") and Decimal(str(rec["other_victims_inr"])) > 0:
-        out.append(f"The account also holds {inr(rec['other_victims_inr'])} of other victims' money, "
-                   f"to be shared between victims pro rata (SOP para 5(xiii)).")
-    if rec.get("needs_comment"):
-        out.append("The assessment is borderline (REVIEW), so the officer must write a comment before approving.")
+    if others > 0 and code in ("MANDATORY_HOLD", "PROPOSE_NARROW"):
+        out.append(f"The account also holds {inr(others)} of other victims' money, shared between victims pro rata "
+                   f"at refund (SOP para 5(xiii)).")
     return out

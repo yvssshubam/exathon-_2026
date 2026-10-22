@@ -387,6 +387,25 @@ CREATE OR REPLACE TABLE PH.WATCH_EVENT (
     stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
 ) COMMENT IS 'The watch: what the agent saw and did on held accounts after the holds went on (pipeline/watch.py).';
 
+CREATE OR REPLACE TABLE PH.NETWORK_MEMBER (
+    network_id      VARCHAR(10)   NOT NULL COMMENT IS 'N1, N2, ... largest first',
+    viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank whose accounts these are',
+    account_id      VARCHAR(80)   NOT NULL COMMENT IS 'Mule-like own-bank account in the network'
+) COMMENT IS 'Mule networks: accounts on worked tickets joined by money moving between them or a shared cash-out point (pipeline/networks.py).';
+
+CREATE OR REPLACE TABLE PH.NETWORK_LINK (
+    network_id      VARCHAR(10)   NOT NULL COMMENT IS 'Network',
+    viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank',
+    from_account    VARCHAR(80)   NOT NULL COMMENT IS 'Payer (MONEY) or one of the two accounts (SHARED_EXIT)',
+    to_account      VARCHAR(80)   NOT NULL COMMENT IS 'Receiver (MONEY) or the other account (SHARED_EXIT)',
+    link_kind       VARCHAR(12)   NOT NULL COMMENT IS 'MONEY (direct transfers), TRIED (transfers refused because the money was held) or SHARED_EXIT (cashed out at the same ATM or wallet)',
+    txn_count       DECIMAL(9,0)  NOT NULL COMMENT IS 'Transactions behind the link',
+    amount_inr      DECIMAL(18,2) NOT NULL COMMENT IS 'Their total',
+    first_at        TIMESTAMP     NOT NULL COMMENT IS 'First of them',
+    last_at         TIMESTAMP     NOT NULL COMMENT IS 'Last of them',
+    detail          VARCHAR(200)           COMMENT IS 'The shared ATM or wallet, for SHARED_EXIT'
+) COMMENT IS 'Why the accounts of a network belong together: one row per pair and kind of link.';
+
 CREATE OR REPLACE TABLE PH.AUDIT_LOG (
     event_id     DECIMAL(18,0) IDENTITY COMMENT IS 'Event number',
     event_at     TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT IS 'When',

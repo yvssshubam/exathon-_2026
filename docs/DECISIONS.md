@@ -325,3 +325,23 @@ receiver never gets the money. Balances start from the LIBR balance at the first
 officers place later carry the real clock, so they do not affect the replayed night. Accounts outside the trails are
 named by their bank only, since a payer may be a victim whose ticket has not arrived yet. Alerts are recorded, not
 sent: the build has no messaging channel. Running the watch again replaces its events and its marker holds.
+
+## D-39 · DEFAULT · The agent drafts a freeze's reasons; the officer signs them
+
+Courts ask for the material behind a whole-account freeze, so approving one needs written reasons. Opening the
+freeze form fetches a draft (`GET /api/accounts/{account}/reasons-draft`) built from the database: tickets naming the
+account and the victims' money traced into it, the scoring step's signal values, and up to four watch events
+(refused attempts first). The model may reword it only if every number survives unchanged, a stricter check than
+for summaries (percentages, day counts and clock times count too). The draft is a starting point: the officer can
+edit or replace it, and only the text they approve is stored. Each draft served is written to the audit log with
+who wrote it (model or template).
+
+## D-40 · DEFAULT · A mule network is a connected group of mule-like accounts that pay each other
+
+Links are deliberately narrow, so each one can be stated as a fact: money moved directly between two candidate
+accounts (any amount, 30 days back from the latest ticket) or both cashed out at the same ATM or wallet. Sharing a
+victim is not a link on its own, because an honest receiver can share a victim with a mule. Only mule-like accounts
+(MULE or REVIEW band, or a freeze waiting) can be members, so an honest customer such as Murugan is never pulled into a
+network by the money that reached him. Grouping is union-find in Python over links found in Exasol. A network adds no
+power: its single approval runs the same officer approval on each member's waiting freeze, with the officer's name and
+the reasons on each.

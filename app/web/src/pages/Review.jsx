@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api } from "../api.js";
 import Decide from "../components/Decide.jsx";
 import { SinceHold, WatchAside, byAccount } from "../components/Watch.jsx";
+import Networks from "../components/Networks.jsx";
 import { Failed, Loading } from "../components/bits.jsx";
 import { evidenceBullets, evidenceLine } from "../evidence.js";
 import { age, clock, hoursRange, inr, inrR, plural } from "../format.js";
@@ -33,9 +34,10 @@ export default function Review({ officer }) {
   const inbox = useLoad(() => api.inbox(), []);
   const day = useLoad(() => api.day(), []);
   const watch = useLoad(() => api.watch(), []);
+  const nets = useLoad(() => api.networks(), []);
   const [busy, setBusy] = useState(null);
   const [note, setNote] = useState(null);
-  const reload = () => { inbox.reload(); day.reload(); watch.reload(); };
+  const reload = () => { inbox.reload(); day.reload(); watch.reload(); nets.reload(); };
 
   async function run(label, fn) {
     setBusy(label);
@@ -58,6 +60,7 @@ export default function Review({ officer }) {
   const night = data.done.filter((d) => d.after_hours).sort((a, b) => a.received_at.localeCompare(b.received_at));
   const dayTickets = data.done.filter((d) => !d.after_hours).sort((a, b) => a.received_at.localeCompare(b.received_at));
   const watched = byAccount(watch.data);
+  const networkOf = Object.fromEntries((nets.data || []).flatMap((n) => n.members.map((m) => [m.account_id, n.network_id])));
 
   return (
     <>
@@ -76,7 +79,9 @@ export default function Review({ officer }) {
             </div>
           )}
 
-          {g.freeze.length > 0 && <MuleTable groups={g.freeze} officer={officer} onDone={reload} watched={watched} />}
+          <Networks networks={nets.data} waiting={data.waiting} officer={officer} onDone={reload} />
+
+          {g.freeze.length > 0 && <MuleTable groups={g.freeze} officer={officer} onDone={reload} watched={watched} networkOf={networkOf} />}
 
           {g.confirm.length > 0 && (
             <div className="group">
@@ -221,12 +226,12 @@ function HonestCard({ proposals, officer, onDone, watch }) {
   );
 }
 
-function MuleTable({ groups, officer, onDone, watched = {} }) {
+function MuleTable({ groups, officer, onDone, watched = {}, networkOf = {} }) {
   const [open, setOpen] = useState(null);
   const empty = groups.filter((g) => Number(g[0].balance_now_inr) === 0);
   return (
     <div className="group">
-      <div className="group-h"><h3>Mule accounts: freeze the whole account?</h3><span className="count">{groups.length}</span></div>
+      <div className="group-h"><h3>Mule accounts, one by one</h3><span className="count">{groups.length}</span></div>
       <p className="group-p">These accounts pass money straight through. Open one to check the evidence. One approval covers every ticket that names it.</p>
       <div className="table-wrap">
         <table className="table wide">
@@ -240,7 +245,7 @@ function MuleTable({ groups, officer, onDone, watched = {} }) {
               const bal = Math.max(...ps.map((x) => x.balance_now_inr));
               return [
                 <tr key={key} className={open === key ? "open" : ""}>
-                  <td className="name">{p.name}</td>
+                  <td className="name">{p.name}{networkOf[key] && <div className="watchtag" style={{ color: "var(--violet-ink)" }}>Network {networkOf[key]}</div>}</td>
                   <td className="num">{ps.length}</td>
                   <td className="num">{inr(bal)}</td>
                   <td className="ev">{evidenceLine(p)}{(watched[key] || []).some((e) => e.event_kind === "BLOCKED") && (

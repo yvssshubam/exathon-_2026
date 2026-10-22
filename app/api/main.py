@@ -220,10 +220,13 @@ def work_queue(bank: str = Query("BANK_X"), mode: str = Query("pipeline", patter
 
 def _watch(conn, bank: str, mode: str) -> dict:
     """After the tickets: the agent keeps watching the held accounts (pipeline/watch.py)."""
+    from pipeline.networks import run_networks
     from pipeline.watch import run_watch
 
     try:
-        return run_watch(conn, bank, mode)
+        out = run_watch(conn, bank, mode)
+        out["networks"] = run_networks(conn, bank)["networks"]     # after the watch: it knows the latest balances
+        return out
     except steps.StepFailed as exc:
         raise HTTPException(500, str(exc)) from exc
 
@@ -259,6 +262,47 @@ def _event(r: dict):
                  r["counterparty"] or "", r["channel"] or "", Decimal(str(r["held_inr"] or 0)),
                  Decimal(str(r["balance_inr"] or 0)), r["channel"] in ("ATM", "CRYPTO", "CASH"), r["case_ids"],
                  hold_amount=Decimal(str(r["hold_amount"] or 0)))
+
+
+@app.get("/api/accounts/{account_id}/reasons-draft")
+def freeze_reasons(account_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """The agent's draft of the reasons behind a whole-account freeze, for the officer to edit (pipeline/reasons.py).
+    Every number in it comes from the database; the officer's edited text is what gets approved."""
+    from pipeline.db import audit
+    from pipeline.reasons import draft_for
+
+    check_bank(bank)
+    try:
+        out = draft_for(conn, bank, account_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    audit(conn, "freeze_reasons_drafted", detail=f"account={account_id}; written_by={out['written_by']}")
+    return out
+
+
+@app.get("/api/networks")
+def networks(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """Mule networks across the worked tickets: members, why they belong together, tickets and money."""
+    from pipeline.networks import details
+
+    check_bank(bank)
+    return details(conn, bank)
+
+
+@app.get("/api/networks/{network_id}/reasons-draft")
+def network_reasons(network_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """The agent's draft of the reasons for freezing a whole network, and the note for the police."""
+    from pipeline.db import audit
+    from pipeline.llm import client
+    from pipeline.networks import details, draft
+
+    check_bank(bank)
+    found = details(conn, bank, network_id)
+    if not found:
+        raise HTTPException(404, f"no network {network_id}")
+    out = draft(found[0], client())
+    audit(conn, "network_reasons_drafted", detail=f"network={network_id}; written_by={out['written_by']}")
+    return out
 
 
 @app.get("/api/watch")

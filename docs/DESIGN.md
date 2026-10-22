@@ -56,6 +56,19 @@ only money the watch can hold is a marker's catch. Events land in `PH.WATCH_EVEN
 "Since the hold". On the demo night the watch refuses C's ATM withdrawal at 04:30 and A's crypto transfer at 05:10,
 and alerts the officer both times.
 
+## Mule networks
+
+A ticket shows one victim's trail, but the same mule accounts turn up across many tickets and pay each other.
+`pipeline/networks.py` links them after the watch: the candidates are own-bank accounts on worked tickets that look
+like mules or have a freeze waiting; two are linked when money moved directly between them in the 30 days before
+the latest ticket (one pass over `PH.TXN` in Exasol, cases and AMLworld alike) or when both cashed out at the same
+ATM or wallet. Connected groups of two or more are networks (`PH.NETWORK_MEMBER`, `PH.NETWORK_LINK`).
+
+On Review a network is one card and one decision: "Freeze all N accounts" approves every waiting freeze of its
+members across all their tickets, with one set of reasons that doubles as the note to the police listing the tickets
+to investigate together. On the 22 demo tickets the agent finds four: a ring of eight accounts around Mule 10, three
+around Mule 11, A with C from the 02:13 ticket, and the loop case.
+
 ## Automatic vs officer (maker, checker, approver)
 
 | The agent does at once, any hour | The officer decides |
@@ -85,6 +98,11 @@ Tracing, attribution and the rules are deterministic, which is what makes each h
 
 3. **Respond to the watch's events out of hours:** add the event to the evidence only, or also alert the officer,
    from the options the rules allow for that event.
+4. **Draft the reasons behind a whole-account freeze** (`pipeline/reasons.py`). Fixed code gathers the facts: the
+   tickets that name the account, the victims' money in it, its 90-day history and what the watch saw after the
+   hold. The model rewrites them as one paragraph; every number in it (rupees, percentages, days, times) must
+   already be in the facts, or the fixed wording is used. The officer edits it before approving, and the approved
+   text goes into the audit log and the reply to the police.
 
 The model never does arithmetic on money, never chooses an action, never writes to the database. `make agent` runs
 the fixed order; `make agent MODE=llm` lets the model orchestrate. Both produce the same holds.

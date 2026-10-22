@@ -419,7 +419,8 @@ class ExasolBackend:
               "JOIN PH.COMPLAINT_CHECK k ON k.case_id = c.case_id WHERE c.case_id = {c}").fetchone()
         paid = q("SELECT SUM(t.amount_inr) FROM PH.TXN t JOIN PH.COMPLAINT c ON c.utr = t.utr "
                  "WHERE c.case_id = {c}").fetchval()
-        names = dict(q("SELECT account_id, COALESCE(holder_name, account_id) FROM PH.ACCOUNT").fetchall())
+        names = dict(q("SELECT account_id, COALESCE(holder_name, account_id) FROM PH.ACCOUNT "
+                   "WHERE account_id IN (SELECT to_account FROM PH.TRACE_EDGE WHERE case_id = {c})").fetchall())
         holds = [{"name": names.get(a, a), "amount": amt} for a, kind, amt in q(
             "SELECT account_id, hold_kind, amount_inr FROM PH.HOLD_LEDGER WHERE case_id = {c} AND viewing_bank_id = "
             "{b} AND placed_by = 'agent' AND hold_kind = 'LIEN' ORDER BY hold_id").fetchall()]
@@ -495,11 +496,11 @@ def main(argv: list[str] | None = None) -> int:
         for case_id in cases:
             r = work_ticket(conn, case_id, bank, args.mode)
             print(f"{case_id:12} {r['status']:12} run {r['run_id']}  {r['seconds']:.2f}s")
-            for step_no, tool, by, text, ids in conn.execute(
-                    "SELECT step_no, tool_name, chosen_by, result_text, stmt_ids FROM PH.AGENT_STEP "
+            for step_no, tool, by, text, ids, ms in conn.execute(
+                    "SELECT step_no, tool_name, chosen_by, result_text, stmt_ids, wall_ms FROM PH.AGENT_STEP "
                     "WHERE run_id = {r} ORDER BY step_no", {"r": r["run_id"]}).fetchall():
-                shown = text if tool == "error" else text[:110]          # errors in full: they name the cause
-                print(f"   {int(step_no):>2} {tool:26} [{by:8}] {shown}  (stmt {ids})")
+                shown = text if tool == "error" else text[:100]          # errors in full: they name the cause
+                print(f"   {int(step_no):>2} {tool:26} {int(ms or 0):>6} ms [{by:8}] {shown}  (stmt {ids})")
         if not cases:
             print("no queued tickets")
     finally:

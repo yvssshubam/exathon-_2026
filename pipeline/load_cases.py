@@ -6,13 +6,18 @@ KYC details are synthetic and derived from the account ID (never real people, ne
 Uses pyexasol's import_from_iterable, which runs a native IMPORT over HTTP transport: no row-by-row INSERT
 (requirements s8). Reloading is safe: the case tables are truncated first.
 
-  python -m pipeline.load_cases            # load
-  python -m pipeline.load_cases --verify   # load, then compare row counts and sums with the files (AT-01, case half)
+  python -m pipeline.load_cases                 # load
+  python -m pipeline.load_cases --verify        # load, then compare row counts and sums with the files (AT-01)
+  python -m pipeline.load_cases --no-amlworld   # leave the AMLworld background out (quick reset)
+
+When `make data` has loaded AMLworld into schema PH_AML (pipeline/load_amlworld.py), its banks, accounts and
+transactions are copied into PH next to the cases with one INSERT ... SELECT each, inside Exasol (DECISIONS D-37).
 """
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 import zlib
 from decimal import Decimal
 
@@ -29,6 +34,14 @@ WORK_TABLES = ["TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT", "ATTRIBUTION", "ATTRI
                "ACCOUNT_SIGNALS", "ACCOUNT_SCORE", "CASE_ACCOUNT", "CASE_ACTION", "CHECK_RESULT", "HOLD_LEDGER",
                "PORTAL_ENTRY", "DECISION", "AGENT_RUN", "AGENT_STEP", "TODAY_RAW", "TODAY_OUTCOME"]
 SCORING = ROOT / "config" / "scoring.yaml"
+# AMLworld background copied from schema PH_AML (make data) into PH, column for column.
+AMLWORLD_COPY = {
+    "BANK": "bank_id, bank_name, is_own_bank",
+    "ACCOUNT": "account_id, bank_id, holder_name, opened_on, account_type, holder_type, profile_band, "
+               "history_profile, customer_id",
+    "TXN": "txn_id, utr, ts, from_account, to_account, amount_inr, channel, is_exit, exit_identifier, data_source",
+}
+AMLWORLD_KEY = {"BANK": "bank_id", "ACCOUNT": "account_id", "TXN": "txn_id"}   # every AMLworld ID starts with AML
 
 
 def ts(value: str | None) -> str | None:
@@ -103,23 +116,58 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tup
     return out
 
 
-def load(conn, rows: dict[str, list[tuple]]) -> None:
+def amlworld_loaded(conn) -> bool:
+    return bool(conn.execute("SELECT COUNT(*) FROM EXA_ALL_TABLES WHERE TABLE_SCHEMA = 'PH_AML' "
+                             "AND TABLE_NAME = 'TXN'").fetchval())
+
+
+def load(conn, rows: dict[str, list[tuple]], amlworld: bool = True) -> dict[str, int]:
+    """Load the cases; keep or copy in the AMLworld background (make data). Returns the AMLworld rows per table.
+
+    AMLworld rows (IDs starting AML) are left in place when they already match PH_AML, so a reset from the console
+    reloads only the cases; they are copied in again after `make db` or a new `make data`.
+    """
     for table in WORK_TABLES:
         conn.execute(f"TRUNCATE TABLE PH.{table}")
+    keep = amlworld and amlworld_loaded(conn)
     for table in TABLES:
-        conn.execute(f"TRUNCATE TABLE PH.{table}")
+        if keep and table in AMLWORLD_KEY:
+            conn.execute(f"DELETE FROM PH.{table} WHERE LEFT({AMLWORLD_KEY[table]}, 3) <> 'AML'")
+        else:
+            conn.execute(f"TRUNCATE TABLE PH.{table}")
         conn.import_from_iterable(rows[table], ("PH", table))
         print(f"loaded {len(rows[table]):7} rows into PH.{table}")
+    copied: dict[str, int] = {}
+    if keep:
+        for table, cols in AMLWORLD_COPY.items():
+            key = AMLWORLD_KEY[table]
+            staged = conn.execute(f"SELECT COUNT(*) FROM PH_AML.{table}").fetchval()
+            present = conn.execute(f"SELECT COUNT(*) FROM PH.{table} WHERE LEFT({key}, 3) = 'AML'").fetchval()
+            if present != staged:
+                started = time.perf_counter()
+                conn.execute(f"DELETE FROM PH.{table} WHERE LEFT({key}, 3) = 'AML'")
+                conn.execute(f"INSERT INTO PH.{table} ({cols}) SELECT {cols} FROM PH_AML.{table}")
+                print(f"copied {staged:7} AMLworld rows into PH.{table} ({time.perf_counter() - started:.1f}s)")
+            else:
+                print(f"kept   {staged:7} AMLworld rows in PH.{table}")
+            copied[table] = staged
+    elif amlworld:
+        print("AMLworld not loaded (make data): the cases run without the background")
+    return copied
 
 
-def verify(conn, rows: dict[str, list[tuple]]) -> bool:
+def verify(conn, rows: dict[str, list[tuple]], copied: dict[str, int] | None = None) -> bool:
     ok = True
+    copied = copied or {}
     for table in TABLES:
         n = conn.execute(f"SELECT COUNT(*) FROM PH.{table}").fetchval()
-        good = n == len(rows[table])
+        expected = len(rows[table]) + copied.get(table, 0)
+        good = n == expected
         ok &= good
-        print(f"{'ok ' if good else 'BAD'} PH.{table:17} db={n:7}  file={len(rows[table]):7}")
-    db_sum = Decimal(str(conn.execute("SELECT SUM(amount_inr) FROM PH.TXN").fetchval()))
+        extra = f" + AMLworld={copied[table]}" if table in copied else ""
+        print(f"{'ok ' if good else 'BAD'} PH.{table:17} db={n:7}  file={len(rows[table]):7}{extra}")
+    db_sum = Decimal(str(conn.execute(
+        "SELECT SUM(amount_inr) FROM PH.TXN WHERE data_source <> 'amlworld'").fetchval()))
     file_sum = sum(Decimal(r[5]) for r in rows["TXN"])
     good = db_sum == file_sum
     ok &= good
@@ -137,6 +185,7 @@ def verify(conn, rows: dict[str, list[tuple]]) -> bool:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--no-amlworld", action="store_true", help="leave the AMLworld background out")
     args = ap.parse_args(argv)
     cases = {source: load_case(path) for source, path in CASE_FILES.items()}
     rows = rows_for(cases)
@@ -144,9 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     from pipeline.db import audit, connect
 
     conn = connect()
-    load(conn, rows)
-    audit(conn, "seed_cases", detail=f"{sum(len(r) for r in rows.values())} rows")
-    good = verify(conn, rows) if args.verify else True
+    copied = load(conn, rows, amlworld=not args.no_amlworld)
+    audit(conn, "seed_cases", detail=f"{sum(len(r) for r in rows.values())} case rows, "
+                                     f"{copied.get('TXN', 0)} AMLworld transactions")
+    good = verify(conn, rows, copied) if args.verify else True
     conn.close()
     return 0 if good else 1
 

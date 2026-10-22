@@ -37,5 +37,6 @@ SELECT c.case_id,
            CASE WHEN t.txn_id IS NULL THEN 'UTR not found in transactions; ' ELSE '' END
        ) AS problems
 FROM PH.COMPLAINT c
-LEFT JOIN (SELECT utr, MIN(txn_id) AS txn_id FROM PH.TXN GROUP BY utr) t ON t.utr = c.utr
+LEFT JOIN (SELECT utr, MIN(txn_id) AS txn_id FROM PH.TXN WHERE utr IN (SELECT utr FROM PH.COMPLAINT)
+           GROUP BY utr) t ON t.utr = c.utr
 COMMENT IS 'FR-02: whether each complaint notice is complete (amount, legal basis, UTR, acknowledgement number) and what is missing.';

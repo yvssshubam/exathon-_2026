@@ -112,7 +112,8 @@ def compare(conn, case_id: str, bank: str) -> dict:
     if not today_rows:
         run_today(conn, case_id, bank)
         return compare(conn, case_id, bank)
-    names = dict(q("SELECT account_id, COALESCE(holder_name, account_id) FROM PH.ACCOUNT").fetchall())
+    names = dict(q("SELECT account_id, COALESCE(holder_name, account_id) FROM PH.ACCOUNT "
+                   "WHERE account_id IN (SELECT to_account FROM PH.TRACE_EDGE WHERE case_id = {c})").fetchall())
     today_accounts, t_victim, t_honest, t_first = [], Decimal(0), Decimal(0), None
     for acc, _hop, at, bal, victim, action, locked, honest, stmt in today_rows:
         held_victim = min(_num(victim), _num(locked))

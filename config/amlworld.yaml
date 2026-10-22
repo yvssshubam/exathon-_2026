@@ -1,0 +1,48 @@
+# IBM AMLworld HI-Small: how `make data` maps it into Exasol (pipeline/load_amlworld.py, sql/amlworld/).
+# The CSVs are downloaded by hand from Kaggle into data/raw/ and never committed (README, "Data is synthetic").
+
+files:
+  transactions: data/raw/HI-Small_Trans.csv     # required
+  accounts: data/raw/HI-Small_accounts.csv      # required
+  patterns: data/raw/HI-Small_Patterns.txt      # optional: the labelled laundering attempts
+
+# AMLworld runs in September 2022. Every timestamp moves by the same number of days so its last day is the day
+# before the case day: the background ends where the cases start, like the generated history (DECISIONS D-23,
+# D-37), so the case-day numbers do not change.
+last_day: "2026-10-17"
+
+# AMLworld mixes 15 currencies. The rate of each to the US dollar is read from the file itself (the median
+# Amount Received / Amount Paid over the rows that convert to or from US dollars), so the dataset's own exchange
+# rates are kept. One fixed rate then turns dollars into rupees. Illustrative, not market data.
+usd_to_inr: 84
+
+# Used only for a currency the file never converts to or from dollars (printed as "fallback" by the loader).
+# Rough September 2022 rates, the month AMLworld simulates.
+fallback_usd_per_unit:
+  US Dollar: 1
+  Euro: 1.0
+  UK Pound: 1.16
+  Swiss Franc: 1.03
+  Yuan: 0.145
+  Yen: 0.0070
+  Rupee: 0.0125
+  Australian Dollar: 0.68
+  Canadian Dollar: 0.76
+  Mexican Peso: 0.050
+  Ruble: 0.0165
+  Brazil Real: 0.19
+  Saudi Riyal: 0.266
+  Shekel: 0.29
+  Bitcoin: 20000
+
+# AMLworld payment formats -> the channels this project uses. Every AMLworld row names a receiving account, so
+# no row is an exit: cash and bitcoin keep their channel but stay account-to-account transfers (DECISIONS D-37).
+# null = not loaded (Reinvestment is an account paying itself).
+channels:
+  ACH: NEFT
+  Wire: RTGS
+  Cheque: CHEQUE
+  Credit Card: CARD
+  Cash: CASH
+  Bitcoin: CRYPTO
+  Reinvestment: null

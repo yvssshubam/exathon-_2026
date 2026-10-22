@@ -123,7 +123,8 @@ def present(action: dict, names: dict | None = None) -> dict:
 
 def holder_names(conn) -> dict:
     return {r["account_id"]: r["holder_name"] or r["account_id"]
-            for r in rows(conn, "SELECT account_id, holder_name FROM PH.ACCOUNT")}
+            for r in rows(conn, "SELECT account_id, holder_name FROM PH.ACCOUNT "
+                                "WHERE account_id IN (SELECT account_id FROM PH.CASE_ACCOUNT)")}
 
 
 ACTION_SQL = """
@@ -389,8 +390,11 @@ def account_panel(case_id: str, account_id: str, bank: str = Query("BANK_X"), co
                                        AND f.victim_tag = c.victim_tag
         WHERE e.case_id = {c} AND (e.to_account = {a} OR e.from_account = {a}) ORDER BY e.ts""",
                  {"c": case_id, "a": account_id})
+    victims = {v for (v,) in conn.execute("SELECT victim_account FROM PH.COMPLAINT").fetchall()}
     for f in flows:
-        f["from_name"] = names.get(f["from_account"], f["from_account"])
+        # the victim's details stay off the bank's screens (SOP 9.1(ii))
+        f["from_name"] = "the victim" if f["from_account"] in victims else names.get(f["from_account"],
+                                                                                    f["from_account"])
         f["to_name"] = f["exit_identifier"] if f["is_exit"] else names.get(f["to_account"], f["to_account"])
     return {"case_id": case_id, "account_id": account_id, "bank": bank, "account": account, "split": split,
             "facts": facts, "evidence": score, "reasons": reasons, "signals": signals, "actions": acts,

@@ -2,9 +2,10 @@
 
 ## IBM AMLworld (synthetic transactions)
 
-Used as background traffic (HI-Small; HI-Medium for the optional scale demo). Downloaded by
-`scripts/download_data.sh` from Kaggle (`ealtman2019/ibm-transactions-for-anti-money-laundering-aml`) and
-never committed. Released under a Community Data License Agreement.
+Used as background traffic: HI-Small (about 5 million transactions), downloaded by hand from Kaggle
+(`ealtman2019/ibm-transactions-for-anti-money-laundering-aml`) into `data/raw/` and never committed. Amounts are
+converted to rupees and timestamps moved to October 2026 when loaded (`docs/DECISIONS.md`, D-37).
+Released under a Community Data License Agreement.
 TODO: confirm the exact CDLA variant on the Kaggle page and quote it here.
 Paper: Altman et al., "Realistic Synthetic Financial Transactions for Anti-Money Laundering Models", NeurIPS 2023.
 

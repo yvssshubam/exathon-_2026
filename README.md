@@ -43,9 +43,17 @@ summary, and the fixed order takes over whenever it fails ([DESIGN.md](docs/DESI
 
 ## Data is synthetic
 
-No real bank, customer or employer data. The demo ticket and 20 extra victims are invented (fixed seed 42); account
-histories and KYC details are generated, with obviously fake identifiers. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+No real bank, customer or employer data.
+
+- **Background traffic:** IBM AMLworld HI-Small, about 5 million simulated transactions between simulated banks
+  (public, on Kaggle). It is converted to rupees at the dataset's own exchange rates and ₹84 per US dollar, its
+  payment formats are mapped to Indian channels (ACH → NEFT, wire → RTGS, ...), and it is moved to the weeks
+  before the case day, so the agent works every ticket against a full-size transaction table
+  ([DECISIONS.md, D-37](docs/DECISIONS.md)).
+- **The tickets:** the 02:13 a.m. demo ticket and 21 more are invented (fixed seed 42); their account histories and
+  KYC details are generated, with obviously fake identifiers.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Quick start (no database needed)
 
@@ -76,6 +84,19 @@ python -m pipeline.run_sql sql              # build schema PH
 python -m pipeline.load_cases --verify      # load the cases; every ticket QUEUED
 python -m pytest -q -m db
 ```
+
+**AMLworld background (optional, about 10 minutes once).** From
+[Kaggle](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml) (free
+account), download `HI-Small_Trans.csv`, `HI-Small_accounts.csv` and `HI-Small_Patterns.txt` into `data/raw/`.
+Don't open and re-save them in Excel: it drops the leading zeros of the bank codes. Then:
+
+```sh
+python -m pipeline.load_amlworld --check    # files present and shaped as expected (no database)
+make data                                   # or: python -m pipeline.load_amlworld
+                                            #     python -m pipeline.load_cases --verify
+```
+
+The import runs once into schema `PH_AML`; `make db`, `make demo-reset` and the console's Reset keep it.
 
 Exasol Personal is used under its EULA and is not redistributed here; the `exasol` launcher is MIT.
 

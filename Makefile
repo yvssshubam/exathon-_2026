@@ -53,8 +53,9 @@ demo-reset: ## Rebuild the schema and reload the cases: every ticket QUEUED agai
 	$(PY) -m pipeline.run_sql sql
 	$(PY) -m pipeline.load_cases --verify
 
-data: ## Load AMLworld HI-Small (not built yet)
-	@echo 'make data is not built yet (AMLworld HI-Small download, map, IMPORT)'; exit 1
+data: ## Load AMLworld HI-Small from data/raw/ into Exasol, then copy it in next to the cases
+	$(PY) -m pipeline.load_amlworld
+	$(PY) -m pipeline.load_cases --verify
 
 run: ## Start the API on http://127.0.0.1:8000 (docs at /docs)
 	$(PY) -m app.api

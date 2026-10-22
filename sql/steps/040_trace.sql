@@ -15,14 +15,16 @@
 --   * The trace over-reaches on purpose; how much victim money each edge really carried is step 2's job.
 --   * One row per transaction: shortest hop, first path, loop if any path revisits an account (DECISIONS D-20).
 --   * Every TRACE_EDGE row stores the session and statement that produced it (NFR-06).
+--   * The victim's payment is found by joining PH.COMPLAINT, not by filtering on the UTR: Exasol answers a join from
+--     its automatic index on PH.TXN(utr), a filter by scanning every row (4.6 million with AMLworld, D-37).
 
 DELETE FROM PH.TRACE_LINK WHERE case_id = {case_id};
 
 INSERT INTO PH.TRACE_LINK (case_id, parent_txn, child_txn, from_account, to_account, amount_inr, ts, is_exit)
 SELECT {case_id}, NULL, r.txn_id, r.from_account, r.to_account, r.amount_inr, r.ts, r.is_exit
 FROM PH.TXN r
-WHERE r.utr = {utr}
-  AND r.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+JOIN PH.COMPLAINT cp ON cp.utr = r.utr AND cp.case_id = {case_id}
+WHERE r.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
 UNION ALL
 SELECT {case_id}, p.txn_id, c.txn_id, c.from_account, c.to_account, c.amount_inr, c.ts, c.is_exit
 FROM PH.TXN p
@@ -31,8 +33,11 @@ JOIN PH.TXN c
   AND c.txn_id <> p.txn_id
   AND c.ts >= p.ts
   AND c.ts <= ADD_HOURS(p.ts, {window_hours!d})
-WHERE p.ts >= (SELECT MIN(ts) FROM PH.TXN WHERE utr = {utr})
+WHERE p.ts >= (SELECT MIN(v.ts) FROM PH.TXN v JOIN PH.COMPLAINT cv ON cv.utr = v.utr AND cv.case_id = {case_id})
   AND p.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+  -- c.ts >= p.ts already implies this; stating it lets Exasol cut both sides of the join to the case window
+  -- before joining, instead of joining the whole table (D-37)
+  AND c.ts >= (SELECT MIN(w.ts) FROM PH.TXN w JOIN PH.COMPLAINT cw ON cw.utr = w.utr AND cw.case_id = {case_id})
   AND c.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS');
 
 DELETE FROM PH.TRACE_EDGE WHERE case_id = {case_id};

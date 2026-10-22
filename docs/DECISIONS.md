@@ -1,10 +1,12 @@
 # Decisions and spec gaps
 
-Every place where `docs/REQUIREMENTS.md` was ambiguous, self-contradictory, or needed a concrete choice.
+Every place where `docs/REQUIREMENTS.md` (the first spec) or `docs/DESIGN.md` (the golden-hour redesign) was
+ambiguous, self-contradictory, or needed a concrete choice. D-27 onwards come from the redesign; entries it replaced
+are marked **SUPERSEDED** and kept so the history stays readable.
 Status: **OPEN** needs the team's answer; **DEFAULT** is what the code does until someone says otherwise;
 **VERIFY** must be checked against a running Exasol before it is relied on.
 
-## D-01 · DECIDED · Every bank can run the tool; D stays at Bank Z
+## D-01 · DECIDED, UPDATED BY D-28 · Every bank can run the tool
 
 **Conflict.** Section 3 puts B at Bank Y and D (Murugan) at Bank Z. Section 9 says edges into other banks are
 "kept but not expanded further". But AT-03 expects the trail to reach D and the ATM exit, both of which hang off B
@@ -51,7 +53,7 @@ If an outflow exceeds what the replay knows the account holds, the shortfall is 
 in the account before the window, and recorded as `opening_shortfall`. Tainted money is never created or
 destroyed by this, so conservation still holds. Relevant for AMLworld background accounts.
 
-## D-06 · DEFAULT · Attribution has an `as_of` cut-off
+## D-06 · DEFAULT · Attribution has an `as_of` cut-off (numbers updated by D-28)
 
 The replay includes transactions up to `as_of`. With the tool, `as_of` = the moment holds are placed
 (demo: 18 Oct 2026 11:13), so C's 12:30 cash-out is excluded and C still holds ₹80,000. The baseline uses each
@@ -90,7 +92,7 @@ The demo case is dated **Sun 18 Oct 2026**, from UTR `IMPS2026101810020001`. Exi
 `EXIT:<channel>:<identifier>` (for example `EXIT:ATM:BY-ATM-0042`) so the trail graph can draw them; they are
 never rows in `ACCOUNT` and never held.
 
-## D-12 · DEFAULT · Lane A deadline anchors
+## D-12 · SUPERSEDED (D-33: deadlines cut) · Lane A deadline anchors
 
 `config/lanes.yaml` anchors each Lane A deadline to the event that starts it (hold placed, grievance received,
 grievance forwarded). Until a grievance is forwarded, the officer-decision date is projected from the grievance
@@ -115,7 +117,7 @@ FR-07 asks for a pro rata split between victims (SOP 5(xiii)). LIBR (the default
 that. FIFO is kept as a tracing rule in its own right, so it splits by arrival order; the report prints the
 rule used. AT-06 is tested under LIBR and PRO_RATA.
 
-## D-16 · DEFAULT · "Ask" runs on a local model, not a hosted AI service
+## D-16 · SUPERSEDED (D-31) · "Ask" runs on a local model, not a hosted AI service
 
 FR-16 (investigator questions in plain English through the Exasol MCP server) is built into the officer console:
 the console's Ask screen sends the question to a local model served by Ollama, which calls the read-only
@@ -139,7 +141,7 @@ Files in `sql/` (numbered) build the database and run once with `make db`. Files
 steps (trace, attribute, score, recommend). They take parameters such as `{case_id}` and `{own_bank_id}`, are run
 by `pipeline/steps.py` (later by the API), and do all their work in Exasol; Python only passes parameters.
 
-## D-19 · DEFAULT · When holds are placed
+## D-19 · DEFAULT · When holds are placed (demo times updated by D-28)
 
 A case's replay and trace stop at `as_of`: by default the complaint's `reported_at` plus `hold_minutes` (3) from
 `config/case_defaults.yaml`. For the demo, 11:10 + 3 minutes = 11:13, the time section 3 gives for holding C.
@@ -185,7 +187,7 @@ daily; mules forward within minutes either way.
 loaded: about 300 small payments a day for merchants such as Murugan, a few large fast-forwarded credits for mules.
 It ends before 18 Oct 2026 00:00, when the opening balances are taken, so the case-day numbers are unchanged.
 
-## D-24 · DEFAULT · Recommendations are structured columns; the wording is generated from them
+## D-24 · SUPERSEDED (D-29) · Recommendations are structured columns; the wording is generated from them
 
 `PH.RECOMMENDATION` stores the action, amounts, band, lane, legal basis, a `reason_code` naming which rule of
 requirements s9 step 4 fired, and flags for the drafted requests (narrowing, seizure), last resort and a required
@@ -197,7 +199,7 @@ console, the customer notice and the report all word the same numbers the same w
 - The amount held is the amount the trail names for the account, or the attributed amount if the notice names
   none, capped at the balance (SOP 9.1(i)): A ₹500, C ₹80,000, D ₹1,000 with a request to narrow it to ₹500.
 
-## D-25 · DEFAULT · Officer actions, clocks and notices
+## D-25 · SUPERSEDED (D-30, D-33) · Officer actions, clocks and notices
 
 - `pipeline/officer.py` is the only way to place a hold. It enforces AT-09 (named officer; written reason for a
   rejection, an edited amount, a whole-account hold or a REVIEW-band approval) and writes `PH.DECISION`
@@ -209,31 +211,107 @@ console, the customer notice and the report all word the same numbers the same w
 - Notices are rendered from `templates/notices/{en,hi,ta}.yaml`. The Hindi and Tamil text was drafted for the demo
   and should be checked by a native speaker before any real use. The victim's details are never passed to the
   renderer, so they cannot appear (SOP 9.1(ii)).
-- Words that come from the data (bank and holder names, police station, legal section, grievance officer and title)
-  are translated through each template's `terms` list, and the mule signals are worded from its
-  `signal_sentences`, so a Hindi or Tamil notice contains no English beyond identifiers (UTR, account number,
-  reference number, e-mail) and acronyms (BNSS, RBI, KYC). A test checks this.
 - `PH.COMPLAINT_CHECK` (a view) flags an incomplete notice: no amount, no legal basis (Lane A), no or unknown UTR,
   or an acknowledgement number that is not 14 digits or does not match its source (FR-02).
 
-## D-26 · DEFAULT · The API is a thin router
+## D-26 · DEFAULT, UPDATED BY D-30 · The API is a thin router
 
 `app/api/main.py` (FastAPI) opens one Exasol session per request, calls `pipeline/steps.py` (which runs the SQL in
 Exasol) and `pipeline/officer.py` (which enforces the approval rules), and shapes JSON for the console. It holds no
 business rules of its own and has no route that places a hold without an officer's approval. Officer identity is a
 name in the request: login and permissions are production security, out of scope (requirements s1). The victim's
 account is never returned by the case or account endpoints, only by the victim's own status view.
+## D-27 · DECIDED · Build zone: the bank nodal officer inside the golden hour
 
-## D-27 · DEFAULT · The officer console
+The problem discovery (`docs/PROBLEM_DISCOVERY.md`) found that the money is decided at the first bank, in the first
+hour, by a desk that keeps bank hours and has every reason to over-freeze. The build therefore leads with speed at
+Layer 1 (work every ticket at once, at any hour) and keeps attribution as the precision half (size each hold to the
+victim's share, with reasons). Mule detection is not the product: MuleHunter.AI and the I4C Suspect Registry cover
+it, and the account signals stay only as an input to how much to hold.
 
-`app/web` is a React app built with Vite. It talks only to the API (Vite forwards `/api` to port 8000), holds no
-business rules, and uses hash routes (`#/cases`, `#/case/<id>/<account>`, `#/decisions`, `#/deadlines`,
-`#/victim/<id>`) so no router library is needed.
-- One visual idea runs through every screen: an account's balance drawn as a bar split into the victim's share
-  (violet, held) and the holder's own money (green, stays usable). Rust marks money that left the banking system.
-- The trail is drawn top to bottom, one row per hop, so it fits beside the account panel on a laptop screen.
-- "Working at" picks the viewing bank (Bank X/Y/Z, DECISIONS D-01); the officer's name is remembered in the browser
-  as a convenience only. Every approval still sends the name, and the API rejects an empty one.
-- The engine words amounts as "Rs 1,19,500" (safe in any terminal); the console shows "₹1,19,500".
-- Fonts are bundled from npm (Atkinson Hyperlegible for legibility, Noto Sans for Hindi and Tamil notices), so the
-  console works offline.
+## D-28 · DECIDED · The demo ticket lands at 02:13, and Murugan banks with Bank X
+
+The fraud payment is at 01:52 and the ticket reaches Bank X at 02:13 (the "2:13 a.m. run"); holds land at 02:16
+(D-19). D (Murugan's pump) moved to Bank X, so the bank running the tool holds his account and the narrowing decision
+is its own (the open point in D-01). The money: A sends ₹70,000 to B at Bank Y and ₹80,000 to C; C pays Murugan
+₹1,000 and withdraws ₹50,000 before the ticket; C cashes out the rest at 04:30 and A at 05:10 if nobody acts. C starts
+with ₹500 of its own, which under LIBR leaves first, inside the diesel payment: so only ₹500 of Murugan's ₹1,000 is
+the victim's. Expected numbers are in `data/demo_case.yaml` and asserted by the tests.
+
+## D-29 · DEFAULT · Actions carry who does them: AUTOMATIC or OFFICER
+
+`PH.CASE_ACTION` replaces `PH.RECOMMENDATION`. Each row is an action code, a mode and a status. Automatic:
+`MANDATORY_HOLD`, `HOLD_MARKER`, `RECORD_EXIT`, `ONWARD_ENTRY` (plus the KYC draft). Officer: `PROPOSE_NARROW`,
+`PROPOSE_FULL_FREEZE`, `CONFIRM_HOLD`. One account can have both (Murugan: the ₹1,000 hold is done, narrowing to ₹500
+waits). The facts the rules read are written first to `PH.CASE_ACCOUNT`, so a wrong action can be traced to a fact.
+Thresholds and legal bases live in `config/rules.yaml`; `tests/rules_oracle.py` applies the same table in Python.
+
+## D-30 · DECIDED · Mandatory holds are placed by the agent, not approved by the officer
+
+The first spec had an officer approve every hold. The redesign follows the SOP: the bank cannot refuse an alert and
+must hold the reported amount or the part available, so waiting for approval only loses the golden hour. The agent
+places exactly that hold (amount only, `placed_by = 'agent'`) and nothing wider. Narrowing, full freezes and
+borderline accounts wait for an officer; the hold ledger keeps every replaced hold. Releasing a mandatory hold stays
+with the bank's Department Head and is out of scope.
+
+## D-31 · DEFAULT · The model orchestrates and writes; it never calculates or decides
+
+The agent runs in a fixed order by default. In `llm` mode a local Ollama model picks the next tool from those the
+runtime allows (prerequisites + the checker), and words the summary. A disallowed pick is overruled; any failure hands
+control to the fixed order; text whose rupee figures are not all in the facts it was given is discarded. No paid API
+(the project spends nothing) and no data leaves the laptop.
+
+## D-32 · DEFAULT · The checker runs in SQL before anything changes
+
+`075_check.sql` writes six checks to `PH.CHECK_RESULT`. The change-making SQL files themselves refuse to act unless
+check rows exist for the case and none failed, so a bug in the Python orchestration cannot bypass the checker.
+Conservation compares the victim's root payment with the victim money found on the trail, to the paisa.
+
+## D-33 · DECIDED · Cut: Lane B, notices, deadlines, victim view, investigator Q&A, FIFO on screen
+
+Reasons in `docs/DESIGN.md`. `config/lanes.yaml`, `templates/notices/`, `PH.LANE_RULE`, `PH.DEADLINE` and
+`PH.NOTICE` are gone (the schema drops them on rebuild). Every ticket is Lane A; the two generated Lane B tickets are
+now Lane A. FIFO and pro rata are still computed by the UDF and tested; only LIBR is shown.
+
+## D-34 · DEFAULT · Onward entries and exits are filed automatically; KYC packets wait
+
+Both are mandatory reports with no discretion in them, and the next bank's golden hour depends on the onward entry.
+KYC packets (due within a week) are drafted at once and sent by the officer. KYC data is synthetic, derived from the
+account ID (`SYNTH....` PAN placeholders, example.com e-mail).
+
+## D-35 · DEFAULT · Today's desk is a replay in Exasol, cut at each account's desk time
+
+For Compare, `090_today.sql` reruns the attribution UDF (LIBR) over the accounts the trail reached, cut at the moment
+today's desk would reach each own-bank account (desk opens 10:00, 20 minutes for the first lookup, 15 per account,
+whole-account freezes; `data/demo_case.yaml` `today:`). It does not re-trace accounts the money reached only after
+the ticket, which can only flatter today's desk. Victim money held counts each account's widest hold once.
+
+## D-36 · DEFAULT · The ticket queue and the simulated clock
+
+All complaints load into `PH.TICKET` as QUEUED with their arrival time. The agent works a ticket "at" its arrival
+time: holds and entries carry the simulated clock (arrival + `hold_minutes`), while the run's real duration is stored
+separately (`AGENT_RUN.wall_seconds`). Officer decisions carry the real time they were made.
+
+## D-37 · DEFAULT · AMLworld is background traffic that ends where the cases start
+
+`make data` loads IBM AMLworld HI-Small (about 5 million transactions) into schema `PH_AML`, and `make seed` copies
+it into `PH.TXN`, `PH.ACCOUNT` and `PH.BANK` next to the cases, so every step runs against a full-size table.
+
+* **Time.** Every AMLworld timestamp moves forward by the same number of days so its last day is 17 Oct 2026, the
+  day before the case day, as with the generated history (D-23). The trace starts at the victim's payment, so it
+  never walks into the background, and the case-day numbers do not change.
+* **Money.** AMLworld mixes 15 currencies. Each currency's rate to the US dollar is read from the file itself (the
+  median of Amount Received / Amount Paid over rows that convert to or from dollars), then one fixed rate turns
+  dollars into rupees (`config/amlworld.yaml`, ₹84). Illustrative, not market data.
+* **Channels.** ACH → NEFT, Wire → RTGS, Cheque → CHEQUE, Credit Card → CARD, Cash → CASH, Bitcoin → CRYPTO.
+  Every AMLworld row names a receiving account, so none is an exit. Reinvestment rows (an account paying itself)
+  are not loaded.
+* **Accounts.** AMLworld has no opening dates or declared income. Opening dates are spread from 1 to 10 years
+  before 17 Oct 2026, fixed per account, and every profile band is `medium`, so the account-age and
+  credit-vs-profile signals stay neutral instead of inventing evidence. Holder type comes from the entity name
+  (sole proprietorship → merchant, corporation or partnership → business, otherwise individual).
+* **IDs.** `AML_<bank>_<account>`, `AML_<bank>`, `AML<n>` and `AMLW<n>`, so nothing collides with the cases.
+  Bank codes lose their leading zeros, because the transactions file writes `010` where the accounts file writes
+  `10`.
+* **Persistence.** `PH_AML` survives `make db` and `make demo-reset`; the import runs once, the copy into `PH` on
+  every reset (a few seconds in Exasol). `python -m pipeline.load_cases --no-amlworld` leaves it out.

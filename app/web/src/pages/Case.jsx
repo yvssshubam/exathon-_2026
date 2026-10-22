@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import Decide from "../components/Decide.jsx";
+import { SinceHold } from "../components/Watch.jsx";
 import { Failed, Loading, Stmt } from "../components/bits.jsx";
 import { evidenceRows, evidenceTitle } from "../evidence.js";
 import { age, clock, inr, plural, when } from "../format.js";
@@ -294,6 +295,8 @@ function AccountAside({ caseId, node, edges, officer, v, onDone }) {
           <table className="evtable"><tbody>{rows.map(([k, val]) => <tr key={k}><td>{k}</td><td>{val}</td></tr>)}</tbody></table>
         </>
       )}
+
+      <SinceHold events={p.watch} />
 
       {basis && (
         <details>

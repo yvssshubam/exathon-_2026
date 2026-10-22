@@ -200,7 +200,9 @@ def work_one(case_id: str, bank: str = Query("BANK_X"), mode: str = Query("pipel
     the paperwork. Judgment calls are queued for the officer."""
     check_bank(bank)
     check_case(conn, case_id)
-    return _work(conn, case_id, bank, mode)
+    out = _work(conn, case_id, bank, mode)
+    out["watch"] = _watch(conn, bank, mode)
+    return out
 
 
 @app.post("/api/queue/work")
@@ -212,7 +214,66 @@ def work_queue(bank: str = Query("BANK_X"), mode: str = Query("pipeline", patter
     check_bank(bank)
     started = time.perf_counter()
     results = [_work(conn, case_id, bank, mode) for case_id in queued(conn)[:limit]]
-    return {"worked": results, "seconds": round(time.perf_counter() - started, 3)}
+    watch = _watch(conn, bank, mode) if results else None
+    return {"worked": results, "watch": watch, "seconds": round(time.perf_counter() - started, 3)}
+
+
+def _watch(conn, bank: str, mode: str) -> dict:
+    """After the tickets: the agent keeps watching the held accounts (pipeline/watch.py)."""
+    from pipeline.watch import run_watch
+
+    try:
+        return run_watch(conn, bank, mode)
+    except steps.StepFailed as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+WATCH_SQL = """
+    SELECT w.event_id, w.account_id, COALESCE(a.holder_name, w.account_id) AS name, w.txn_id, w.event_at,
+           w.event_kind, w.amount_inr, w.counterparty, w.channel, w.held_inr, w.balance_inr, w.case_ids,
+           w.response, w.allowed_responses, w.chosen_by, w.alert_text, w.hold_id, h.amount_inr AS hold_amount, w.stmt_id
+    FROM PH.WATCH_EVENT w LEFT JOIN PH.ACCOUNT a ON a.account_id = w.account_id
+    LEFT JOIN PH.HOLD_LEDGER h ON h.hold_id = w.hold_id
+    WHERE w.viewing_bank_id = {b}"""
+
+
+def watch_rows(conn, bank: str, account_id: str | None = None) -> list[dict]:
+    from pipeline.watch import describe, out_of_hours
+
+    sql = WATCH_SQL + (" AND w.account_id = {a}" if account_id else "") + " ORDER BY w.event_at, w.event_id"
+    out = rows(conn, sql, {"b": bank, "a": account_id})
+    for r in out:
+        r["options"] = r.pop("allowed_responses")
+        r["case_ids"] = [c for c in (r["case_ids"] or "").split(",") if c]
+        r["out_of_hours"] = out_of_hours(str(r["event_at"]))
+        r["sentence"] = describe(_event(r), r["name"])
+    return out
+
+
+def _event(r: dict):
+    from decimal import Decimal
+
+    from pipeline.watch import Event
+
+    return Event(r["account_id"], r["txn_id"], str(r["event_at"])[:19], r["event_kind"], Decimal(str(r["amount_inr"])),
+                 r["counterparty"] or "", r["channel"] or "", Decimal(str(r["held_inr"] or 0)),
+                 Decimal(str(r["balance_inr"] or 0)), r["channel"] in ("ATM", "CRYPTO", "CASH"), r["case_ids"],
+                 hold_amount=Decimal(str(r["hold_amount"] or 0)))
+
+
+@app.get("/api/watch")
+def watch(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """What the agent saw and did on held accounts after the holds went on."""
+    check_bank(bank)
+    return watch_rows(conn, bank)
+
+
+@app.post("/api/watch/run")
+def watch_run(bank: str = Query("BANK_X"), mode: str = Query("pipeline", pattern="^(pipeline|llm)$"),
+              conn=Depends(get_conn)):
+    """Replay the watch over every worked ticket (also runs after every ticket the agent works)."""
+    check_bank(bank)
+    return _watch(conn, bank, mode)
 
 
 @app.get("/api/inbox")
@@ -400,7 +461,8 @@ def account_panel(case_id: str, account_id: str, bank: str = Query("BANK_X"), co
             "facts": facts, "evidence": score, "reasons": reasons, "signals": signals, "actions": acts,
             "holds": holds, "decisions": decisions,
             "inflows": [f for f in flows if f["to_account"] == account_id],
-            "outflows": [f for f in flows if f["from_account"] == account_id]}
+            "outflows": [f for f in flows if f["from_account"] == account_id],
+            "watch": watch_rows(conn, bank, account_id)}
 
 
 @app.get("/api/cases/{case_id}/log")

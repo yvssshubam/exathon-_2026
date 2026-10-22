@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import Decide from "../components/Decide.jsx";
+import { SinceHold, WatchAside, byAccount } from "../components/Watch.jsx";
 import { Failed, Loading } from "../components/bits.jsx";
 import { evidenceBullets, evidenceLine } from "../evidence.js";
 import { age, clock, hoursRange, inr, inrR, plural } from "../format.js";
@@ -31,16 +32,17 @@ function groupDecisions(waiting) {
 export default function Review({ officer }) {
   const inbox = useLoad(() => api.inbox(), []);
   const day = useLoad(() => api.day(), []);
+  const watch = useLoad(() => api.watch(), []);
   const [busy, setBusy] = useState(null);
   const [note, setNote] = useState(null);
-  const reload = () => { inbox.reload(); day.reload(); };
+  const reload = () => { inbox.reload(); day.reload(); watch.reload(); };
 
   async function run(label, fn) {
     setBusy(label);
     setNote(null);
     try {
       const r = await fn();
-      if (r?.worked) setNote(`The agent worked ${plural(r.worked.length, "ticket")}.`);
+      if (r?.worked) setNote(`The agent worked ${plural(r.worked.length, "ticket")}` + (r.watch?.events ? ` and kept watching the held accounts: ${plural(r.watch.events, "event")}, ${plural(r.watch.alerts, "alert")}.` : "."));
       reload();
     } catch (e) {
       setNote(e.message);
@@ -55,6 +57,7 @@ export default function Review({ officer }) {
   const g = groupDecisions(data.waiting);
   const night = data.done.filter((d) => d.after_hours).sort((a, b) => a.received_at.localeCompare(b.received_at));
   const dayTickets = data.done.filter((d) => !d.after_hours).sort((a, b) => a.received_at.localeCompare(b.received_at));
+  const watched = byAccount(watch.data);
 
   return (
     <>
@@ -69,11 +72,11 @@ export default function Review({ officer }) {
             <div className="group">
               <div className="group-h"><h3>Honest customer: release part of the hold</h3><span className="count">{g.narrow.length}</span></div>
               <p className="group-p">The agent held everything {g.narrow.length === 1 ? "this account" : "these accounts"} got from the fraud. Only part of it is the victim's money.</p>
-              {g.narrow.map((ps) => <HonestCard key={ps[0].account_id} proposals={ps} officer={officer} onDone={reload} />)}
+              {g.narrow.map((ps) => <HonestCard key={ps[0].account_id} proposals={ps} officer={officer} onDone={reload} watch={watched[ps[0].account_id]} />)}
             </div>
           )}
 
-          {g.freeze.length > 0 && <MuleTable groups={g.freeze} officer={officer} onDone={reload} />}
+          {g.freeze.length > 0 && <MuleTable groups={g.freeze} officer={officer} onDone={reload} watched={watched} />}
 
           {g.confirm.length > 0 && (
             <div className="group">
@@ -99,6 +102,7 @@ export default function Review({ officer }) {
               </ol>
             </>
           )}
+          <WatchAside events={watch.data} />
           {dayTickets.length > 0 && <DayTickets list={dayTickets} />}
           {data.kyc_to_send.length > 0 && <Paperwork list={data.kyc_to_send} officer={officer} onDone={reload} />}
           {data.done.length === 0 && <p className="empty">Nothing yet.</p>}
@@ -174,7 +178,7 @@ function Band({ data, day, groups, night }) {
   );
 }
 
-function HonestCard({ proposals, officer, onDone }) {
+function HonestCard({ proposals, officer, onDone, watch }) {
   const p = proposals[0];
   const panel = useLoad(() => api.account(p.case_id, p.account_id), [p.case_id, p.account_id]);
   const victim = p.victim_amount_inr, others = p.other_victims_inr, held = p.current_hold_inr;
@@ -210,13 +214,14 @@ function HonestCard({ proposals, officer, onDone }) {
           <ul className="why">{bullets.map((b) => <li key={b}>{b}</li>)}</ul>
         </>
       )}
+      <SinceHold events={watch} />
       <p className="basis">Legal basis: hold only the victim's amount (SOP 5(xii), 9.1(i); Delhi HC, Neelkanth Pharma). One fraud-linked payment does not make the holder a suspect (AP HC, 22 Jun 2026).</p>
       <Decide proposals={proposals} officer={officer} onDone={onDone} />
     </article>
   );
 }
 
-function MuleTable({ groups, officer, onDone }) {
+function MuleTable({ groups, officer, onDone, watched = {} }) {
   const [open, setOpen] = useState(null);
   const empty = groups.filter((g) => Number(g[0].balance_now_inr) === 0);
   return (
@@ -238,7 +243,8 @@ function MuleTable({ groups, officer, onDone }) {
                   <td className="name">{p.name}</td>
                   <td className="num">{ps.length}</td>
                   <td className="num">{inr(bal)}</td>
-                  <td className="ev">{evidenceLine(p)}</td>
+                  <td className="ev">{evidenceLine(p)}{(watched[key] || []).some((e) => e.event_kind === "BLOCKED") && (
+                    <div className="watchtag">Tried to move held money since the hold</div>)}</td>
                   <td className="act"><button className="btn btn-sm" aria-expanded={open === key} onClick={() => setOpen(open === key ? null : key)}>{open === key ? "Close" : bal === 0 ? "Watch for new money" : "Review"}</button></td>
                 </tr>,
                 open === key && (
@@ -248,6 +254,7 @@ function MuleTable({ groups, officer, onDone }) {
                       <p className="note" style={{ marginBottom: 10 }}>
                         Named in: {ps.map((x, i) => <span key={x.case_id}>{i ? ", " : ""}<a href={`#/case/${x.case_id}/${encodeURIComponent(x.account_id)}`}>{clock(x.received_at)} ticket ({x.case_id})</a></span>)}. Already held: {inr(ps.reduce((s, x) => s + (x.current_hold_inr || 0), 0))}.
                       </p>
+                      <SinceHold events={watched[key]} />
                       <Decide proposals={ps} officer={officer} onDone={() => { setOpen(null); onDone(); }} compact />
                     </td>
                   </tr>

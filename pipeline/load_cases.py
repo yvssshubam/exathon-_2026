@@ -32,7 +32,8 @@ TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT", "TICKET", "
 # Work tables emptied on every load, so a reload is a clean slate for the agent (make demo-reset).
 WORK_TABLES = ["TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT", "ATTRIBUTION", "ATTRIBUTION_RAW", "ATTRIBUTION_FLOW",
                "ACCOUNT_SIGNALS", "ACCOUNT_SCORE", "CASE_ACCOUNT", "CASE_ACTION", "CHECK_RESULT", "HOLD_LEDGER",
-               "PORTAL_ENTRY", "DECISION", "AGENT_RUN", "AGENT_STEP", "TODAY_RAW", "TODAY_OUTCOME"]
+               "PORTAL_ENTRY", "DECISION", "AGENT_RUN", "AGENT_STEP", "TODAY_RAW", "TODAY_OUTCOME",
+               "WATCH_EVENT"]
 SCORING = ROOT / "config" / "scoring.yaml"
 # AMLworld background copied from schema PH_AML (make data) into PH, column for column.
 AMLWORLD_COPY = {

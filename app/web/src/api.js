@@ -33,6 +33,8 @@ export const api = {
   reject: (caseId, acc, body) => call("POST", `/cases/${caseId}/accounts/${encodeURIComponent(acc)}/reject`, body),
   sendKyc: (caseId, entryId, body) => call("POST", `/cases/${caseId}/paperwork/${entryId}/send`, body),
   day: () => call("GET", "/day"),
+  watch: () => call("GET", "/watch"),
+  watchRun: (mode = "pipeline") => call("POST", `/watch/run?mode=${mode}`),
   holds: () => call("GET", "/holds"),
   decisions: () => call("GET", "/decisions"),
   audit: () => call("GET", "/audit"),

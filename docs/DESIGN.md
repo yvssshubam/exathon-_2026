@@ -36,6 +36,26 @@ over with a human reviewer.
 
 Every tool call goes to the append-only `PH.AGENT_STEP` with the Exasol statement IDs behind it.
 
+## The watch: after the holds
+
+The run ends when the holds are placed, but the money keeps moving. The watch (`pipeline/watch.py`) replays every
+later transaction that touches a watched account (one the agent held, or one with a freeze waiting for the officer)
+in time order, as the core banking system would see it:
+
+| Event | What happened | What the agent may do |
+| --- | --- | --- |
+| BLOCKED | A debit needed held money, so it was refused; the money stays | Add it to the evidence; out of hours, also alert the officer |
+| MOVED | A mule-like account moved money that was not held | Add it to the evidence; out of hours, also alert |
+| NEW_MONEY | A mule-like account received new money that a freeze would protect | Add it to the evidence; out of hours, also alert |
+| MARKER_HOLD | A first-layer marker caught a later credit | Hold it (the marker rule), within the trail amount; out of hours, also alert |
+
+A refused debit never reaches its receiver, so one block can stop a whole chain. The rules decide what is allowed for
+each event; the controller chooses within that: the fixed policy alerts out of hours on any refused exit or an amount
+of ₹25,000 or more, or the local model chooses and words the alert (same fallback and number check as the run). The
+only money the watch can hold is a marker's catch. Events land in `PH.WATCH_EVENT` and show under each decision as
+"Since the hold". On the demo night the watch refuses C's ATM withdrawal at 04:30 and A's crypto transfer at 05:10,
+and alerts the officer both times.
+
 ## Automatic vs officer (maker, checker, approver)
 
 | The agent does at once, any hour | The officer decides |
@@ -62,6 +82,9 @@ Tracing, attribution and the rules are deterministic, which is what makes each h
    wrong, the fixed order takes over for the rest of the run.
 2. **Write for people:** the case summary and send-back notes. Every rupee figure it writes must already be in the
    facts it was given, or its text is thrown away and the template is used.
+
+3. **Respond to the watch's events out of hours:** add the event to the evidence only, or also alert the officer,
+   from the options the rules allow for that event.
 
 The model never does arithmetic on money, never chooses an action, never writes to the database. `make agent` runs
 the fixed order; `make agent MODE=llm` lets the model orchestrate. Both produce the same holds.

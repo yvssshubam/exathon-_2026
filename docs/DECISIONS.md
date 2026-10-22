@@ -315,3 +315,13 @@ it into `PH.TXN`, `PH.ACCOUNT` and `PH.BANK` next to the cases, so every step ru
   `10`.
 * **Persistence.** `PH_AML` survives `make db` and `make demo-reset`; the import runs once, the copy into `PH` on
   every reset (a few seconds in Exasol). `python -m pipeline.load_cases --no-amlworld` leaves it out.
+
+## D-38 · DEFAULT · The watch replays the day after the holds, in time order
+
+The watch is a replay over the simulated clock, not a background process: after the agent works its tickets it reads
+every later transaction on the watched accounts from `PH.TXN` and treats each as an attempt. A debit is refused when
+it needs money under a lien active at that moment (or the account is frozen); a refused debit is dropped, so its
+receiver never gets the money. Balances start from the LIBR balance at the first hold (`PH.CASE_ACCOUNT`). Holds that
+officers place later carry the real clock, so they do not affect the replayed night. Accounts outside the trails are
+named by their bank only, since a payer may be a victim whose ticket has not arrived yet. Alerts are recorded, not
+sent: the build has no messaging channel. Running the watch again replaces its events and its marker holds.

@@ -366,6 +366,27 @@ CREATE OR REPLACE TABLE PH.TODAY_OUTCOME (
     stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
 ) COMMENT IS 'Simulated baseline: the same ticket worked by today''s desk (bank hours, one lookup at a time, whole-account freezes).';
 
+CREATE OR REPLACE TABLE PH.WATCH_EVENT (
+    event_id        DECIMAL(18,0) IDENTITY COMMENT IS 'Event number',
+    viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'Bank whose accounts are watched',
+    account_id      VARCHAR(80)   NOT NULL COMMENT IS 'Watched account: held by the agent, or with a freeze waiting for the officer',
+    txn_id          VARCHAR(40)   NOT NULL COMMENT IS 'Transaction that caused the event',
+    event_at        TIMESTAMP     NOT NULL COMMENT IS 'When it happened (simulated clock)',
+    event_kind      VARCHAR(15)   NOT NULL COMMENT IS 'BLOCKED (tried to move held money: refused), MOVED (moved money that was not held), NEW_MONEY (credit on a mule-like account) or MARKER_HOLD (credit caught by a first-layer marker)',
+    amount_inr      DECIMAL(18,2) NOT NULL COMMENT IS 'Amount of the transaction',
+    counterparty    VARCHAR(200)           COMMENT IS 'Other side: account, ATM, wallet',
+    channel         VARCHAR(10)            COMMENT IS 'Channel of the transaction',
+    held_inr        DECIMAL(18,2)          COMMENT IS 'Money under hold on the account at that moment',
+    balance_inr     DECIMAL(18,2)          COMMENT IS 'Balance after the event (a refused debit leaves it unchanged)',
+    case_ids        VARCHAR(400)           COMMENT IS 'Tickets that hold or name this account at that moment',
+    response        VARCHAR(15)   NOT NULL COMMENT IS 'EVIDENCE (added to the officer''s decision), ALERT (also alerted the officer out of hours), HELD (marker caught it)',
+    allowed_responses VARCHAR(200)         COMMENT IS 'Responses the rules allowed for this event, comma-separated (OPTIONS is reserved in Exasol)',
+    chosen_by       VARCHAR(10)   NOT NULL COMMENT IS 'pipeline (fixed policy), llm (local model) or fallback (model failed; fixed policy)',
+    alert_text      VARCHAR(1000)          COMMENT IS 'What the out-of-hours alert said',
+    hold_id         DECIMAL(18,0)          COMMENT IS 'Hold placed for a MARKER_HOLD event',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'The watch: what the agent saw and did on held accounts after the holds went on (pipeline/watch.py).';
+
 CREATE OR REPLACE TABLE PH.AUDIT_LOG (
     event_id     DECIMAL(18,0) IDENTITY COMMENT IS 'Event number',
     event_at     TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT IS 'When',

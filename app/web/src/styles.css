@@ -311,3 +311,15 @@ a.hopcard:focus-visible { outline: 3px solid var(--violet); outline-offset: 2px;
   .steps li { grid-template-columns: 24px 1fr; }
   .steps li > :nth-child(3), .steps li > :nth-child(4) { grid-column: 2; }
 }
+
+/* the watch (pipeline/watch.py) */
+.since { margin: 4px 0 16px; }
+.since h5 { font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }
+.watchlist { list-style: none; padding: 0; margin: 0 0 8px; font-size: 14px; }
+.watchlist li { display: grid; grid-template-columns: 48px 1fr; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line-2); }
+.watchlist li:first-child { border-top: 0; }
+.watchlist .at { font-weight: 700; }
+.watchlist .tags { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 6px; vertical-align: 1px; }
+.pill-alert { background: var(--amber-soft); color: var(--amber-ink); }
+.watchtag { font-size: 13px; color: var(--amber); font-weight: 600; margin-top: 2px; }
+.aside .since h5 { font-size: 15px; color: var(--ink); }

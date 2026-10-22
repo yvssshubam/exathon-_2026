@@ -34,14 +34,27 @@ FROM (
             ) s
             WHERE s.rn = 1
             UNION ALL
+            -- Transactions out of or into the accounts the trail reached. Two joins rather than one OR, so Exasol
+            -- answers each from its automatic index instead of scanning every transaction (4.6 million with
+            -- AMLworld, D-37); UNION drops a transaction that is on both sides.
             SELECT 'TXN', t.ts, t.txn_id, t.from_account, t.to_account,
                    CAST(t.amount_inr * 100 AS DECIMAL(18,0)), c.victim_tag
-            FROM PH.TXN t
+            FROM (
+                SELECT x.ts, x.txn_id, x.from_account, x.to_account, x.amount_inr, x.utr
+                FROM PH.TXN x
+                JOIN (SELECT DISTINCT to_account AS acc FROM PH.TRACE_EDGE WHERE case_id = {case_id}) e
+                  ON e.acc = x.from_account
+                WHERE x.ts > TO_TIMESTAMP({replay_from}, 'YYYY-MM-DD HH24:MI:SS')
+                  AND x.ts <= TO_TIMESTAMP({action_at}, 'YYYY-MM-DD HH24:MI:SS')
+                UNION
+                SELECT x.ts, x.txn_id, x.from_account, x.to_account, x.amount_inr, x.utr
+                FROM PH.TXN x
+                JOIN (SELECT DISTINCT to_account AS acc FROM PH.TRACE_EDGE WHERE case_id = {case_id}) e
+                  ON e.acc = x.to_account
+                WHERE x.ts > TO_TIMESTAMP({replay_from}, 'YYYY-MM-DD HH24:MI:SS')
+                  AND x.ts <= TO_TIMESTAMP({action_at}, 'YYYY-MM-DD HH24:MI:SS')
+            ) t
             LEFT JOIN PH.COMPLAINT c ON c.utr = t.utr
-            WHERE t.ts > TO_TIMESTAMP({replay_from}, 'YYYY-MM-DD HH24:MI:SS')
-              AND t.ts <= TO_TIMESTAMP({action_at}, 'YYYY-MM-DD HH24:MI:SS')
-              AND (   t.from_account IN (SELECT to_account FROM PH.TRACE_EDGE WHERE case_id = {case_id})
-                   OR t.to_account   IN (SELECT to_account FROM PH.TRACE_EDGE WHERE case_id = {case_id}))
         ) x
     ) i
     GROUP BY i.trace_rule

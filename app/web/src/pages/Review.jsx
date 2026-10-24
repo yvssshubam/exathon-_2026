@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import Decide from "../components/Decide.jsx";
 import { SinceHold, WatchAside, byAccount } from "../components/Watch.jsx";
 import Networks from "../components/Networks.jsx";
+import { noticeSummary } from "./Notices.jsx";
 import { Failed, Loading } from "../components/bits.jsx";
 import { evidenceBullets, evidenceLine } from "../evidence.js";
 import { age, clock, hoursRange, inr, inrR, plural } from "../format.js";
@@ -35,9 +36,10 @@ export default function Review({ officer }) {
   const day = useLoad(() => api.day(), []);
   const watch = useLoad(() => api.watch(), []);
   const nets = useLoad(() => api.networks(), []);
+  const notices = useLoad(() => api.notices(), []);
   const [busy, setBusy] = useState(null);
   const [note, setNote] = useState(null);
-  const reload = () => { inbox.reload(); day.reload(); watch.reload(); nets.reload(); };
+  const reload = () => { inbox.reload(); day.reload(); watch.reload(); nets.reload(); notices.reload(); };
 
   async function run(label, fn) {
     setBusy(label);
@@ -108,6 +110,7 @@ export default function Review({ officer }) {
             </>
           )}
           <WatchAside events={watch.data} />
+          <NoticesAside list={notices.data} />
           {dayTickets.length > 0 && <DayTickets list={dayTickets} />}
           {data.kyc_to_send.length > 0 && <Paperwork list={data.kyc_to_send} officer={officer} onDone={reload} />}
           {data.done.length === 0 && <p className="empty">Nothing yet.</p>}
@@ -353,6 +356,22 @@ function Paperwork({ list, officer, onDone }) {
           {open ? <button className="btn" disabled={busy} onClick={() => send(list)}>{busy ? "Sending…" : `Send all ${list.length}`}</button>
                 : <button className="btn" onClick={() => setOpen(true)}>Review and send</button>}
         </div>
+      </div>
+    </>
+  );
+}
+
+function NoticesAside({ list }) {
+  const read = (list || []).filter((n) => n.notice_status !== "NEW");
+  if (!read.length) return null;
+  const toSend = read.filter((n) => n.notice_status === "SENT_BACK" && !n.sent_at).length;
+  return (
+    <>
+      <h3>Police notices · {read.length}</h3>
+      <div className="card pad">
+        <p>Read and checked against the transactions: {noticeSummary(list)}.</p>
+        {toSend > 0 && <p className="wait" style={{ color: "var(--amber)", fontWeight: 600 }}>{plural(toSend, "letter")} to the police drafted, waiting for you to send.</p>}
+        <a className="btn" href="#/notices">Open the notices</a>
       </div>
     </>
   );

@@ -103,6 +103,12 @@ Tracing, attribution and the rules are deterministic, which is what makes each h
    hold. The model rewrites them as one paragraph; every number in it (rupees, percentages, days, times) must
    already be in the facts, or the fixed wording is used. The officer edits it before approving, and the approved
    text goes into the audit log and the reply to the police.
+5. **Read police notices that arrive as messy text** (`pipeline/notices.py`). The model extracts the UTR, amount,
+   date, legal provision and references as JSON; a value is kept only if the notice itself bears it out, otherwise
+   the fixed parser's reading is used (and the parser reads alone when the model is off). Exasol then checks the
+   notice against the transactions (the UTR's payment, its amount and date, the nearest UTR received that day by
+   `EDIT_DISTANCE`), fixed rules decide, and for a notice that cannot be acted on the model may word the letter
+   asking the police to correct it, with every number and UTR checked.
 
 The model never does arithmetic on money, never chooses an action, never writes to the database. `make agent` runs
 the fixed order; `make agent MODE=llm` lets the model orchestrate. Both produce the same holds.

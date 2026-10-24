@@ -23,6 +23,7 @@ def test_every_screen_has_its_route():
         ("GET", "/api/watch"), ("POST", "/api/watch/run"),
         ("GET", "/api/accounts/{account_id}/reasons-draft"),
         ("GET", "/api/networks"), ("GET", "/api/networks/{network_id}/reasons-draft"),
+        ("GET", "/api/notices"), ("POST", "/api/notices/run"), ("POST", "/api/notices/{notice_id}/send"),
     }
     assert expected <= paths()
 

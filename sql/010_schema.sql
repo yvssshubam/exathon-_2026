@@ -406,6 +406,36 @@ CREATE OR REPLACE TABLE PH.NETWORK_LINK (
     detail          VARCHAR(200)           COMMENT IS 'The shared ATM or wallet, for SHARED_EXIT'
 ) COMMENT IS 'Why the accounts of a network belong together: one row per pair and kind of link.';
 
+CREATE OR REPLACE TABLE PH.NOTICE (
+    notice_id        VARCHAR(20)   NOT NULL COMMENT IS 'Notice number (data/notices.yaml)',
+    viewing_bank_id  VARCHAR(20)   NOT NULL COMMENT IS 'Bank it was sent to',
+    received_at      TIMESTAMP     NOT NULL COMMENT IS 'When it reached the nodal desk',
+    channel          VARCHAR(20)   NOT NULL COMMENT IS 'e-mail or scanned letter',
+    sent_from        VARCHAR(200)           COMMENT IS 'Sender as received',
+    raw_text         VARCHAR(4000) NOT NULL COMMENT IS 'The notice exactly as received',
+    notice_status    VARCHAR(12)   NOT NULL COMMENT IS 'NEW, LINKED (matches its ticket), NO_TICKET (valid, no ticket yet) or SENT_BACK',
+    utr              VARCHAR(40)            COMMENT IS 'UTR read from the notice',
+    amount_inr       DECIMAL(18,2)          COMMENT IS 'Amount read from the notice',
+    txn_date         DATE                   COMMENT IS 'Payment date read from the notice',
+    legal_basis      VARCHAR(200)           COMMENT IS 'Legal provision cited, as written',
+    authority        VARCHAR(200)           COMMENT IS 'Police unit, as written',
+    notice_ref       VARCHAR(100)           COMMENT IS 'The notice''s own reference number',
+    ack_no           VARCHAR(20)            COMMENT IS 'NCRP or 1930 acknowledgement number, if given',
+    asks_full_freeze BOOLEAN                COMMENT IS 'TRUE when the notice demands the whole account be frozen',
+    read_by          VARCHAR(10)            COMMENT IS 'model (local model, every value found in the text) or parser',
+    field_sources    VARCHAR(400)           COMMENT IS 'Which reader gave each field (JSON)',
+    case_id          VARCHAR(20)            COMMENT IS 'Ticket the notice matches',
+    problems         VARCHAR(2000)          COMMENT IS 'Why it was sent back, one per line',
+    agent_notes      VARCHAR(1000)          COMMENT IS 'Notes for the officer (for example a whole-account freeze demand)',
+    suggestion_utr   VARCHAR(40)            COMMENT IS 'Nearest UTR received that day, offered in the letter',
+    reply_text       VARCHAR(4000)          COMMENT IS 'The letter asking the police to correct the notice',
+    reply_by         VARCHAR(10)            COMMENT IS 'model or template',
+    read_at          TIMESTAMP              COMMENT IS 'When the agent read it (simulated clock)',
+    sent_at          TIMESTAMP              COMMENT IS 'When the officer sent the letter',
+    sent_by          VARCHAR(60)            COMMENT IS 'Officer who sent it',
+    stmt_id          DECIMAL(9,0)           COMMENT IS 'Exasol statement that recorded the decision'
+) COMMENT IS 'Police notices received directly (e-mail, letters), what the agent read in them and what it decided (pipeline/notices.py).';
+
 CREATE OR REPLACE TABLE PH.AUDIT_LOG (
     event_id     DECIMAL(18,0) IDENTITY COMMENT IS 'Event number',
     event_at     TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT IS 'When',

@@ -4,10 +4,11 @@ import { useLoad, useOfficer, useRoute } from "./hooks.js";
 import Case from "./pages/Case.jsx";
 import Compare from "./pages/Compare.jsx";
 import { Audit, Holds } from "./pages/Ledger.jsx";
+import Notices from "./pages/Notices.jsx";
 import Queue from "./pages/Queue.jsx";
 import Review from "./pages/Review.jsx";
 
-const NAV = [["review", "Review"], ["queue", "Tickets"], ["holds", "Hold ledger"], ["compare/CASE_DEMO", "Before / after"], ["audit", "Audit log"]];
+const NAV = [["review", "Review"], ["queue", "Tickets"], ["notices", "Notices"], ["holds", "Hold ledger"], ["compare/CASE_DEMO", "Before / after"], ["audit", "Audit log"]];
 
 export default function App() {
   const route = useRoute();
@@ -21,6 +22,7 @@ export default function App() {
   if (page === "case" && a) body = <Case key={a} caseId={a} accountId={b} officer={officer} />;
   else if (page === "compare") body = <Compare key={a || "CASE_DEMO"} caseId={a || "CASE_DEMO"} />;
   else if (page === "queue") body = <Queue modelOn={modelOn} />;
+  else if (page === "notices") body = <Notices officer={officer} />;
   else if (page === "holds") body = <Holds />;
   else if (page === "audit") body = <Audit />;
   else body = <Review officer={officer} />;

@@ -35,6 +35,8 @@ export const api = {
   day: () => call("GET", "/day"),
   watch: () => call("GET", "/watch"),
   networks: () => call("GET", "/networks"),
+  notices: () => call("GET", "/notices"),
+  sendLetter: (id, body) => call("POST", `/notices/${id}/send`, body),
   networkDraft: (id) => call("GET", `/networks/${id}/reasons-draft`),
   reasonsDraft: (acc) => call("GET", `/accounts/${encodeURIComponent(acc)}/reasons-draft`),
   watchRun: (mode = "pipeline") => call("POST", `/watch/run?mode=${mode}`),

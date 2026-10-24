@@ -302,7 +302,8 @@ it into `PH.TXN`, `PH.ACCOUNT` and `PH.BANK` next to the cases, so every step ru
   never walks into the background, and the case-day numbers do not change.
 * **Money.** AMLworld mixes 15 currencies. Each currency's rate to the US dollar is read from the file itself (the
   median of Amount Received / Amount Paid over rows that convert to or from dollars), then one fixed rate turns
-  dollars into rupees (`config/amlworld.yaml`, ₹84). Illustrative, not market data.
+  dollars into rupees (`config/amlworld.yaml`, ₹95, about the market rate in October 2026, the month of the case
+  day). Illustrative, not live market data.
 * **Channels.** ACH → NEFT, Wire → RTGS, Cheque → CHEQUE, Credit Card → CARD, Cash → CASH, Bitcoin → CRYPTO.
   Every AMLworld row names a receiving account, so none is an exit. Reinvestment rows (an account paying itself)
   are not loaded.
@@ -345,3 +346,15 @@ victim is not a link on its own, because an honest receiver can share a victim w
 network by the money that reached him. Grouping is union-find in Python over links found in Exasol. A network adds no
 power: its single approval runs the same officer approval on each member's waiting freeze, with the officer's name and
 the reasons on each.
+
+## D-41 · DEFAULT · Notices are checked, never acted on alone
+
+A police notice that reaches the desk by e-mail or post is read, checked and either matched to its ticket or sent
+back. It never places a hold by itself: holds come from tickets, whose trail the agent traces. A notice is sent back
+when it gives no UTR, a UTR that is not a payment into this bank, an amount or date that differs from the transaction,
+or no legal provision; the letter names each problem and, for a UTR that is not found, the nearest UTR received that
+day (`EDIT_DISTANCE` of 2 or less) with its amount and time. A demand to freeze the whole account is noted for the
+officer, since under the SOP the bank holds the amount and a whole-account freeze needs an officer's written reasons.
+The model's reading counts only where the notice's own text bears it out (a UTR, reference or name found verbatim,
+an amount or date the parser also finds), so a misread cannot make a wrong notice look right. Letters are recorded
+as sent with the officer's name; the build sends no e-mail.

@@ -43,6 +43,7 @@ export default function Case({ caseId, accountId, officer }) {
             <span className="mono">UTR {c.utr}</span>
             {c.ordering_authority && <span>{c.ordering_authority}{c.ordering_reference ? ` · ${c.ordering_reference}` : ""}</span>}
             <span>{c.notice_legal_basis ? `Notice under ${c.notice_legal_basis}` : "No legal basis given on the notice"}</span>
+            {(c.notices || []).map((n) => <a key={n.notice_id} href="#/notices">Police {n.channel} {n.notice_id}, {clock(n.received_at)}: matches</a>)}
           </div>
         </div>
         <div className="row">

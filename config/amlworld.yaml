@@ -13,8 +13,9 @@ last_day: "2026-10-17"
 
 # AMLworld mixes 15 currencies. The rate of each to the US dollar is read from the file itself (the median
 # Amount Received / Amount Paid over the rows that convert to or from US dollars), so the dataset's own exchange
-# rates are kept. One fixed rate then turns dollars into rupees. Illustrative, not market data.
-usd_to_inr: 84
+# rates are kept. One fixed rate then turns dollars into rupees: about the market rate in October 2026, when the
+# case day is set. Illustrative, not live market data.
+usd_to_inr: 95
 
 # Used only for a currency the file never converts to or from dollars (printed as "fallback" by the loader).
 # Rough September 2022 rates, the month AMLworld simulates.

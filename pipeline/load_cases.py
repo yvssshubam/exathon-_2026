@@ -28,7 +28,10 @@ from pipeline.gen_history import generate as generate_history
 
 SNAPSHOT_TS = "2026-10-18 00:00:00.000"   # opening balances are as of the start of the case day
 CASE_FILES = {"demo_case": DEMO_CASE, "extra_cases": EXTRA_CASES, "loop_case": LOOP_CASE}
-TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT", "TICKET", "SCORING_CONFIG", "PROFILE_BAND"]
+TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "COMPLAINT", "TICKET", "SCORING_CONFIG", "PROFILE_BAND",
+          "NOTICE"]
+NOTICES = ROOT / "data" / "notices.yaml"
+NOTICE_COLUMNS = 27
 # Work tables emptied on every load, so a reload is a clean slate for the agent (make demo-reset).
 WORK_TABLES = ["TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT", "ATTRIBUTION", "ATTRIBUTION_RAW", "ATTRIBUTION_FLOW",
                "ACCOUNT_SIGNALS", "ACCOUNT_SCORE", "CASE_ACCOUNT", "CASE_ACTION", "CHECK_RESULT", "HOLD_LEDGER",
@@ -43,6 +46,9 @@ AMLWORLD_COPY = {
     "TXN": "txn_id, utr, ts, from_account, to_account, amount_inr, channel, is_exit, exit_identifier, data_source",
 }
 AMLWORLD_KEY = {"BANK": "bank_id", "ACCOUNT": "account_id", "TXN": "txn_id"}   # every AMLworld ID starts with AML
+# What must match for the copy in PH to count as current. Transactions also compare the money, so a new exchange
+# rate in config/amlworld.yaml (same rows, new amounts) is copied in again.
+AMLWORLD_MATCH = {"BANK": "COUNT(*)", "ACCOUNT": "COUNT(*)", "TXN": "COUNT(*), SUM(amount_inr)"}
 
 
 def ts(value: str | None) -> str | None:
@@ -109,6 +115,11 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list[tup
                                       sig["mule_sentence"], sig["honest_sentence"]))
     for band, expected in scoring["profile_band_expected_monthly_credit_inr"].items():
         out["PROFILE_BAND"].append((band, str(Decimal(str(expected)))))
+    if NOTICES.exists():
+        for n in yaml.safe_load(NOTICES.read_text(encoding="utf-8"))["notices"]:
+            row = [n["notice_id"], "BANK_X", ts(str(n["received_at"])), n["channel"], n.get("from"),
+                   n["text"].strip(), "NEW"]
+            out["NOTICE"].append(tuple(row + [None] * (NOTICE_COLUMNS - len(row))))
     out["BANK"] = list(banks.values())
     out["ACCOUNT"] = list(accounts.values())
     own = [r for r in out["BANK"] if r[2] == "TRUE"]
@@ -142,9 +153,11 @@ def load(conn, rows: dict[str, list[tuple]], amlworld: bool = True) -> dict[str,
     if keep:
         for table, cols in AMLWORLD_COPY.items():
             key = AMLWORLD_KEY[table]
-            staged = conn.execute(f"SELECT COUNT(*) FROM PH_AML.{table}").fetchval()
-            present = conn.execute(f"SELECT COUNT(*) FROM PH.{table} WHERE LEFT({key}, 3) = 'AML'").fetchval()
-            if present != staged:
+            match = AMLWORLD_MATCH[table]
+            staged_sig = tuple(conn.execute(f"SELECT {match} FROM PH_AML.{table}").fetchone())
+            present_sig = tuple(conn.execute(f"SELECT {match} FROM PH.{table} WHERE LEFT({key}, 3) = 'AML'").fetchone())
+            staged = int(staged_sig[0])
+            if [str(v) for v in present_sig] != [str(v) for v in staged_sig]:
                 started = time.perf_counter()
                 conn.execute(f"DELETE FROM PH.{table} WHERE LEFT({key}, 3) = 'AML'")
                 conn.execute(f"INSERT INTO PH.{table} ({cols}) SELECT {cols} FROM PH_AML.{table}")

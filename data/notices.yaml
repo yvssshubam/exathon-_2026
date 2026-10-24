@@ -1,0 +1,52 @@
+# Police notices that reach Bank X's nodal desk directly (e-mail, scanned letter), as messy text. Synthetic.
+# The agent reads each one, checks it against the transactions in Exasol, and either matches it to its ticket or
+# drafts a letter asking the police to correct it (pipeline/notices.py, DECISIONS D-41). Nothing is held on a
+# notice alone: holds come from tickets.
+notices:
+  - notice_id: NTC_01
+    received_at: "2026-10-18 02:41:00"
+    channel: e-mail
+    from: "cybercell.vlr@police.example"
+    text: |
+      Sub: URGENT - hold on beneficiary a/c - 1930 complaint
+      Sir/Madam,
+      This is to inform that a victim reported on 1930 at 02:13 hrs. Kindly hold the beneficiary a/c credited vide
+      txn ref IMPS2026101801520001 dt 18/10/26 for Rs. 2,00,000/- (Rupees Two Lakh only), under S.168 r/w S.94
+      BNSS, and share the KYC and trail details. Ack No. 31025101800001.
+      IO: SI R. Ramesh, Cyber Crime Police Station, Vellore. Ref No. VLR/CCPS/2026/1018-01
+
+  - notice_id: NTC_02
+    received_at: "2026-10-18 19:25:00"
+    channel: e-mail
+    from: "ccps.chennai@police.example"
+    text: |
+      respected nodal officer,
+      pls put lien on amt Rs 48,100/- recd in yr bank a/c on 18.10.2026 vide UTR no. IMPS202610181631000056.
+      complnt ack 34646522879626 on 1930. notice u/s 94 BNSS. pls reply with stmt of a/c.
+      regards, HC 2214, Cyber Crime PS Chennai South, ref CCPS/CHS/2026/7731
+
+  - notice_id: NTC_03
+    received_at: "2026-10-18 16:10:00"
+    channel: scanned letter
+    from: "SHO, Cyber Police Station, Coimbatore (by post, scanned)"
+    text: |
+      To The Branch Manager / Nodal Officer, Bank X.
+      It is requested to freeze the entire account which received the cheated amount of Rs. 2,50,000/- on
+      18-10-2026 through UTR IMPS202610181401000039, till further orders.
+      Ref: CBE/CPS/2026/0412   (signed) Inspector of Police
+
+  - notice_id: NTC_04
+    received_at: "2026-10-18 11:05:00"
+    channel: e-mail
+    from: "cyber.pune@police.example"
+    text: |
+      Dear Sir, as per NCRP ack 20123456789012 kindly hold Rs 75,000 credited on 18/10/2026 by
+      UTR IMPS202610180930009999 under Section 94 BNSS. Ref PUNE/CYB/2026/5520. Thanks, PSI Cyber Police Pune.
+
+  - notice_id: NTC_05
+    received_at: "2026-10-18 18:45:00"
+    channel: e-mail
+    from: "cybercell.madurai@police.example"
+    text: |
+      Sir, freeze the beneficiary account immediately. NCRP ack 21967178673538, UTR IMPS202610181628000020,
+      transaction on 18/10/2026. Reply urgently. Cyber Cell, Madurai.

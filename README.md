@@ -46,7 +46,7 @@ summary, and the fixed order takes over whenever it fails ([DESIGN.md](docs/DESI
 No real bank, customer or employer data.
 
 - **Background traffic:** IBM AMLworld HI-Small, about 5 million simulated transactions between simulated banks
-  (public, on Kaggle). It is converted to rupees at the dataset's own exchange rates and ₹84 per US dollar, its
+  (public, on Kaggle). It is converted to rupees at the dataset's own exchange rates and ₹95 per US dollar (about the October 2026 rate), its
   payment formats are mapped to Indian channels (ACH → NEFT, wire → RTGS, ...), and it is moved to the weeks
   before the case day, so the agent works every ticket against a full-size transaction table
   ([DECISIONS.md, D-37](docs/DECISIONS.md)).

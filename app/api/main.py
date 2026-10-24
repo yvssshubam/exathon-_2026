@@ -221,11 +221,13 @@ def work_queue(bank: str = Query("BANK_X"), mode: str = Query("pipeline", patter
 def _watch(conn, bank: str, mode: str) -> dict:
     """After the tickets: the agent keeps watching the held accounts (pipeline/watch.py)."""
     from pipeline.networks import run_networks
+    from pipeline.notices import run_notices
     from pipeline.watch import run_watch
 
     try:
         out = run_watch(conn, bank, mode)
         out["networks"] = run_networks(conn, bank)["networks"]     # after the watch: it knows the latest balances
+        out["notices"] = run_notices(conn, bank, mode)               # police notices that arrived by e-mail or post
         return out
     except steps.StepFailed as exc:
         raise HTTPException(500, str(exc)) from exc
@@ -278,6 +280,66 @@ def freeze_reasons(account_id: str, bank: str = Query("BANK_X"), conn=Depends(ge
         raise HTTPException(404, str(exc)) from exc
     audit(conn, "freeze_reasons_drafted", detail=f"account={account_id}; written_by={out['written_by']}")
     return out
+
+
+def notice_rows(conn, bank: str, case_id: str | None = None) -> list[dict]:
+    import json
+
+    sql = ("SELECT n.*, t.received_at AS ticket_received_at FROM PH.NOTICE n "
+           "LEFT JOIN PH.TICKET t ON t.case_id = n.case_id WHERE n.viewing_bank_id = {b}"
+           + (" AND n.case_id = {c}" if case_id else "") + " ORDER BY n.received_at")
+    out = rows(conn, sql, {"b": bank, "c": case_id})
+    for r in out:
+        r["field_sources"] = json.loads(r["field_sources"]) if r.get("field_sources") else {}
+        r["problems"] = [p for p in (r.get("problems") or "").split("\n") if p]
+        r["agent_notes"] = [p for p in (r.get("agent_notes") or "").split("\n") if p]
+    return out
+
+
+@app.get("/api/notices")
+def notices(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """Police notices received directly, what the agent read in each and what it decided."""
+    check_bank(bank)
+    return notice_rows(conn, bank)
+
+
+@app.post("/api/notices/run")
+def notices_run(bank: str = Query("BANK_X"), mode: str = Query("pipeline", pattern="^(pipeline|llm)$"),
+                conn=Depends(get_conn)):
+    """Read every new notice (also runs after the agent works tickets)."""
+    from pipeline.notices import run_notices
+
+    check_bank(bank)
+    return run_notices(conn, bank, mode)
+
+
+class SendLetter(BaseModel):
+    officer: str
+    text: str | None = Field(None, description="The letter as the officer edited it; the draft if omitted")
+
+
+@app.post("/api/notices/{notice_id}/send")
+def notice_send(notice_id: str, body: SendLetter, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """The officer sends the letter asking the police to correct a notice (recorded; no e-mail in this build)."""
+    from pipeline.db import audit
+
+    check_bank(bank)
+    officer_name = (body.officer or "").strip()
+    if not officer_name:
+        raise HTTPException(400, "An officer name is required to send a letter.")
+    n = one(conn, "SELECT notice_status, sent_at FROM PH.NOTICE WHERE notice_id = {n} AND viewing_bank_id = {b}",
+            {"n": notice_id, "b": bank})
+    if n is None:
+        raise HTTPException(404, f"no notice {notice_id}")
+    if n["notice_status"] != "SENT_BACK":
+        raise HTTPException(400, "Only a notice the agent could not accept has a letter to send.")
+    if n["sent_at"]:
+        raise HTTPException(400, "This letter was already sent.")
+    conn.execute("UPDATE PH.NOTICE SET sent_at = CURRENT_TIMESTAMP, sent_by = {o}, "
+                 "reply_text = COALESCE({t}, reply_text) WHERE notice_id = {n}",
+                 {"o": officer_name, "t": body.text, "n": notice_id})
+    audit(conn, "notice_letter_sent", actor=officer_name, detail=f"notice={notice_id}")
+    return {"sent": True}
 
 
 @app.get("/api/networks")
@@ -390,7 +452,9 @@ def case_detail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn
     c["paid_inr"] = number(conn.execute("SELECT SUM(t.amount_inr) FROM PH.TXN t JOIN PH.COMPLAINT c "
                                         "ON c.utr = t.utr WHERE c.case_id = {c}", {"c": case_id}).fetchval(), 2)
     c["after_hours"] = after_hours((c["ticket"] or {}).get("received_at"))
-    c["paid_channel"] = conn.execute("SELECT MIN(channel) FROM PH.TXN WHERE utr = {u}", {"u": c["utr"]}).fetchval()
+    c["paid_channel"] = conn.execute("SELECT MIN(t.channel) FROM PH.TXN t JOIN PH.COMPLAINT k ON k.utr = t.utr "
+                                      "WHERE k.case_id = {c}", {"c": case_id}).fetchval()
+    c["notices"] = notice_rows(conn, bank, case_id)
     return c
 
 

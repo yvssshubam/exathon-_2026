@@ -262,10 +262,11 @@ def details(conn, bank: str, network_id: str | None = None) -> list[dict]:
 
 
 SYSTEM = (
-    "You draft the reasons for freezing a network of bank accounts that pass fraud money between them, for a bank "
-    "officer to check and send to the police. Write one factual paragraph in plain words. Use only the facts given "
-    "and keep the list of tickets at the end. Copy every number exactly as written (amounts, counts, times, ticket "
-    "IDs); add no other number, no estimate and no opinion about guilt.")
+    "You draft the reasons for freezing a network of bank accounts linked by money from fraud complaints, for a "
+    "bank officer to check and send to the police. Write one factual paragraph in plain words. Use only the facts "
+    "given and keep the list of tickets at the end. Copy every number exactly as written (amounts, counts, times, "
+    "ticket IDs); add no other number, no estimate and no opinion about guilt: do not call the accounts or their "
+    "holders fraudulent or criminal.")
 
 
 def draft(n: dict, llm=None) -> dict:

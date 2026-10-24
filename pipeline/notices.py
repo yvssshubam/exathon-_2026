@@ -233,10 +233,31 @@ def word(text: str, llm) -> tuple[str, str]:
         written = llm.write(SYSTEM_WRITE, text).strip()
     except Exception:
         return text, "template"
+    written = tidy(written, text)
     refs = set(re.findall(r"[A-Z]{3,}\d{6,}", written))
     if written and grounded(written, text) and refs <= set(re.findall(r"[A-Z]{3,}\d{6,}", text)):
         return written, "model"
     return text, "template"
+
+
+# Characters models emit that the template never uses: curly quotes, invisible joiners, no-break spaces.
+PLAIN = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u201c": '"', "\u201d": '"',
+                       "\u00a0": " ", "\u202f": " ", "\u200b": None, "\u200c": None, "\u200d": None,
+                       "\u2060": None, "\u00ad": None, "\ufeff": None})
+
+
+def tidy(written: str, template: str) -> str:
+    """Clean the model's letter: no trailing spaces, no runs of blank lines, and two template words it ran
+    together ("officer'sdecision") split again."""
+    written = written.translate(PLAIN)
+    lines = [ln.rstrip() for ln in written.splitlines()]
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    words = template.split()
+    for a, b in zip(words, words[1:], strict=False):
+        glued = a + b
+        if glued not in template:
+            out = out.replace(glued, f"{a} {b}")
+    return out
 
 
 # ---------------------------------------------------------------- Exasol
@@ -353,12 +374,19 @@ def main(argv: list[str] | None = None) -> int:
             conn.execute("UPDATE PH.NOTICE SET notice_status = 'NEW' WHERE viewing_bank_id = {b} AND sent_at IS NULL",
                          {"b": bank})
         r = run_notices(conn, bank, args.mode)
+        sent = conn.execute("SELECT COUNT(*) FROM PH.NOTICE WHERE viewing_bank_id = {b} AND sent_at IS NOT NULL",
+                            {"b": bank}).fetchval()
         print(f"read {r['read']} notices: {r['linked']} matched a ticket, {r['no_ticket']} valid without a ticket, "
-              f"{r['sent_back']} sent back")
-        for nid, status, case, _problems, reply in conn.execute(
-                "SELECT notice_id, notice_status, case_id, problems, reply_text FROM PH.NOTICE "
+              f"{r['sent_back']} sent back" + (f"; {sent} already answered, not read again" if int(sent) else ""))
+        for nid, status, case, sources, sent_by, reply in conn.execute(
+                "SELECT notice_id, notice_status, case_id, field_sources, sent_by, reply_text FROM PH.NOTICE "
                 "WHERE viewing_bank_id = {b} ORDER BY received_at", {"b": bank}).fetchall():
-            print(f"\n{nid}  {status}" + (f"  -> {case}" if case else ""))
+            print(f"\n{nid}  {status}" + (f"  -> {case}" if case else "") + (f"  (letter sent by {sent_by})"
+                                                                              if sent_by else ""))
+            by: dict[str, list[str]] = {}
+            for field, src in (json.loads(sources) if sources else {}).items():
+                by.setdefault(src, []).append(field)
+            print("  read by " + "; ".join(f"{src}: {', '.join(fs)}" for src, fs in sorted(by.items())))
             if reply:
                 print("  " + reply.replace("\n", "\n  "))
     finally:

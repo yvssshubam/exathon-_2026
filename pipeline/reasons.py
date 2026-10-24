@@ -23,7 +23,8 @@ SYSTEM = (
     "You draft the reasons for a whole-account freeze of a bank account, for a bank officer to check and send to "
     "the police and, if challenged, a court. Write one factual paragraph of 3 to 6 sentences in plain words. Use only "
     "the facts given. Copy every number exactly as written (amounts, percentages, days, counts, times); add no other "
-    "number, no estimate and no opinion about guilt. End by saying the freeze stops money that arrives later from "
+    "number, no estimate and no opinion about guilt: do not call the account or its holder fraudulent or criminal. "
+    "End by saying the freeze stops money that arrives later from "
     "being moved on.")
 
 NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
@@ -40,9 +41,19 @@ def numbers(text: str) -> set[str]:
     return out
 
 
+# Words that pass a verdict on the holder. The facts never use them; the officer and the court decide guilt.
+VERDICT = re.compile(r"\b(fraudulent\w*|fraudster\w*|criminal\w*|guilt\w*|scam\w*|illegal\w*|illicit|launder\w*|"
+                     r"culprit\w*|crook\w*)\b", re.I)
+
+
+def verdicts(text: str) -> set[str]:
+    return {m.group(1).lower() for m in VERDICT.finditer(text)}
+
+
 def grounded(written: str, facts: str) -> bool:
-    """The guard on the model: it may reword the facts, never add or change a number."""
-    return numbers(written) <= numbers(facts)
+    """The guard on the model: it may reword the facts, never add or change a number, and never call anyone
+    fraudulent or criminal unless the facts themselves say so."""
+    return numbers(written) <= numbers(facts) and verdicts(written) <= verdicts(facts)
 
 
 def _age(days: float | None) -> str | None:

@@ -138,3 +138,21 @@ def test_a_letter_without_a_reference_names_the_notice_by_its_time_once():
     text = nt.letter(n, ["The notice states no amount to hold."], [], "Bank X")
     assert "Subject: Your notice of 18:45 on 2026-10-18: details needed before a hold can be placed" in text
     assert "We received your notice by e-mail at 18:45 on 2026-10-18. We cannot act on it as it stands:" in text
+
+
+def test_the_models_letter_is_tidied():
+    from pipeline.notices import tidy
+
+    template = "a whole-account freeze is the officer's decision, with written reasons."
+    written = "a whole-account freeze is the officer'sdecision, with written reasons.  \n\n\n\nNodal Officer"
+    assert tidy(written, template) == ("a whole-account freeze is the officer's decision, with written reasons."
+                                       "\n\nNodal Officer")
+
+
+def test_curly_quotes_and_invisible_characters_are_cleaned():
+    from pipeline.notices import tidy
+
+    template = "a whole-account freeze is the officer's decision, with written reasons."
+    for glue in ("’s​", "’s", "'s­"):
+        written = f"a whole-account freeze is the officer{glue}decision, with written reasons."
+        assert tidy(written, template) == template

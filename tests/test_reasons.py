@@ -62,3 +62,12 @@ def test_an_account_with_no_watch_events_and_unknown_age():
     f = {**FACTS, "age_days": None, "since_hold": [], "signals": {}}
     text = r.template(f)
     assert text.startswith("A holds a savings account at Bank X.") and "Over the last 90 days" not in text
+
+
+def test_the_model_may_not_call_the_holder_fraudulent():
+    from pipeline.reasons import grounded
+
+    facts = "2 accounts at Bank X act as one network: A, C. A sent Rs 80,000 to C."
+    assert grounded("Accounts A and C at Bank X act together; A sent Rs 80,000 to C.", facts)
+    assert not grounded("Accounts A and C are involved in fraudulent activity; A sent Rs 80,000 to C.", facts)
+    assert not grounded("The criminals moved Rs 80,000.", facts)

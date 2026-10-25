@@ -271,13 +271,13 @@ function GenuineCard({ ps, officer, onDone, watch }) {
       <p className="split-cap">{victim > 0 ? `Of the ${inr(held)} held, ${inr(victim)} is traced to the victim.` : `None of the ${inr(held)} held is traced to the victim.`} The remaining {inr(Math.max(0, bal - held))} was never blocked.</p>
       {bullets.length > 0 && (<><h5 className="why-h">Why this looks like a genuine business</h5><ul className="why three">{bullets.map((b) => <li key={b}>{b}</li>)}</ul></>)}
       {p.citation && <p className="basis">Legal basis: {p.citation}</p>}
+      <p className="note recordlink"><a href={`#/record/${encodeURIComponent(p.account_id)}`}>Open the hold record</a></p>
       <Decide p={p} officer={officer} onDone={onDone} />
       {(p.case_against?.length > 0 || watch?.length > 0) && (
         <details className="cardmore">
           <summary>The case against{watch?.length ? ", and what happened since the hold" : ""}</summary>
           {p.case_against?.length > 0 && <ul className="why against">{p.case_against.map((x) => <li key={x}>{rs(x)}</li>)}</ul>}
           <SinceHold events={watch} />
-          <p className="note"><a href={`#/record/${encodeURIComponent(p.account_id)}`}>Open the hold record</a></p>
         </details>
       )}
     </article>

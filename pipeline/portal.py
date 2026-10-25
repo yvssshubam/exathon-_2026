@@ -78,7 +78,8 @@ def collect(conn, bank: str) -> list[int]:
             {"b": bank}).fetchall():
         if not share or float(share) <= 0:
             # none of the victim's money went there: a Rs 0 ticket would only fail the next bank's checks
-            log(conn, "not_routed", f"{case_id}: onward entry to {to_bank} carries none of the victim's money", _ts(filed))
+            log(conn, "not_routed", f"{case_id}: onward entry to {to_bank} carries none of the victim's money",
+                _ts(filed))
             conn.execute("UPDATE ENTRY SET routed_ticket_id = -1 WHERE entry_id = {e!d}", {"e": str(int(entry_id))})
             continue
         if to_bank not in BANKS:

@@ -338,8 +338,8 @@ class Checker:
                     "TO_TIMESTAMP({n}, 'YYYY-MM-DD HH24:MI:SS'), 'LINKED_TO_VICTIM', {amt!d}, {t}, {h!d}, {p!d}, {s}, "
                     "CURRENT_STATEMENT)", a=acc, c=case, n=now, amt=str(take), t=matched, h=str(int(new_id)),
                     p=str(int(p["proposal_id"])),
-                    s=f"{now[11:16]}: ticket {case} names the payment the watch caught at {old_case}'s notice: "
-                      f"{inr(take)} already held is now linked to its victim. The total held is unchanged.")
+                    s=f"{now[11:16]}: a new complaint names the payment the watch had caught: {inr(take)} already "
+                      f"held is now linked to that victim. The total held is unchanged.")
         rest = need - linked
         if rest > 0:
             self._q("INSERT INTO HOLD_LEDGER (case_id, viewing_bank_id, account_id, hold_kind, amount_inr, hold_tag, "

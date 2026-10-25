@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from pipeline import steps
 from pipeline.checker import DecisionError
-from pipeline.explain import explain, headline
+from pipeline.explain import explain, headline, ticket_label, ticket_labels
 
 ROOT = Path(__file__).resolve().parents[2]
 BANKS = yaml.safe_load((ROOT / "config" / "banks.yaml").read_text(encoding="utf-8"))
@@ -267,15 +267,17 @@ def queue(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     """This bank's CFCFRMS inbox: every ticket that has reached it, when it landed and what happened to it."""
     out = rows(conn, """
         SELECT t.case_id, t.received_at, t.ticket_status, t.run_id, t.origin, c.amount_inr, c.utr,
-               c.complaint_source, c.ticket_kind, k.match_status, k.mismatched, k.problems, k.related,
+               c.complaint_source, c.ticket_kind, c.victim_tag, k.match_status, k.mismatched, k.problems, k.related,
                k.related_case_id, r.run_status, r.run_mode, r.wall_seconds, r.sim_holds_at, r.summary_text
         FROM TICKET t
         JOIN COMPLAINT c ON c.case_id = t.case_id
         LEFT JOIN INTAKE_CHECK k ON k.case_id = t.case_id
         LEFT JOIN AGENT_RUN r ON r.run_id = t.run_id
         ORDER BY t.received_at, t.case_id""")
+    labels = ticket_labels(conn)
     for t in out:
         t["after_hours"] = after_hours(t["received_at"])
+        t["label"] = labels.get(t["case_id"], t["case_id"])
     return out
 
 
@@ -304,6 +306,7 @@ def work_one(case_id: str, bank: str = Query("BANK_X"), mode: str = Query("pipel
 
 def proposal_rows(conn, where: str, params: dict) -> list[dict]:
     names = holder_names(conn)
+    labels = ticket_labels(conn)
     out = rows(conn, f"""
         SELECT p.proposal_id, p.case_id, p.account_id, p.action_code, p.act_mode, p.amount_inr, p.proposed_by,
                p.proposed_at, p.reasons_json, p.draft_text, p.draft_by, p.claims_check, p.proposal_status,
@@ -311,8 +314,14 @@ def proposal_rows(conn, where: str, params: dict) -> list[dict]:
                acc.holder_type, ca.balance_now_inr, ca.victim_amount_inr, ca.other_victims_inr, ca.band,
                ca.pass_through, ca.cash_exits, ca.complaint_links,
                (SELECT SUM(h.amount_inr) FROM HOLD_LEDGER h WHERE h.account_id = p.account_id AND h.case_id = p.case_id
-                  AND h.hold_status = 'ACTIVE' AND h.hold_kind = 'LIEN') AS current_hold_inr
+                  AND h.hold_status = 'ACTIVE' AND h.hold_kind = 'LIEN') AS current_hold_inr,
+               (SELECT MIN(h.placed_at) FROM HOLD_LEDGER h WHERE h.account_id = p.account_id AND h.case_id = p.case_id
+                  AND h.hold_status = 'ACTIVE' AND h.hold_kind = 'LIEN') AS held_since,
+               acc.bank_id AS account_bank_id, d.decided_by, d.decided_at, d.decision_outcome,
+               d.amount_inr AS decided_amount_inr, co.amount_inr AS complaint_amount_inr
         FROM PROPOSAL p
+        LEFT JOIN DECISION d ON d.proposal_id = p.proposal_id
+        LEFT JOIN COMPLAINT co ON co.case_id = p.case_id
         LEFT JOIN TICKET t ON t.case_id = p.case_id
         LEFT JOIN ACCOUNT acc ON acc.account_id = p.account_id
         LEFT JOIN CASE_ACCOUNT ca ON ca.case_id = p.case_id AND ca.account_id = p.account_id
@@ -329,7 +338,30 @@ def proposal_rows(conn, where: str, params: dict) -> list[dict]:
         p["reasons_for"] = [a["text"] for a in p["reasons"].get("support", [])]
         p["citation"] = p["reasons"].get("citation")
         p["record"] = f"/api/accounts/{p['account_id']}/record"
+        p["label"] = labels.get(p["case_id"], p["case_id"])
+        p["bank_name"] = bank_name(p.get("account_bank_id"))
     return out
+
+
+STEP_WORDS = {"030": "checking the complaint against the bank's payments", "040": "tracing the money",
+              "050": "working out the victim's share", "055": "choosing the accounts to assess",
+              "060": "reading the accounts' history", "070": "applying the rules", "075": "running the checks",
+              "081": "placing the holds", "082": "reporting the cash withdrawals", "083": "informing the other banks",
+              "084": "filing the KYC packets"}
+
+
+def plain_error(text: str | None) -> str:
+    """The reason a complaint could not be completed, in plain words (the full error stays in the step log)."""
+    import re
+
+    if not text:
+        return "The checks did not pass, so nothing was held automatically."
+    m = re.search(r"FAILED (\d{3})_\w+\.sql", text)
+    if m:
+        return f"The system stopped while {STEP_WORDS.get(m.group(1), 'working on it')}. Nothing more was done."
+    if "No ticket" in text:
+        return "The complaint did not reach this bank's inbox."
+    return "The system stopped before it finished. The step-by-step log on the complaint has the details."
 
 
 @app.get("/api/inbox")
@@ -346,19 +378,30 @@ def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
                (SELECT SUM(h.amount_inr) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.placed_by = 'agent'
                   AND h.hold_kind = 'LIEN' AND h.hold_status <> 'REPLACED') AS held_inr,
                (SELECT COUNT(*) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id) AS filed,
+               (SELECT COUNT(*) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.entry_kind = 'EXIT') AS exits,
+               (SELECT COUNT(*) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.entry_kind = 'ONWARD') AS onward,
+               (SELECT COUNT(*) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.entry_kind = 'KYC') AS kyc,
                (SELECT COUNT(*) FROM PROPOSAL p WHERE p.case_id = t.case_id
-                  AND p.proposal_status = 'WAITING') AS waiting
+                  AND p.proposal_status = 'WAITING') AS waiting,
+               (SELECT MAX(d.decided_at) FROM DECISION d WHERE d.case_id = t.case_id) AS decided_at,
+               (SELECT MAX(d.decided_by) FROM DECISION d WHERE d.case_id = t.case_id) AS decided_by,
+               (SELECT MAX(s.result_text) FROM AGENT_STEP s WHERE s.run_id = r.run_id
+                  AND s.tool_name = 'error') AS error_text
         FROM TICKET t
         JOIN COMPLAINT c ON c.case_id = t.case_id
         JOIN AGENT_RUN r ON r.run_id = t.run_id
         WHERE t.ticket_status NOT IN ('QUEUED', 'WORKING')
         ORDER BY t.received_at, t.case_id""")
+    labels = ticket_labels(conn)
     for d in done:
         d["after_hours"] = after_hours(d["received_at"])
+        d["label"] = labels.get(d["case_id"], d["case_id"])
+        d["problem"] = plain_error(d.pop("error_text", None)) if d["run_status"] in ("FAILED", "CHECK_FAILED") else None
     watch = watch_rows(conn, bank)
     queued = conn.execute("SELECT COUNT(*) FROM TICKET WHERE ticket_status = 'QUEUED'").fetchval()
-    return {"waiting": waiting, "done": done, "watch": watch, "morning_log": latest(conn, bank),
-            "queued": int(queued or 0)}
+    decided = proposal_rows(conn, "p.proposal_status IN ('APPROVED', 'EDITED', 'REJECTED')", {})
+    return {"waiting": waiting, "decided": decided, "done": done, "watch": watch, "morning_log": latest(conn, bank),
+            "queued": int(queued or 0), "kyc_filed": sum(int(d.get("kyc") or 0) for d in done)}
 
 
 def watch_rows(conn, bank: str, account_id: str | None = None) -> list[dict]:
@@ -464,6 +507,14 @@ def case_detail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn
     c["paid_channel"] = (paid or {}).get("channel")
     c["after_hours"] = after_hours((c["ticket"] or {}).get("received_at"))
     c["proposals"] = proposal_rows(conn, "p.case_id = {c}", {"c": case_id})
+    c["label"] = ticket_label(c)
+    c["problem"] = None
+    if c["run"] and c["run"].get("run_status") in ("FAILED", "CHECK_FAILED"):
+        err = conn.execute("SELECT MAX(result_text) FROM AGENT_STEP WHERE run_id = {r} AND tool_name = 'error'",
+                           {"r": c["run"]["run_id"]}).fetchval()
+        c["problem"] = plain_error(err)
+    c["filed"] = dict(conn.execute("SELECT entry_kind, COUNT(*) FROM PORTAL_ENTRY WHERE case_id = {c} "
+                                   "GROUP BY entry_kind", {"c": case_id}).fetchall())
     return c
 
 
@@ -639,8 +690,12 @@ def day(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
 
 @app.get("/api/holds")
 def holds(conn=Depends(get_conn)):
-    return rows(conn, "SELECT h.*, a.holder_name FROM HOLD_LEDGER h LEFT JOIN ACCOUNT a "
-                      "ON a.account_id = h.account_id ORDER BY h.hold_id DESC")
+    labels = ticket_labels(conn)
+    out = rows(conn, "SELECT h.*, a.holder_name FROM HOLD_LEDGER h LEFT JOIN ACCOUNT a "
+                     "ON a.account_id = h.account_id ORDER BY h.account_id, h.placed_at DESC, h.hold_id DESC")
+    for h in out:
+        h["label"] = labels.get(h["case_id"], h["case_id"])
+    return out
 
 
 @app.get("/api/decisions")
@@ -652,4 +707,8 @@ def decisions(conn=Depends(get_conn)):
 def audit(case_id: str | None = None, limit: int = Query(200, le=1000), conn=Depends(get_conn)):
     """Every step and every action, with its Exasol session and statement ID. Append-only."""
     where = "WHERE case_id = {c}" if case_id else ""
-    return rows(conn, f"SELECT * FROM AUDIT_LOG {where} ORDER BY event_id DESC LIMIT {int(limit)}", {"c": case_id})
+    labels = ticket_labels(conn)
+    out = rows(conn, f"SELECT * FROM AUDIT_LOG {where} ORDER BY event_id DESC LIMIT {int(limit)}", {"c": case_id})
+    for e in out:
+        e["label"] = labels.get(e.get("case_id") or "", e.get("case_id"))
+    return out

@@ -76,6 +76,11 @@ def collect(conn, bank: str) -> list[int]:
             "SELECT entry_id, case_id, account_id, bank_id, utr, victim_amount_inr, moved_at, filed_at FROM ENTRY "
             "WHERE from_bank_id = {b} AND entry_kind = 'ONWARD' AND routed_ticket_id IS NULL ORDER BY entry_id",
             {"b": bank}).fetchall():
+        if not share or float(share) <= 0:
+            # none of the victim's money went there: a Rs 0 ticket would only fail the next bank's checks
+            log(conn, "not_routed", f"{case_id}: onward entry to {to_bank} carries none of the victim's money", _ts(filed))
+            conn.execute("UPDATE ENTRY SET routed_ticket_id = -1 WHERE entry_id = {e!d}", {"e": str(int(entry_id))})
+            continue
         if to_bank not in BANKS:
             log(conn, "not_routed", f"{case_id}: onward entry to {to_bank} (not in the simulation)", _ts(filed))
             conn.execute("UPDATE ENTRY SET routed_ticket_id = -1 WHERE entry_id = {e!d}", {"e": str(int(entry_id))})

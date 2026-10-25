@@ -12,11 +12,13 @@
 --      exit paid by another bank's account       -> NONE         (that bank records it)
 --      other bank, paid by an own account        -> ONWARD_ENTRY (file it with the victim's share; not hop 1, the
 --                                                                 ticket's own payment, which the ticket covers)
+--      other bank, none of the victim's money    -> NONE         (nothing to file: it would be a Rs 0 ticket there)
 --      other bank, further down the trail        -> NONE         (the bank that paid it files it)
 --      nothing left, first layer, not nodal etc. -> HOLD_MARKER  (catch later credits, SOP 9.1(i))
 --      nothing left                              -> NONE
---      otherwise                                 -> MANDATORY_HOLD of the trail amount, never above the balance or
---                                                   the amount the ticket reports
+--      otherwise                                 -> MANDATORY_HOLD of the trail amount, never above the balance
+--                                                   (less what other tickets already hold there) or the amount the
+--                                                   ticket reports
 -- 3. CASE_ACTION, officer rows (only proposed; nothing changes until an officer approves):
 --      PROPOSE_NARROW      held more than the victims' money, and the evidence reads honest or borderline
 --                          (or the account is nodal, pool or escrow): narrow the lien to the victims' money
@@ -47,7 +49,7 @@ SELECT {case_id},
        CASE WHEN e.exit_flag = 1 OR ta.bank_id IS NULL OR ta.bank_id <> {own_bank_id} THEN 0
             ELSE LEAST(CASE WHEN cp.notice_has_amount THEN e.trail_amount
                             ELSE COALESCE(att.victim_amount_inr, 0) + COALESCE(att.other_victims_inr, 0) END,
-                       COALESCE(att.balance_now_inr, 0),
+                       GREATEST(COALESCE(att.balance_now_inr, 0) - COALESCE(oh.held_inr, 0), 0),
                        COALESCE(cp.amount_inr, e.trail_amount)) END,
        COALESCE(rf.victim_share, 0),
        sc.band,
@@ -72,6 +74,15 @@ LEFT JOIN ACCOUNT ta           ON ta.account_id = e.account_id
 LEFT JOIN ATTRIBUTION att      ON att.case_id = {case_id} AND att.trace_rule = 'LIBR'
                               AND att.account_id = e.account_id
 LEFT JOIN ACCOUNT_SCORE sc     ON sc.case_id = {case_id} AND sc.account_id = e.account_id
+-- Money other tickets already hold on the account (not a watch hold waiting to be linked, which this ticket may be
+-- the one to claim): two tickets for one victim must not hold the same rupees twice, or more than the balance.
+LEFT JOIN (
+    SELECT account_id, SUM(amount_inr) AS held_inr
+    FROM HOLD_LEDGER
+    WHERE viewing_bank_id = {own_bank_id} AND case_id <> {case_id} AND hold_status = 'ACTIVE'
+      AND hold_kind <> 'MARKER' AND COALESCE(hold_tag, '-') <> 'NOT_LINKED'
+    GROUP BY account_id
+) oh ON oh.account_id = e.account_id
 LEFT JOIN (
     SELECT account_id, SUM(victim_amount_inr) AS victim_share
     FROM REFERRAL_OUT
@@ -124,7 +135,7 @@ FROM (
            CASE
                WHEN ca.is_exit AND ca.paid_by_own_bank                          THEN 'RECORD_EXIT'
                WHEN ca.is_exit                                                  THEN 'NONE'
-               WHEN NOT ca.is_own_bank AND ca.paid_by_own_bank                  THEN 'ONWARD_ENTRY'
+               WHEN NOT ca.is_own_bank AND ca.paid_by_own_bank AND ca.onward_share_inr > 0 THEN 'ONWARD_ENTRY'
                WHEN NOT ca.is_own_bank                                          THEN 'NONE'
                WHEN ca.hold_amount_inr <= 0 AND ca.hop = 1 AND NOT ca.never_full THEN 'HOLD_MARKER'
                WHEN ca.hold_amount_inr <= 0                                     THEN 'NONE'

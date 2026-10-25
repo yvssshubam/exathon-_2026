@@ -91,6 +91,10 @@ def connect(role: str = "admin", bank: str | None = None, **extra):
     schema = PORTAL_SCHEMA if role == "portal" else (schema_for(bank) if bank else None)
     sslopt = {"cert_reqs": ssl.CERT_REQUIRED if s["verify_cert"] else ssl.CERT_NONE}
     kwargs = {"schema": schema} if schema else {}
+    # pyexasol gives up on a statement after 30 s by default. On a laptop, Exasol Personal can be slower than that
+    # while another bank's session runs a heavy step, which killed the full-day run; wait up to 10 minutes instead.
+    if "socket_timeout" not in extra:
+        kwargs["socket_timeout"] = int(os.environ.get("EXA_SOCKET_TIMEOUT", "600"))
     try:
         return pyexasol.connect(
             dsn=s["dsn"],

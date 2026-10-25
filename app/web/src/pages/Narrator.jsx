@@ -21,7 +21,7 @@ export default function Narrator() {
       <div className="pagehead">
         <div>
           <h1>The whole night</h1>
-          <p className="lede">Three banks, one simulated clock, the portal as the only link. Bank X and Bank Y run the agent; Bank Z's desk opens at 10:00. Clock: {data.clock ? when(data.clock) : "not started"}.</p>
+          <p className="lede">Three banks, one simulated clock, the portal as the only link. Bank X and Bank Y run the system; Bank Z's staff start at 10:00. Clock: {data.clock ? when(data.clock) : "not started"}.</p>
         </div>
         <label className="officer">Victim
           <select value={victim} onChange={(e) => setVictim(e.target.value)}>
@@ -33,13 +33,13 @@ export default function Narrator() {
       <section className="lanes" aria-label="Where the victim's money is, per bank">
         {t.banks.map((b) => (
           <div key={b.bank_id} className="card pad lanecard">
-            <div className="lane-h"><b>{b.name}</b><span className={`pill ${b.works_tickets === "desk" ? "pill-plain" : "pill-held"}`}>{b.works_tickets === "desk" ? "human desk" : "agent"}</span></div>
+            <div className="lane-h"><b>{b.name}</b><span className={`pill ${b.works_tickets === "desk" ? "pill-plain" : "pill-held"}`}>{b.works_tickets === "desk" ? "staff from 10:00" : "the system"}</span></div>
             <div className="big">{inr(b.victim_held_inr)}</div>
             <div className="sub">of the victim's money held here{b.tickets_waiting ? ` · ${b.tickets_waiting} ticket waiting` : ""}</div>
             {b.accounts.length > 0 && (
               <ul className="history">
                 {b.accounts.map((a) => (
-                  <li key={a.case_id + a.account_id}>{a.is_exit ? <span>{a.name}: {inr(a.victim_inr)} gone</span> : <span>{a.name}: {inr(a.held_inr)} held of {inr(a.victim_inr)}</span>} <span className="muted">({a.case_id})</span></li>
+                  <li key={a.case_id + a.account_id}>{a.is_exit ? <span>{a.name}: {inr(a.victim_inr)} gone</span> : <span>{a.name}: {inr(a.held_inr)} held of {inr(a.victim_inr)}</span>} <span className="muted">({a.label || a.case_id})</span></li>
                 ))}
               </ul>
             )}
@@ -59,7 +59,7 @@ export default function Narrator() {
             </li>
           ))}
         </ol>
-        {data.timeline.length === 0 && <p className="empty">Nothing yet: replay the night from This morning.</p>}
+        {data.timeline.length === 0 && <p className="empty">Nothing yet: replay the night from the Review page.</p>}
       </section>
     </main>
   );

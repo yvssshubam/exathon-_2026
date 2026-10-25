@@ -1,16 +1,16 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { Failed, Loading } from "../components/bits.jsx";
-import { clock, inr, plural } from "../format.js";
+import { clock, inr, plural, victim } from "../format.js";
 import { useLoad } from "../hooks.js";
 
 const STATUS = {
-  QUEUED: ["Waiting for the agent", "pill-plain"],
-  WORKING: ["Agent working", "pill-plain"],
-  DONE: ["Agent's part done", "pill-held"],
+  QUEUED: ["Waiting", "pill-plain"],
+  WORKING: ["Being handled", "pill-plain"],
+  DONE: ["Done by the system", "pill-held"],
   SENT_BACK: ["Sent back to the police", "pill-other"],
   LINKED: ["Linked to an earlier case", "pill-plain"],
-  FAILED: ["Agent run failed", "pill-gone"],
+  FAILED: ["Could not be completed", "pill-gone"],
 };
 const MATCH = {
   EXACT: "Matches the payment", ACCEPTED: "Near match accepted by the officer", NEAR_MATCH: "Near match only",
@@ -43,26 +43,26 @@ export default function Queue({ modelOn }) {
     <main id="main" className="wrap page">
       <div className="pagehead">
         <div>
-          <h1>Tickets</h1>
-          <p className="lede">Every ticket the portal delivered to this bank, in the order it landed: police tickets, and onward entries other banks filed. The agent picks each one up the minute it lands, whatever the hour. {plural(data.length, "ticket")}.</p>
+          <h1>Complaints</h1>
+          <p className="lede">Every complaint that reached this bank, in the order it arrived: from the police, and onward entries other banks filed. The system picks each one up the minute it lands, whatever the hour. {plural(data.length, "complaint")}.</p>
         </div>
       </div>
       {note && <p className="status" role="status">{note}</p>}
       <div className="table-wrap">
         <table className="table wide">
           <thead>
-            <tr><th>Landed</th><th>Ticket</th><th className="num">Reported</th><th>Intake</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr>
+            <tr><th>Complaint</th><th className="num">Reported</th><th>Intake</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr>
           </thead>
           <tbody>
             {data.map((t) => {
               const [label, pill] = STATUS[t.ticket_status] || [t.ticket_status, "pill-plain"];
               return (
                 <tr key={t.case_id}>
-                  <td><b>{clock(t.received_at)}</b>{t.after_hours && <div className="note">desk closed</div>}</td>
-                  <td><a href={`#/case/${t.case_id}`}>{t.case_id}</a><div className="note mono">{t.utr}</div>
-                    {t.origin !== "POLICE" && <div className="note">onward entry from {String(t.origin).replace("BANK_", "Bank ")}</div>}</td>
+                  <td><a href={`#/case/${t.case_id}`}><b>{t.label || t.case_id}</b></a>
+                    <div className="note">{[victim(t.victim_tag) && `${victim(t.victim_tag)}'s money`, t.after_hours && "after office hours"].filter(Boolean).join(" · ")}</div>
+                    <div className="note mono">UTR {t.utr}</div></td>
                   <td className="num">{inr(t.amount_inr)}</td>
-                  <td>{MATCH[t.match_status] || "Not checked yet"}{t.related && t.related !== "NEW" && <div className="note">{t.related.toLowerCase().replace("_", " ")} of {t.related_case_id}</div>}
+                  <td>{MATCH[t.match_status] || "Not checked yet"}{t.related && t.related !== "NEW" && <div className="note">{t.related.toLowerCase().replace("_", " ")} </div>}
                     {(t.mismatched || t.problems) && <div className="note" style={{ whiteSpace: "pre-wrap" }}>{t.mismatched || t.problems}</div>}</td>
                   <td>
                     <span className={`pill ${pill}`}>{label}</span>
@@ -75,7 +75,7 @@ export default function Queue({ modelOn }) {
                         {busy === t.case_id + "pipeline" ? "Working…" : t.ticket_status === "QUEUED" ? "Work now" : "Work again"}
                       </button>
                       {modelOn && (
-                        <button className="btn btn-sm btn-quiet" disabled={!!busy} onClick={() => work(t.case_id, "llm")} title="Let the local model choose the order of the tools">
+                        <button className="btn btn-sm btn-quiet" disabled={!!busy} onClick={() => work(t.case_id, "llm")} title="Let the local model choose the order of the steps">
                           {busy === t.case_id + "llm" ? "Working…" : "With the model"}
                         </button>
                       )}

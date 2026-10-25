@@ -15,7 +15,7 @@ lane_a:
 # citation (docs/DESIGN.md, "Written reasons").
 legal_basis:
   hold: "S.168 r/w S.94 BNSS: hold the reported amount, or the part of it available (SOP 6.1(j), 9.1(i))"
-  narrow: "Amount-only lien sized to the money traceable to the victim (SOP 5(xii), 9.1(i); Delhi HC, Neelkanth Pharma)"
+  narrow: "hold only the victim's amount (SOP 5(xii), 9.1(i); Delhi HC, Neelkanth Pharma). Receiving one fraud-linked payment does not make the account holder a suspect (AP HC, 22 Jun 2026)."
   freeze: "Whole-account freeze at the bank's or IO's discretion (I4C FAQ); exceptional cases only (Rajasthan HC, 20 Aug 2026)"
   trail: "Trail update to CFCFRMS: onward transfers, exits and KYC (SOP 6.1(k), 9.1(i))"
   release: "Lifting a hold needs approval (Department Head); a hold with no police direction is reviewed, not kept by default"

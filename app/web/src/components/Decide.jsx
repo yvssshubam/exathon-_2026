@@ -10,13 +10,13 @@ export function labelsFor(p) {
   const held = p.current_hold_inr;
   switch (p.action_code) {
     case "PROPOSE_NARROW":
-      return { yes: `Hold only ${inr(p.amount_inr)}`, no: held ? `Keep holding ${inr(held)}` : "Keep the hold", signs: true };
+      return { yes: `Reduce hold to ${inr(p.amount_inr)}`, no: held ? `Keep hold of ${inr(held)}` : "Keep the hold", signs: true };
     case "PROPOSE_FULL_FREEZE":
-      return { yes: "Freeze the whole account", no: "Keep the amount-only hold", signs: true };
+      return { yes: "Freeze full account", no: held ? `Keep only the ${inr(held)} hold` : "Don't freeze", signs: true };
     case "UNMATCHED_NOTICE":
-      return { yes: "Accept the near match and work the ticket", no: "Leave it with the police" };
+      return { yes: `Accept the near match and hold ${inr(p.amount_inr)}`, no: "Leave it with the police" };
     case "PROPOSE_RELEASE":
-      return { yes: "Release the hold", no: "Keep it on the watch" };
+      return { yes: "Release the hold", no: "Keep holding" };
     default:
       return { yes: "Approve", no: "Reject" };
   }
@@ -34,11 +34,11 @@ export default function Decide({ p, officer, onDone, compact = false }) {
 
   if (DECIDED.includes(p.proposal_status)) {
     const s = p.proposal_status;
-    return <p className={`outcome ${s === "REJECTED" ? "rejected" : ""}`}>Decided: {s === "REJECTED" ? "kept as it was" : s === "EDITED" ? "approved with a changed amount" : "approved"}.</p>;
+    return <p className={`outcome ${s === "REJECTED" ? "rejected" : ""}`}>{s === "REJECTED" ? "Kept as it was" : s === "EDITED" ? "Approved with a changed amount" : "Approved"}{p.checker_note ? ` · ${p.checker_note.replace(/^[a-z]+ by /, "by ")}` : ""}.</p>;
   }
 
   async function send(kind) {
-    if (!officer.trim()) return setError("Type your name in the Officer box at the top first: every decision carries an officer's name.");
+    if (!officer.trim()) return setError("Type your name in the Officer box at the top first. Every decision is saved with an officer's name.");
     setBusy(true);
     setError(null);
     try {
@@ -79,7 +79,7 @@ export default function Decide({ p, officer, onDone, compact = false }) {
         </label>
       )}
       {mode !== "reject" && labels.signs && (
-        <label>The reasons you sign (the agent's draft: change anything you would not sign)
+        <label>The reasons you sign (drafted by the system: change anything you would not sign)
           <textarea rows={7} value={signed} onChange={(e) => setSigned(e.target.value)} required />
         </label>
       )}
@@ -88,7 +88,7 @@ export default function Decide({ p, officer, onDone, compact = false }) {
         <textarea rows={2} value={comment} onChange={(e) => setComment(e.target.value)} required={mode !== "approve"} />
       </label>
       {mode !== "reject" && labels.signs && p.draft_text && signed !== p.draft_text && (
-        <p className="note">You changed the agent's draft; both are kept on the hold record. <button type="button" className="linkbtn" onClick={() => setSigned(p.draft_text)}>Restore the draft</button></p>
+        <p className="note">You changed the draft; both versions are kept on the hold record. <button type="button" className="linkbtn" onClick={() => setSigned(p.draft_text)}>Restore the draft</button></p>
       )}
       {error && <p className="error" role="alert">{error}</p>}
       <div className="row">

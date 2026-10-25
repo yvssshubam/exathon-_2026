@@ -37,7 +37,7 @@ export default function Case({ caseId, accountId, officer }) {
 
   return (
     <main id="main" className="wrap page">
-      <nav className="crumb" aria-label="Breadcrumb"><a href="#/review">This morning</a> / <a href="#/queue">Tickets</a> / {clock(c.ticket?.received_at || c.reported_at)} ticket</nav>
+      <nav className="crumb" aria-label="Breadcrumb"><a href="#/review">Review</a> / <a href="#/queue">Complaints</a> / {c.label || `${clock(c.ticket?.received_at || c.reported_at)} complaint`}</nav>
       <div className="pagehead">
         <div>
           <h1>{inr(c.amount_inr)} reported at {clock(c.ticket?.received_at || c.reported_at)}</h1>
@@ -51,17 +51,15 @@ export default function Case({ caseId, accountId, officer }) {
           </div>
         </div>
         <div className="row">
-          {run?.sim_holds_at && traced && (
-            <span className="pill pill-night">Holds in place {clock(run.sim_holds_at)}{c.after_hours ? ", before the desk opened" : ", 3 min after the ticket"}</span>
-          )}
-          {traced && <a className="btn btn-sm" href={`#/compare/${caseId}`}>Before / after</a>}
+          <CaseStatus c={c} run={run} onRetry={workNow} busy={busy} />
+          {traced && <a className="btn btn-sm" href={`#/compare/${caseId}`}>Manual vs system</a>}
         </div>
       </div>
 
       {!worked && (
         <div className="card pad" style={{ marginBottom: 24 }}>
-          <p style={{ marginBottom: 10 }}>The agent has not worked this ticket yet.</p>
-          <button className="btn btn-primary" disabled={busy} onClick={workNow}>{busy ? "The agent is working it…" : "Let the agent work it now"}</button>
+          <p style={{ marginBottom: 10 }}>The system has not handled this complaint yet.</p>
+          <button className="btn btn-primary" disabled={busy} onClick={workNow}>{busy ? "The system is working on it…" : "Handle it now"}</button>
           {err && <p className="error" role="alert">{err}</p>}
         </div>
       )}
@@ -69,8 +67,7 @@ export default function Case({ caseId, accountId, officer }) {
         <p className="status" role="status" style={{ whiteSpace: "pre-wrap" }}>{c.intake.related === "DUPLICATE" ? "" : `Sent back to the police at once. ${c.intake.mismatched || c.intake.problems || ""}`}</p>
       )}
       {c.links?.length > 0 && <p className="note">{c.links.map((l) => `${l.link_kind.toLowerCase().replace("_", " ")}: ${l.case_id} ↔ ${l.linked_case_id}${l.detail ? ` (${l.detail})` : ""}`).join(" · ")}</p>}
-      {run && !traced && <p className="status" role="status">{run.summary_text}</p>}
-      {run?.run_status === "CHECK_FAILED" && <p className="status" role="status">The checker stopped the automatic holds on this ticket. Nothing was held; the reasons are in the agent's log below.</p>}
+      {err && <p className="error" role="alert">{err}</p>}
 
       {traced && <Worked caseId={caseId} c={c} accountId={accountId} officer={officer} v={v} bump={bump} />}
       {!traced && (c.proposals || []).filter((x) => x.proposal_status === "WAITING").map((x) => (
@@ -84,8 +81,8 @@ export default function Case({ caseId, accountId, officer }) {
 
       {worked && (
         <div className="more">
-          <details>
-            <summary>What the agent did, step by step</summary>
+          <details id="steplog">
+            <summary>What the system did, step by step</summary>
             <AgentLog caseId={caseId} v={v} />
           </details>
           {(
@@ -100,7 +97,40 @@ export default function Case({ caseId, accountId, officer }) {
   );
 }
 
+const STEP_ORDER = ["PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE"];
+const DONE_WORDS = {
+  PROPOSE_NARROW: (p) => `hold reduced to ${inr(p.decided_amount_inr ?? p.amount_inr)}`, PROPOSE_FULL_FREEZE: () => "full account frozen",
+  UNMATCHED_NOTICE: () => "near match accepted", PROPOSE_RELEASE: () => "hold released",
+};
+
+// The status label beside the title: the first thing the officer reads, so each case has its exact words.
+function CaseStatus({ c, run, onRetry, busy }) {
+  if (!run) return null;
+  const decided = (c.proposals || []).filter((p) => p.decided_at).sort((a, b) => String(b.decided_at).localeCompare(String(a.decided_at)));
+  const waiting = (c.proposals || []).filter((p) => p.proposal_status === "WAITING");
+  if (["FAILED", "CHECK_FAILED"].includes(run.run_status)) {
+    return (
+      <span className="statusline problem">
+        <span className="pill pill-alert">Could not complete: {c.problem}</span>
+        <button className="btn btn-sm" disabled={busy} onClick={onRetry}>{busy ? "Trying…" : "Try again"}</button>
+        <a className="btn btn-sm btn-quiet" href="#steplog" onClick={() => { const d = document.getElementById("steplog"); if (d) d.open = true; }}>Handle manually</a>
+      </span>
+    );
+  }
+  let text;
+  if (run.run_status === "SENT_BACK") text = "Sent back to the police: the details do not match a payment";
+  else if (run.run_status === "LINKED") text = "Linked to an earlier complaint: nothing held twice";
+  else if (!waiting.length && decided.length) text = `Completed by ${decided[0].decided_by}, ${clock(decided[0].decided_at)}`;
+  else if (!run.sim_holds_at) text = `Nothing to hold: money left before ${clock(c.ticket?.received_at || c.reported_at)}`;
+  else {
+    const mins = Math.round((new Date(String(run.sim_holds_at).replace(" ", "T")) - new Date(String(c.ticket?.received_at || c.reported_at).replace(" ", "T"))) / 60000);
+    text = `Money held at ${clock(run.sim_holds_at)}, ${c.after_hours ? "before office hours" : `${plural(mins, "min", "min")} after the complaint`}`;
+  }
+  return <span className="pill pill-night">{text}</span>;
+}
+
 function Worked({ caseId, c, accountId, officer, v, bump }) {
+  const [just, setJust] = useState(null);       // { id, officer } of the decision just taken here
   const trail = useLoad(() => api.trail(caseId), [caseId, v]);
   const acts = useLoad(() => api.actions(caseId), [caseId, v]);
   if ((trail.loading && !trail.data) || (acts.loading && !acts.data)) return <Loading what="Drawing the money trail" />;
@@ -108,16 +138,45 @@ function Worked({ caseId, c, accountId, officer, v, bump }) {
   if (acts.error) return <Failed error={acts.error} retry={acts.reload} />;
   const { nodes, edges } = trail.data;
   const actions = acts.data.map((a) => ({ ...a, case_id: caseId }));
-  const waiting = (c.proposals || []).filter((p) => p.proposal_status === "WAITING");
+  const waiting = (c.proposals || []).filter((p) => p.proposal_status === "WAITING")
+    .sort((a, b) => STEP_ORDER.indexOf(a.action_code) - STEP_ORDER.indexOf(b.action_code) || a.proposal_id - b.proposal_id);
   const own = nodes.filter((n) => n.kind === "own");
   const selected = accountId && nodes.some((n) => n.id === accountId && n.kind !== "exit") ? accountId
-    : (waiting.find((a) => a.action_code === "PROPOSE_NARROW") || waiting[0])?.account_id || own[0]?.id || null;
+    : waiting[0]?.account_id || own[0]?.id || null;
+  const justP = just && (c.proposals || []).find((p) => p.proposal_id === just.id);
+  const next = waiting.find((p) => p.account_id !== justP?.account_id) || waiting[0];
+  const kyc = Number(c.filed?.KYC || 0);
   return (
     <>
       <CaseStats actions={actions} edges={edges} run={c.run} waiting={waiting} />
       <div className="casegrid">
         <TrailCards c={c} nodes={nodes} edges={edges} actions={actions} selected={selected} caseId={caseId} />
-        {selected && <AccountAside key={selected + v} caseId={caseId} node={nodes.find((n) => n.id === selected)} edges={edges} officer={officer} v={v} onDone={bump} />}
+        <div className="asidecol">
+          {justP && justP.decided_at && (
+            <div className="card pad justdone" role="status">
+              <p><b>{justP.name.replace(/\s*\(.*\)$/, "")}: {justP.proposal_status === "REJECTED" ? "kept as it was" : (DONE_WORDS[justP.action_code] || (() => "approved"))(justP)}</b></p>
+              <p className="note">{justP.proposal_status === "REJECTED" ? "Decided" : "Approved"} by {justP.decided_by} at {clock(justP.decided_at)}. Your reasons are saved in the audit log and the hold record.</p>
+              {next && <a className="btn btn-sm" href={`#/case/${caseId}/${encodeURIComponent(next.account_id)}`} onClick={() => setJust(null)}>Next: {next.name.replace(/\s*\(.*\)$/, "")}</a>}
+            </div>
+          )}
+          {waiting.length > 1 && (
+            <ol className="steps-top" aria-label="Decisions on this complaint">
+              {waiting.map((p, i) => (
+                <li key={p.proposal_id} className={p.account_id === selected ? "on" : ""}>
+                  <a href={`#/case/${caseId}/${encodeURIComponent(p.account_id)}`}>{i + 1} · {p.name.replace(/\s*\(.*\)$/, "")}</a>
+                </li>
+              ))}
+            </ol>
+          )}
+          {waiting.length === 0 && (
+            <div className="card pad nothingwaiting">
+              <p><b>Nothing is waiting for you on this complaint.</b></p>
+              <p className="note">Holds and reports were done automatically.{kyc ? ` ${plural(kyc, "KYC packet")} filed with the portal in the same run.` : ""}</p>
+            </div>
+          )}
+          {selected && <AccountAside key={selected + v} caseId={caseId} node={nodes.find((n) => n.id === selected)} edges={edges} officer={officer} v={v}
+                                     onDone={(p) => { setJust({ id: p.proposal_id }); bump(); }} />}
+        </div>
       </div>
     </>
   );
@@ -135,32 +194,32 @@ function CaseStats({ actions, edges, run, waiting }) {
   const allCash = exits.length && exits.every((e) => e.channel === "ATM");
   const count = (code) => waiting.filter((a) => a.action_code === code).length;
   const waitParts = [
-    count("PROPOSE_NARROW") && plural(count("PROPOSE_NARROW"), "hold to reduce", "holds to reduce"),
-    count("PROPOSE_FULL_FREEZE") && plural(count("PROPOSE_FULL_FREEZE"), "account to freeze", "accounts to freeze"),
+    count("PROPOSE_NARROW") && plural(count("PROPOSE_NARROW"), "smaller hold"),
+    count("PROPOSE_FULL_FREEZE") && plural(count("PROPOSE_FULL_FREEZE"), "full-account freeze"),
     count("UNMATCHED_NOTICE") && plural(count("UNMATCHED_NOTICE"), "unmatched notice"),
     count("PROPOSE_RELEASE") && plural(count("PROPOSE_RELEASE"), "release"),
   ].filter(Boolean);
   return (
     <div className="stats">
-      <div className="card pad stat">
+      <div className={`card pad stat${held ? " held" : " zero"}`}>
         <div className="label">Held at Bank X</div>
         <div className="big">{inr(held)}</div>
-        <div className="sub">{holds.length ? `on ${plural(holds.length, "account")}. ${heldVictim === held ? "All of it is the victim's." : `${inr(heldVictim)} is the victim's.`}` : "Nothing was left to hold."}</div>
+        <div className="sub">{holds.length ? `on ${plural(holds.length, "account")}. ${heldVictim === held ? "All of it is the victim's." : `${inr(heldVictim)} of it is the victim's.`}` : "Nothing was left to hold."}</div>
       </div>
-      <div className="card pad stat">
-        <div className="label">Sent on to another bank</div>
+      <div className={`card pad stat${onward.length ? " sent" : " zero"}`}>
+        <div className="label">Sent to another bank</div>
         <div className="big">{inr(onward.reduce((s, a) => s + (a.amount_inr || 0), 0))}</div>
-        <div className="sub">{onward.length ? `to ${joinAnd(banks)}. ${joinAnd(banks)} alerted at ${clock(run?.sim_holds_at)}.` : "Nothing moved to other banks."}</div>
+        <div className="sub">{onward.length ? `to ${joinAnd(banks)}. ${joinAnd(banks)} informed at ${clock(run?.sim_holds_at)}.` : "No money went to another bank."}</div>
       </div>
-      <div className="card pad stat">
-        <div className="label">{allCash ? "Withdrawn as cash" : "Left banking"}</div>
+      <div className={`card pad stat${exitTotal ? "" : " zero"}`}>
+        <div className="label">{allCash || !exits.length ? "Withdrawn as cash" : "Left banking"}</div>
         <div className="big">{inr(exitTotal)}</div>
-        <div className="sub">{exits.length ? (exits.length === 1 ? `${exits[0].channel === "ATM" ? "cash at " : ""}${exits[0].exit_identifier}, ${clock(exits[0].ts)}` : `${plural(exits.length, "withdrawal")}, reported to the police`) : "Nothing left banking."}</div>
+        <div className="sub">{exits.length ? (exits.length === 1 ? `at ${exits[0].exit_identifier}, at ${clock(exits[0].ts)}` : `${plural(exits.length, "withdrawal")}, reported to the police`) : "No cash was withdrawn."}</div>
       </div>
-      <div className={`pad stat waitcard`}>
-        <div className="label">Waiting for you</div>
+      <div className={`pad stat waitcard${waiting.length ? "" : " clear"}`}>
+        <div className="label">Needs your approval</div>
         <div className="big">{waiting.length}</div>
-        <div className="sub">{waitParts.length ? waitParts.join(", ") : "Nothing. The agent did all of it."}</div>
+        <div className="sub">{waitParts.length ? waitParts.join(", ") : "Nothing left to approve."}</div>
       </div>
     </div>
   );
@@ -173,17 +232,33 @@ function TrailCards({ c, nodes, edges, actions, selected, caseId }) {
   return (
     <section className="trail" aria-labelledby="trail-h">
       <h2 id="trail-h">Where the {inr(c.paid_inr || c.amount_inr)} went</h2>
-      <p>Read left to right. Each card says what it received, from whom, and what was done.</p>
+      <p>Read from left to right. Each card shows what the account received, from whom, and what the system did.</p>
       <div className="hops">
         {Object.keys(hops).sort((a, b) => a - b).map((h) => (
           <div className="hop" key={h}>
-            <div className="hop-h">Hop {h}</div>
-            {hops[h].map((n) => <HopCard key={n.id} n={n} edges={edges} actions={actions.filter((a) => a.account_id === n.id)} proposals={(c.proposals || []).filter((p) => p.account_id === n.id)} label={label} on={n.id === selected} caseId={caseId} />)}
+            <div className="hop-h">Layer {h}</div>
+            <Layer list={hops[h]} edges={edges} selected={selected} render={(n) => <HopCard key={n.id} n={n} edges={edges} actions={actions.filter((a) => a.account_id === n.id)} proposals={(c.proposals || []).filter((p) => p.account_id === n.id)} label={label} on={n.id === selected} caseId={caseId} />} />
           </div>
         ))}
       </div>
-      <p className="note" style={{ marginTop: 14 }}>The victim's share is worked out by assuming each account spends its own money before the victim's.</p>
+      <p className="note" style={{ marginTop: 14 }}>The victim's share is calculated by assuming each account spends its own money first and the victim's money last.</p>
     </section>
+  );
+}
+
+// A layer shows its 3 largest accounts, then one button for the rest with their total. The selected account and any
+// account waiting for a decision always stay visible.
+function Layer({ list, edges, selected, render }) {
+  const [all, setAll] = useState(false);
+  const amount = (n) => edges.filter((e) => e.to_account === n.id).reduce((s, e) => s + Number(e.amount_inr || 0), 0);
+  const sorted = [...list].sort((a, b) => amount(b) - amount(a));
+  const keep = all ? sorted : sorted.filter((n, i) => i < 3 || n.id === selected || (n.waiting || []).length);
+  const rest = sorted.filter((n) => !keep.includes(n));
+  return (
+    <>
+      {keep.map(render)}
+      {rest.length > 0 && <button className="btn btn-sm morecards" onClick={() => setAll(true)}>{plural(rest.length, "more account")} · {inr(rest.reduce((s, n) => s + amount(n), 0))}</button>}
+    </>
   );
 }
 
@@ -195,7 +270,7 @@ function HopCard({ n, edges, actions, proposals, label, on, caseId }) {
     const isAtm = n.id.startsWith("EXIT:ATM");
     return (
       <div className="hopcard gone">
-        <div className="top"><b>{isAtm ? `Cash, ${n.label.replace(/^ATM\s*/, "ATM ")}` : n.label}</b><span className="pill pill-gone">Gone</span></div>
+        <div className="top"><b>{isAtm ? `Cash, ${n.label.replace(/^ATM\s*/, "ATM ")}` : n.label}</b><span className="pill pill-gone">Withdrawn</span></div>
         <div className="got">{got}. Reported to the police as {isAtm ? "cashed out" : "moved to crypto"}.</div>
       </div>
     );
@@ -207,7 +282,7 @@ function HopCard({ n, edges, actions, proposals, label, on, caseId }) {
   const honest = n.evidence === "HONEST" || open.some((a) => a.action_code === "PROPOSE_NARROW");
   let pill;
   if (n.kind === "other") pill = <span className="pill pill-other">Other bank</span>;
-  else if (honest) pill = <span className="pill pill-honest">Honest receiver</span>;
+  else if (honest) pill = <span className="pill pill-honest">Genuine customer</span>;
   else if (hold) pill = <span className="pill pill-held">Held</span>;
   else pill = <span className="pill pill-plain">{marker ? "Watched" : "Nothing held"}</span>;
 
@@ -224,7 +299,7 @@ function HopCard({ n, edges, actions, proposals, label, on, caseId }) {
     else kept = "Nothing left to hold.";
     did = <>{sent}{kept}</>;
   }
-  const nextText = open.map((a) => (a.action_code === "PROPOSE_FULL_FREEZE" ? "Freeze proposed" : a.action_code === "PROPOSE_NARROW" ? "Smaller hold proposed" : a.action_code === "PROPOSE_RELEASE" ? "Release proposed" : "Decision waiting")).join(" · ");
+  const nextText = open.map((a) => (a.action_code === "PROPOSE_FULL_FREEZE" ? "Full-account freeze suggested" : a.action_code === "PROPOSE_NARROW" ? "Smaller hold suggested" : a.action_code === "PROPOSE_RELEASE" ? "Release suggested" : "Decision waiting")).join(" · ");
   const doneText = decided.map((a) => `${a.proposal_status === "REJECTED" ? "Kept as it was" : a.action_code === "PROPOSE_FULL_FREEZE" ? "Frozen" : a.action_code === "PROPOSE_NARROW" ? "Hold reduced" : "Decided"}`).join(" · ");
   return (
     <a className={`hopcard${on ? " on" : ""}`} href={`#/case/${caseId}/${encodeURIComponent(n.id)}`} aria-current={on ? "true" : undefined}>
@@ -239,8 +314,9 @@ function HopCard({ n, edges, actions, proposals, label, on, caseId }) {
 
 function headlineFor(p, name, panel) {
   if (!p) return null;
-  if (p.action_code === "PROPOSE_NARROW") return `Hold only ${inr(p.amount_inr)} of ${name}'s money`;
-  if (p.action_code === "PROPOSE_FULL_FREEZE") return Number(p.balance_now_inr) ? `Freeze ${name}'s whole account?` : `Watch ${name}'s account for new money?`;
+  if (p.action_code === "PROPOSE_NARROW") return `Reduce ${name}'s hold to ${inr(p.amount_inr)}`;
+  if (p.action_code === "PROPOSE_FULL_FREEZE") return Number(p.amount_inr) ? `Freeze the full account of ${name}?` : `Hold money that comes in later on ${name}?`;
+  if (p.action_code === "UNMATCHED_NOTICE") return `Accept the near match on ${name}'s account?`;
   return p.headline || `${p.action_code} on ${name}`;
 }
 
@@ -263,14 +339,14 @@ function AccountAside({ caseId, node, edges, officer, v, onDone }) {
     const moved = edges.filter((e) => e.to_account === node.id);
     return (
       <aside className="card aside" aria-labelledby="acc-h">
-        <div className="kicker done">Done by the agent</div>
+        <div className="kicker done">Done by the system</div>
         <h2 id="acc-h">{node.bank_name} was alerted</h2>
         <p className="sub">{sub}.</p>
         <dl className="money">
           {moved.map((e) => [<dt key={e.txn_id + "t"}>Moved {clock(e.ts)}</dt>, <dd key={e.txn_id + "d"}>{inr(e.amount_inr)}</dd>,
             <dt key={e.txn_id + "vt"} className="in victim">of which the victim's</dt>, <dd key={e.txn_id + "vd"} className="victim">{inr(e.victim_inr)}</dd>])}
         </dl>
-        <p className="note">The onward entry opens a ticket at {node.bank_name}; their nodal desk places the hold there. Bank X cannot hold money in another bank.</p>
+        <p className="note">The onward entry opens a complaint at {node.bank_name}; their nodal desk places the hold there. Bank X cannot hold money in another bank.</p>
       </aside>
     );
   }
@@ -288,7 +364,7 @@ function AccountAside({ caseId, node, edges, officer, v, onDone }) {
 
   return (
     <aside className="card aside" aria-labelledby="acc-h">
-      {lead ? <div className="kicker">Waiting for you</div> : <div className="kicker done">{p.decisions?.length ? "Decided" : "Done by the agent"}</div>}
+      {lead ? <div className="kicker">Needs your approval</div> : <div className="kicker done">{p.decisions?.length ? "Decided" : "Done by the system"}</div>}
       <h2 id="acc-h">{lead ? headlineFor(lead, name) : frozen ? `${name}'s account is frozen` : heldNow ? `${inr(heldNow)} held on ${name}` : `Nothing held on ${name}`}</h2>
       <p className="sub">{sub}.</p>
 
@@ -308,8 +384,8 @@ function AccountAside({ caseId, node, edges, officer, v, onDone }) {
         <dt>{frozen ? "Frozen" : "Held"}{since ? ` since ${clock(since)}` : ""}</dt><dd>{inr(frozen ? balance : heldNow)}</dd>
         {heldNow > 0 && <><dt className="in victim">of which the victim's</dt><dd className="victim">{inr(victim)}</dd></>}
         {others > 0 && <><dt className="in others">of which other victims'</dt><dd className="others">{inr(others)}</dd></>}
-        {heldNow > 0 && ownPart > 0 && <><dt className="in own">of which {acc.holder_type === "individual" ? "their" : "the holder's"} own</dt><dd className="own">{inr(ownPart)}</dd></>}
-        <dt className="total">Usable today</dt><dd className="total">{inr(frozen ? 0 : Math.max(0, balance - heldNow))}</dd>
+        {heldNow > 0 && ownPart > 0 && <><dt className="in own">of which the customer's own</dt><dd className="own">{inr(ownPart)}</dd></>}
+        <dt className="total">Available to the customer</dt><dd className="total">{inr(frozen ? 0 : Math.max(0, balance - heldNow))}</dd>
       </dl>
 
       {rows.length > 0 && (
@@ -331,10 +407,10 @@ function AccountAside({ caseId, node, edges, officer, v, onDone }) {
       {open.map((a) => (
         <div key={a.proposal_id} style={{ marginBottom: 12 }}>
           {open.length > 1 && <h3>{a.headline}</h3>}
-          <Decide p={a} officer={officer} onDone={onDone} />
+          <Decide p={a} officer={officer} onDone={() => onDone(a)} />
         </div>
       ))}
-      {open.length > 0 && <p className="note">Your name and the reasons you sign go into the audit log and the hold record.</p>}
+      {open.length > 0 && <p className="note">Your name and these reasons will be saved in the audit log and in the hold record.</p>}
       <p className="note"><a href={`#/record/${encodeURIComponent(node.id)}`}>Open the hold record</a></p>
 
       {(p.decisions?.length > 0) && (
@@ -350,7 +426,7 @@ function AccountAside({ caseId, node, edges, officer, v, onDone }) {
 
 function AgentLog({ caseId, v }) {
   const { data, error, loading, reload } = useLoad(() => api.log(caseId), [caseId, v]);
-  if (loading && !data) return <Loading what="Loading the agent log" />;
+  if (loading && !data) return <Loading what="Loading the log" />;
   if (error) return <Failed error={error} retry={reload} />;
   return data.map((run) => (
     <section key={run.run_id} style={{ marginBottom: 16 }}>
@@ -376,10 +452,10 @@ function Paperwork({ caseId, v }) {
   const { data, error, loading, reload } = useLoad(() => api.paperwork(caseId), [caseId, v]);
   if (loading && !data) return <Loading what="Loading the filings" />;
   if (error) return <Failed error={error} retry={reload} />;
-  const kinds = [["ONWARD", "Onward entries (each becomes a ticket at the next bank within a minute)"],
+  const kinds = [["ONWARD", "Onward entries (each becomes a complaint at the next bank within a minute)"],
     ["EXIT", "Money that left banking (reported for the police)"], ["KYC", "KYC packets (filed in the same run)"],
     ["SEND_BACK", "Sent back to the police"]];
-  if (!data.length) return <p className="empty">Nothing filed on this ticket.</p>;
+  if (!data.length) return <p className="empty">Nothing filed on this complaint.</p>;
   return kinds.map(([kind, title]) => {
     const list = data.filter((e) => e.entry_kind === kind);
     if (!list.length) return null;

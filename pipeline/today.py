@@ -162,8 +162,8 @@ def compare(conn, case_id: str, bank: str) -> dict:
                    "WHERE t.case_id = {c} AND t.viewing_bank_id = {b}").fetchval()
     onward_today = ((datetime.strptime(str(payer_time)[:19], FMT) + timedelta(minutes=int(s["per_account_minutes"])))
                     .strftime(FMT) if payer_time else None)
-    paid = q("SELECT SUM(t.amount_inr) FROM TXN t JOIN COMPLAINT c ON c.utr = t.utr "
-             "WHERE c.case_id = {c}").fetchval()
+    paid, paid_at = q("SELECT SUM(t.amount_inr), MIN(t.ts) FROM TXN t JOIN COMPLAINT c ON c.utr = t.utr "
+                      "WHERE c.case_id = {c}").fetchone()
     last_today = max((a["action_at"] for a in today_accounts), default=received)
     # Money that walked out of the trail's own-bank accounts after the ticket, before today's desk got there.
     walked = [{"at": str(ts)[:19], "account_id": acc, "name": names.get(acc, acc), "amount_inr": float(_num(amt)),
@@ -182,6 +182,7 @@ def compare(conn, case_id: str, bank: str) -> dict:
     kyc_at = q("SELECT MIN(filed_at) FROM PORTAL_ENTRY WHERE case_id = {c} AND entry_kind = 'KYC'").fetchval()
     return {
         "case_id": case_id, "bank": bank, "received_at": received, "victim_paid_inr": float(_num(paid)),
+        "paid_at": str(paid_at)[:19] if paid_at else None,
         "desk": {k: str(v) for k, v in s.items()},
         "walked_out_after_ticket": walked,
         "today": {"victim_held_inr": float(t_victim), "honest_locked_inr": float(t_honest),

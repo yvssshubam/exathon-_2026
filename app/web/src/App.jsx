@@ -10,8 +10,8 @@ import Record from "./pages/Record.jsx";
 import Review from "./pages/Review.jsx";
 
 // Bank X's nodal desk. "The whole night" is the demo's narrator view: no bank's officer has that screen.
-const NAV = [["review", "This morning"], ["queue", "Tickets"], ["holds", "Hold ledger"],
-  ["compare/CASE_DEMO", "Before / after"], ["audit", "Audit log"], ["narrator", "The whole night"]];
+const NAV = [["review", "Review"], ["queue", "Complaints"], ["holds", "Holds"],
+  ["compare/CASE_DEMO", "Manual vs system"], ["audit", "Audit log"], ["narrator", "The whole night"]];
 
 export default function App() {
   const route = useRoute();
@@ -48,7 +48,7 @@ export default function App() {
           <label className="officer">Officer
             <input value={officer} onChange={(e) => setOfficer(e.target.value)} placeholder="Your name" autoComplete="name" />
           </label>
-          {modelOn && <span className="pill pill-plain" title="A local model chooses the order of the agent's tools and words the reasons; the checker decides">Model: {config.data.model.name}</span>}
+          {modelOn && <span className="pill pill-plain" title="A local model chooses the order of the system's steps and words the reasons; the checker decides">Model: {config.data.model.name}</span>}
         </div>
       </header>
       {body}

@@ -32,6 +32,7 @@ FROM REFERRAL_OUT r
 JOIN TXN t ON t.txn_id = r.txn_id
 LEFT JOIN BANK b ON b.bank_id = r.bank_id
 WHERE r.case_id = {case_id} AND r.from_bank_id = {own_bank_id} AND r.account_id = {account_id}
+  AND r.victim_amount_inr > 0
   AND (SELECT COUNT(*) FROM CHECK_RESULT k
        WHERE k.case_id = {case_id} AND k.viewing_bank_id = {own_bank_id}) > 0
   AND NOT EXISTS (SELECT 1 FROM CHECK_RESULT k

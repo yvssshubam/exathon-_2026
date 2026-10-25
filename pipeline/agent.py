@@ -244,8 +244,8 @@ def send_back_letter(c: dict, k: dict) -> str:
 
 def summary_template(f: dict) -> str:
     """Deterministic summary of one run, from what the maker proposed."""
-    parts = [f"At {f['received_at'][11:16]} ticket {f['case_id']} reached the bank and the agent picked it up at "
-             f"once."]
+    label = f.get("label") or f"ticket {f['case_id']}"
+    parts = [f"At {f['received_at'][11:16]} {label} reached the bank and the agent picked it up at once."]
     if f.get("intake") not in ("EXACT", "ACCEPTED"):
         parts.append(f"It does not match a transaction ({(f.get('intake') or 'unknown').lower().replace('_', ' ')}): "
                      "nothing is held; it is sent back for correction.")
@@ -527,7 +527,10 @@ class MakerBackend:
                        "WHERE p.case_id = {c} AND p.run_id = {r!d} ORDER BY p.proposal_id",
                        r=str(self.run_id)).fetchall()
         k = self.intake
-        f = {"case_id": self.case_id, "received_at": self.received_at, "intake": k.get("match_status"),
+        from pipeline.explain import ticket_label
+
+        f = {"case_id": self.case_id, "label": ticket_label(self.c), "received_at": self.received_at,
+             "intake": k.get("match_status"),
              "related": k.get("related"), "related_case_id": k.get("related_case_id"),
              "near": bool(k.get("near_txn_id")),
              "holds": [{"name": n, "amount": amt} for _, n, code, amt, _ in rows if code == "MANDATORY_HOLD"],

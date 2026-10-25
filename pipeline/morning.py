@@ -50,62 +50,80 @@ def facts(conn, bank: str, period_from: str, period_to: str) -> dict:
     refused = conn.execute(f"SELECT case_id, action_code, account_id, checker_note FROM PROPOSAL "
                            f"WHERE proposal_status = 'REFUSED' AND checked_at {window} ORDER BY proposal_id",
                            p).fetchall()
-    failed = conn.execute(f"SELECT case_id FROM AGENT_RUN WHERE run_status IN ('CHECK_FAILED', 'FAILED') "
-                          f"AND sim_started_at {window}", p).fetchall()
+    # one line per complaint, however many times it was worked
+    failed = conn.execute(f"SELECT DISTINCT case_id FROM AGENT_RUN WHERE run_status IN ('CHECK_FAILED', 'FAILED') "
+                          f"AND sim_started_at {window} ORDER BY case_id", p).fetchall()
     waiting = conn.execute("SELECT proposal_id, case_id, account_id, action_code, amount_inr FROM PROPOSAL "
                            "WHERE proposal_status = 'WAITING' ORDER BY proposal_id").fetchall()
-    return {"names": names, "tickets": tickets, "holds": holds, "filings": filings, "watch": watch,
+    from pipeline.explain import ticket_labels
+
+    return {"names": names, "labels": ticket_labels(conn), "tickets": tickets, "holds": holds, "filings": filings,
+            "watch": watch,
             "splits": splits, "refused": refused, "failed": failed, "waiting": waiting}
 
 
 def template(f: dict, bank_name: str, period_to: str) -> str:
-    n = f["names"]
+    """The log as short sections: a line starting "## " is a heading, "- " a point. Plain text, so the console, the
+    terminal and the model all read the same thing."""
+    n, label = f["names"], f.get("labels", {})
+
+    def t(case):
+        return label.get(case, case)
+
+    def at(ts):
+        return str(ts)[11:16]
+
     lines = [f"Overnight at {bank_name}, up to {period_to[11:16]} on {period_to[:10]}."]
     if f["tickets"]:
-        n_t = len(f["tickets"])
-        lines.append(f"Tickets: {n_t} {'arrived and was' if n_t == 1 else 'arrived and were'} worked the minute "
-                     f"{'it' if n_t == 1 else 'they'} landed ("
-                     + ", ".join(f"{c} at {str(t)[11:16]}" for c, t, _ in f["tickets"]) + ").")
+        lines.append(f"## Tickets received ({len(f['tickets'])}), each worked the minute it landed")
+        lines += [f"- {at(when)} {t(c)}" for c, when, _ in f["tickets"]]
     done = []
-    for case, acc, kind, amount, tag, at, code, _stmt in f["holds"]:
+    for case, acc, kind, amount, tag, when, code, _stmt in f["holds"]:
         who = n.get(acc, acc)
         if kind == "MARKER":
-            done.append(f"{str(at)[11:16]} {who}: marked to catch later credits ({case})")
+            done.append(f"- {at(when)} {who}: marked to catch later credits ({t(case)})")
         elif tag == "NOT_LINKED":
-            done.append(f"{str(at)[11:16]} {who}: {inr(amount)} of new money held, not linked to a reported victim "
-                        f"yet ({case})")
+            done.append(f"- {at(when)} {who}: {inr(amount)} of new money held, not linked to a reported victim yet")
         elif code == "LINKED_HOLD":
-            done.append(f"{str(at)[11:16]} {who}: {inr(amount)} already held, now linked to the victim of {case}")
+            done.append(f"- {at(when)} {who}: {inr(amount)} already held, now linked to the victim of {t(case)}")
         else:
-            done.append(f"{str(at)[11:16]} {who}: {inr(amount)} held, amount only ({case})")
+            done.append(f"- {at(when)} {who}: {inr(amount)} held, amount only ({t(case)})")
     if done:
-        lines.append("Done automatically: " + "; ".join(done) + ".")
+        lines.append("## Held automatically")
+        lines += done
     if f["filings"]:
-        words = {"ONWARD": ("onward entry", "onward entries"), "EXIT": ("exit", "exits"),
-                 "KYC": ("KYC packet", "KYC packets"), "SEND_BACK": ("send-back", "send-backs")}
-
-        def count(k, cnt):
+        words = {"ONWARD": ("onward entry to another bank", "onward entries to other banks"),
+                 "EXIT": ("cash or crypto exit reported", "cash or crypto exits reported"),
+                 "KYC": ("KYC packet", "KYC packets"), "SEND_BACK": ("ticket sent back to the police",
+                                                                     "tickets sent back to the police")}
+        lines.append("## Filed on the portal (done, not left as drafts)")
+        for k, cnt, _, _ in f["filings"]:
             one, many = words.get(k, (k.lower(), k.lower()))
-            return f"{int(cnt)} {one if int(cnt) == 1 else many}"
-
-        lines.append("Filed on the portal, not left as drafts: "
-                     + ", ".join(count(k, cnt) for k, cnt, _, _ in f["filings"]) + ".")
-    for _at, sentence, _stmt in f["watch"]:
-        lines.append(sentence)
+            lines.append(f"- {int(cnt)} {one if int(cnt) == 1 else many}")
+    if f["watch"]:
+        lines.append("## Since the first pass")
+        for when, sentence, _stmt in f["watch"]:
+            text = sentence[7:] if sentence[:2].isdigit() and sentence[2:3] == ":" else sentence
+            lines.append(f"- {at(when)} {text}")
+    if f["splits"]:
+        lines.append("## Split between victims (a record for the refund stage; moves no money)")
     for acc, version, victims, held, _stmt in f["splits"]:
-        lines.append(f"{n.get(acc, acc)}: the split between {int(victims)} victims was recalculated (version "
+        lines.append(f"- {n.get(acc, acc)}: the split between {int(victims)} victims was recorded again (version "
                      f"{int(version)}); the total held, {inr(held)}, is unchanged.")
-    for case, code, acc, note in f["refused"]:
-        lines.append(f"The checker refused {code} on {n.get(acc, acc)} ({case}): {note}.")
-    for (case,) in f["failed"]:
-        lines.append(f"{case}: the checks failed, so nothing was held automatically. Please look at the case.")
+    problems = [f"- The checker refused {code} on {n.get(acc, acc)} ({t(case)}): {note}"
+                for case, code, acc, note in f["refused"]]
+    problems += [f"- {t(case)}: the checks failed, so nothing was held automatically. Please look at it."
+                 for (case,) in f["failed"]]
+    if problems:
+        lines.append("## Needs a look")
+        lines += problems
     if f["waiting"]:
-        lines.append(f"Waiting for you: {len(f['waiting'])} decision{'s' if len(f['waiting']) != 1 else ''}.")
+        lines.append(f"## Waiting for you ({len(f['waiting'])})")
         for _pid, case, acc, code, amount in f["waiting"]:
             extra = f" to {inr(amount)}" if code == "PROPOSE_NARROW" else ""
-            lines.append(f"- {DECISION_WORDS.get(code, code)}{extra}: {n.get(acc, acc)} ({case})")
+            lines.append(f"- {DECISION_WORDS.get(code, code).capitalize()}{extra}: {n.get(acc, acc)} ({t(case)})")
     else:
-        lines.append("Nothing is waiting for you.")
+        lines.append("## Nothing is waiting for you")
     return "\n".join(lines)
 
 

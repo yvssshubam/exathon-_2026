@@ -14,9 +14,10 @@ export default function Record({ accountId }) {
   if (loading && !data) return <div className="wrap page"><Loading what="Loading the hold record" /></div>;
   if (error) return <div className="wrap page"><Failed error={error} retry={reload} /></div>;
   const a = data.account;
+  const labels = Object.fromEntries(data.cases.map((c) => [c.case_id, c.label]));
   return (
     <main id="main" className="wrap page record">
-      <nav className="crumb" aria-label="Breadcrumb"><a href="#/review">This morning</a> / <a href="#/holds">Hold ledger</a> / Hold record</nav>
+      <nav className="crumb" aria-label="Breadcrumb"><a href="#/review">Review</a> / <a href="#/holds">Holds</a> / Hold record</nav>
       <div className="pagehead">
         <div>
           <h1>Hold record: {a.holder_name || a.account_id}</h1>
@@ -34,16 +35,17 @@ export default function Record({ accountId }) {
 
       {data.cases.map((c) => <CaseBlock key={c.case_id} c={c} />)}
 
+
       <section className="recsec">
         <h2>Holds, in order</h2>
         <div className="table-wrap">
           <table className="table compact wide">
-            <thead><tr><th>Hold</th><th>Case</th><th>Kind</th><th className="num">Amount</th><th>Tag</th><th>Placed</th><th>By</th><th>Status</th><th>Statement</th></tr></thead>
+            <thead><tr><th>Hold</th><th>Complaint</th><th>Kind</th><th className="num">Amount</th><th>Tag</th><th>Placed</th><th>By</th><th>Status</th><th>Statement</th></tr></thead>
             <tbody>
               {data.holds.map((h) => (
                 <tr key={h.hold_id} className={h.hold_status !== "ACTIVE" ? "struck" : ""}>
                   <td className="mono">PH-H{h.hold_id}</td>
-                  <td><a href={`#/case/${h.case_id}`}>{h.case_id}</a></td>
+                  <td><a href={`#/case/${h.case_id}`}>{labels[h.case_id] || h.case_id}</a></td>
                   <td>{KIND[h.hold_kind] || h.hold_kind}</td>
                   <td className="num">{h.hold_kind === "MARKER" ? "–" : inr(h.amount_inr)}</td>
                   <td>{h.hold_tag === "NOT_LINKED" ? "not linked to a victim yet" : h.hold_tag || "–"}</td>
@@ -83,7 +85,7 @@ export default function Record({ accountId }) {
         <section className="recsec">
           <h2>Since the first pass</h2>
           {data.watch_list.map((w) => (
-            <p key={w.case_id + w.added_at} className="note">On the watch for {w.case_id} from {when(w.added_at)} ({w.first_pass?.toLowerCase().replace("_", "-")}): {rs(w.added_why)}{w.left_at ? `; left ${when(w.left_at)} (${w.left_why})` : ""}.</p>
+            <p key={w.case_id + w.added_at} className="note">On the watch for the {labels[w.case_id] || w.case_id} from {when(w.added_at)} ({w.first_pass?.toLowerCase().replace("_", "-")}): {rs(w.added_why)}{w.left_at ? `; left ${when(w.left_at)} (${w.left_why})` : ""}.</p>
           ))}
           <ul className="watchlist">
             {data.watch_events.map((e, i) => <li key={i}><span className="at">{clock(e.event_at)}</span><span>{rs(e.sentence).replace(/^\d{2}:\d{2}: /, "")} <Stmt ids={e.stmt_id} /></span></li>)}
@@ -119,7 +121,7 @@ function CaseBlock({ c }) {
   const n = c.notice;
   return (
     <section className="recsec card pad">
-      <h2>Case <a href={`#/case/${c.case_id}`}>{c.case_id}</a> <span className="muted">· {n.ticket_kind?.toLowerCase()} ticket from {n.complaint_source}, acknowledgement {n.ack_no}</span></h2>
+      <h2>The <a href={`#/case/${c.case_id}`}>{c.label}</a> <span className="muted">· from {n.complaint_source}, acknowledgement {n.ack_no}</span></h2>
       <dl className="recdl">
         <dt>Notice</dt><dd>{n.ordering_reference || "–"} from {n.ordering_authority || "–"}, {n.notice_legal_basis || "no legal basis given"}{n.fir_reference ? `; ${n.fir_reference}` : ""}</dd>
         <dt>Ticket names</dt><dd><span className="mono">UTR {n.utr}</span>, {inr(n.amount_inr)}, paid {when(n.txn_at)}, reached the bank {when(n.reported_at)}</dd>

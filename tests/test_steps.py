@@ -15,7 +15,7 @@ PARAMS = {
     "060_score.sql": {"case_id", "as_of", "mule_band", "review_band"},
     "070_actions.sql": {"case_id", "own_bank_id", "basis_hold", "basis_narrow", "basis_freeze", "basis_trail",
                         "freeze_links_min"},
-    "075_check.sql": {"case_id", "own_bank_id"},
+    "075_check.sql": {"case_id", "own_bank_id", "as_of", "replay_from"},
     "081_hold.sql": {"case_id", "own_bank_id", "placed_at", "account_id", "proposal_id"},
     "082_exits.sql": {"case_id", "own_bank_id", "placed_at", "account_id", "proposal_id"},
     "083_onward.sql": {"case_id", "own_bank_id", "placed_at", "account_id", "proposal_id"},

@@ -72,7 +72,12 @@ def recalculate(maker, checker, bank: str, trigger_case: str, now: str, trigger_
     result = Checker(checker, bank).process(None, now, ids) if ids else {"text": "no held account to split"}
     held = {a: checker.execute("SELECT liens_inr FROM ACTIVE_HOLD WHERE account_id = {a}", {"a": a}).fetchval()
             for a in accounts}
-    text = (f"recalculated {', '.join(cases)} (they share an account with {trigger_case}); "
-            + "; ".join(f"{a}: total held {inr(v)}, unchanged" for a, v in held.items()))
+    from pipeline.explain import ticket_labels
+
+    labels = ticket_labels(maker)
+    names = dict(maker.execute("SELECT account_id, COALESCE(holder_name, account_id) FROM ACCOUNT "
+                               "WHERE account_id IN ({a})", {"a": accounts}).fetchall()) if accounts else {}
+    text = (f"re-checked {', '.join(labels.get(c, c) for c in cases)}, which shares an account with "
+            f"{labels.get(trigger_case, trigger_case)}: "
+            + "; ".join(f"{names.get(a, a)} still holds {inr(v)} in all" for a, v in held.items()))
     return {"recalculated": cases, "accounts": accounts, "checker": result, "text": text}
-    

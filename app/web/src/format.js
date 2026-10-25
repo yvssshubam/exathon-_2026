@@ -82,3 +82,16 @@ export function hoursRange(minutes) {
   if (lo < 1) return `${Math.min(...minutes)} min to ${hi} h`;
   return lo === hi ? `${lo} hour${lo === 1 ? "" : "s"}` : `${lo} to ${hi} hours`;
 }
+// "V_LAKSHMI" -> "Lakshmi"
+export function victim(tag) {
+  if (!tag) return "";
+  const t = String(tag).replace(/^V_/, "");
+  if (/\d/.test(t)) return `Victim ${t}`;            // generated cases: "X03" -> "Victim X03"
+  return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+}
+
+// The demo's mule accounts are named by a single letter ("A"); show them as "Account A".
+export function accountName(name, id) {
+  if (!name) return id || "";
+  return /^[A-Z]$/.test(name) ? `Account ${name}` : name;
+}

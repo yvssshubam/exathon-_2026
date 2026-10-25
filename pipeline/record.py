@@ -81,7 +81,8 @@ def hold_record(conn, bank: str, account_id: str) -> dict:
         "SELECT DISTINCT case_id FROM PROPOSAL WHERE account_id = {a}", {"a": account_id}).fetchall()})
     cases = []
     for case in cases_here:
-        notice = _rows(conn, "SELECT c.case_id, c.ticket_kind, c.complaint_source, c.ack_no, c.utr, c.amount_inr, "
+        notice = _rows(conn, "SELECT c.case_id, c.ticket_kind, c.from_bank_id, c.complaint_source, c.ack_no, c.utr, "
+                             "c.amount_inr, "
                              "c.txn_at, c.reported_at, c.ordering_authority, c.ordering_reference, "
                              "c.notice_legal_basis, "
                              "c.fir_reference, k.match_status, k.matched_txn_id, k.stmt_id AS intake_stmt_id, "
@@ -111,7 +112,9 @@ def hold_record(conn, bank: str, account_id: str) -> dict:
                                 "decided_by, decided_at, reason_text, draft_text, signed_text, statement_ids FROM "
                                 "DECISION WHERE case_id = {c} AND account_id = {a} ORDER BY decision_id",
                           {"c": case, "a": account_id})
-        cases.append({"case_id": case, "notice": n, "path_into_account": into,
+        from pipeline.explain import ticket_label
+
+        cases.append({"case_id": case, "label": ticket_label(n), "notice": n, "path_into_account": into,
                       "trail_path": into[0]["trail_path"] if into else None, "rules": rule, "libr_steps": steps,
                       "proposals": proposals, "decisions": decisions})
     splits = _rows(conn, "SELECT version_no, victim_tag, case_id, victim_inr, all_victims_inr, held_inr, "
@@ -140,8 +143,8 @@ def as_text(r: dict) -> str:
            f"Held now (amount only): {inr(r['held_now_inr'])}", ""]
     for c in r["cases"]:
         n = c["notice"]
-        out.append(f"Case {c['case_id']} — {n['ticket_kind'].lower()} ticket, {n['complaint_source']}, "
-                   f"acknowledgement {n['ack_no']}")
+        out.append(f"The {c['label']} — from {n['complaint_source']}, acknowledgement {n['ack_no']} "
+                   f"(internal case {c['case_id']})")
         out.append(f"  Notice: {n['ordering_reference'] or '-'} from {n['ordering_authority'] or '-'}, "
                    f"{n['notice_legal_basis'] or '-'}" + (f"; {n['fir_reference']}" if n.get("fir_reference") else ""))
         out.append(f"  Ticket names UTR {n['utr']}, {inr(n['amount_inr'])}; matched: {n['match_status']} "

@@ -37,7 +37,8 @@ ACTION_COLUMNS = ("account_id", "bank_id", "hop", "action_code", "act_mode", "am
                   "reason_code", "legal_basis", "action_status", "stmt_id")
 COMPLAINT_KEYS = ("case_id", "utr", "reported_at", "lane", "victim_tag", "amount_inr", "beneficiary_account",
                   "ticket_kind", "ordering_authority", "ordering_reference", "notice_legal_basis", "fir_reference",
-                  "remarks", "corrects_case_id", "complaint_source", "parent_case_id", "from_bank_id", "txn_at")
+                  "remarks", "corrects_case_id", "complaint_source", "parent_case_id", "from_bank_id", "txn_at",
+                  "ack_no")
 INTAKE_KEYS = ("match_status", "matched_txn_id", "mismatched", "problems", "near_txn_id", "near_utr", "near_at",
                "near_amount_inr", "related", "related_case_id", "stmt_id")
 FMT = "%Y-%m-%d %H:%M:%S"
@@ -118,13 +119,9 @@ def _ts(value) -> str:
     return str(value)[:19]
 
 
-def attribute(conn, case_id: str, bank: str, as_of: str | None = None, rule: str | None = None) -> dict:
-    """Step 2. Uses the accounts the trace reached, so run trace first with the same as_of."""
-    c = complaint(conn, case_id)
-    as_of = as_of or default_as_of(c["reported_at"])
-    traced = conn.execute("SELECT COUNT(*) FROM TRACE_EDGE WHERE case_id = {c}", {"c": case_id}).fetchval()
-    if not traced:
-        raise StepFailed(f"No trace for {case_id}. Run: python -m pipeline.steps trace {case_id}")
+def _replay_from(conn, case_id: str) -> str:
+    """Where the attribution replay starts: the last balance snapshot of the traced accounts at or before the ticket's
+    payment, or one second before the payment when there is none."""
     root_ts = _ts(conn.execute("SELECT MIN(t.ts) FROM TXN t JOIN INTAKE_CHECK k ON k.matched_txn_id = t.txn_id "
                                "WHERE k.case_id = {c}", {"c": case_id}).fetchval())
     snapshot = conn.execute(
@@ -132,8 +129,17 @@ def attribute(conn, case_id: str, bank: str, as_of: str | None = None, rule: str
         "AND account_id IN (SELECT to_account FROM TRACE_EDGE WHERE case_id = {c})",
         {"r": root_ts, "c": case_id},
     ).fetchval()
-    replay_from = _ts(snapshot) if snapshot else (
-        datetime.strptime(root_ts, FMT) - timedelta(seconds=1)).strftime(FMT)
+    return _ts(snapshot) if snapshot else (datetime.strptime(root_ts, FMT) - timedelta(seconds=1)).strftime(FMT)
+
+
+def attribute(conn, case_id: str, bank: str, as_of: str | None = None, rule: str | None = None) -> dict:
+    """Step 2. Uses the accounts the trace reached, so run trace first with the same as_of."""
+    c = complaint(conn, case_id)
+    as_of = as_of or default_as_of(c["reported_at"])
+    traced = conn.execute("SELECT COUNT(*) FROM TRACE_EDGE WHERE case_id = {c}", {"c": case_id}).fetchval()
+    if not traced:
+        raise StepFailed(f"No trace for {case_id}. Run: python -m pipeline.steps trace {case_id}")
+    replay_from = _replay_from(conn, case_id)
     params = {
         "case_id": case_id,
         "victim_tag": c["victim_tag"],
@@ -190,7 +196,11 @@ def actions(conn, case_id: str, bank: str) -> dict:
 
 def check(conn, case_id: str, bank: str) -> list[dict]:
     """The checker's case-level checks (075). Run on the checker's connection. Any failure stops every change."""
-    run_step(conn, "075_check.sql", {"case_id": case_id, "own_bank_id": bank})
+    # the same window the attribution replayed, so conservation counts exactly the victim payments it was given
+    as_of = conn.execute("SELECT MAX(as_of) FROM ATTRIBUTION WHERE case_id = {c}", {"c": case_id}).fetchval()
+    as_of = _ts(as_of) if as_of else default_as_of(complaint(conn, case_id)["reported_at"])
+    run_step(conn, "075_check.sql", {"case_id": case_id, "own_bank_id": bank, "as_of": as_of,
+                                     "replay_from": _replay_from(conn, case_id)})
     _audit(conn, "check", case_id, f"bank={bank}", actor="checker")
     return checks(conn, case_id, bank)
 

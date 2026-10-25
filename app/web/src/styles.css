@@ -199,7 +199,8 @@ h3 { font-size: 17px; }
 /* ---------- case */
 .casegrid { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
 .casegrid > .trail { flex: 999 1 560px; min-width: 0; }
-.casegrid > .aside { flex: 1 1 380px; min-width: 0; padding: 20px 22px; position: sticky; top: 16px; }
+.casegrid > .asidecol { flex: 1 1 380px; min-width: 0; position: sticky; top: 16px; display: flex; flex-direction: column; gap: 12px; }
+.casegrid .aside { padding: 20px 22px; }
 .trail h2 { font-size: 20px; margin-bottom: 4px; }
 .trail > p { font-size: 15px; color: var(--ink-2); margin-bottom: 14px; }
 .hops { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
@@ -266,6 +267,8 @@ h3 { font-size: 17px; }
 .night h2 { font-size: 20px; margin-bottom: 16px; }
 .ticks { position: relative; margin-left: 140px; height: 22px; font-size: 13px; color: var(--ink-3); }
 .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+/* the last label ends at the right edge instead of centring on it, so it stays inside the card */
+.ticks span:last-child { transform: translateX(-100%); }
 .lane { display: flex; align-items: center; margin-bottom: 10px; }
 .lane-name { width: 140px; flex: none; font-size: 15px; font-weight: 600; }
 .lane-track { position: relative; flex: 1; height: 44px; border-radius: 6px; }
@@ -289,7 +292,7 @@ h3 { font-size: 17px; }
   .ticks { display: none; }
   .steps li { grid-template-columns: 28px 1fr; }
   .steps li > :nth-child(n + 3) { grid-column: 2; }
-  .casegrid > .aside { position: static; }
+  .casegrid > .asidecol { position: static; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
@@ -365,3 +368,95 @@ td.victim { color: var(--violet-ink); font-weight: 600; }
   .timeline li { grid-template-columns: 48px 1fr; }
   .timeline .who { grid-column: 2; }
 }
+
+/* reference review: spacing, states */
+.recordlink { margin: 4px 0 14px; }
+.nowait { font-size: 13px; color: var(--ink-3); font-weight: 600; margin-top: 2px; }
+.bandstat.decisions.clear { background: var(--green-soft); color: var(--green-ink); }
+.decision.problem { border-left: 4px solid var(--danger); }
+.muted-val { color: var(--ink-3); }
+.logbox { margin-top: 16px; }
+.logbox summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+.morninglog p { margin: 0 0 8px; }
+.loglist { padding-left: 20px; margin: 0 0 10px; font-size: 14px; display: grid; gap: 4px; }
+
+/* Compact sizing: about 15% smaller everywhere, so a screen holds more without scrolling. Comes last, so it wins. */
+html, body { font-size: 14px; }
+h1 { font-size: 24px; }
+h2 { font-size: 18px; }
+h3 { font-size: 15px; }
+.btn { min-height: 36px; padding: 0 14px; }
+.btn-sm { min-height: 32px; padding: 0 11px; font-size: 13px; }
+.topbar .wrap { padding-top: 8px; padding-bottom: 8px; }
+.band .wrap { padding-top: 18px; padding-bottom: 20px; }
+.band .lede { margin-bottom: 14px; }
+.bandstat { padding: 12px 14px; }
+.bandstat .big { font-size: 26px; }
+.band .footnote { margin-top: 10px; font-size: 12px; }
+.review { gap: 24px; padding-top: 18px; padding-bottom: 32px; }
+.review h2 { margin-bottom: 10px; }
+.group { margin-bottom: 20px; }
+.decision { padding: 14px 16px; margin-bottom: 12px; }
+.figures .val { font-size: 18px; }
+.why { gap: 2px 20px; }
+.donelist li { padding: 9px 12px; gap: 10px; }
+.page { padding-top: 14px; padding-bottom: 32px; }
+.pagehead { margin-bottom: 12px; }
+.stat .big, .pair .v { font-size: 22px; }
+.casegrid .aside { padding: 14px 16px; }
+.trail h2 { font-size: 17px; }
+.hopcard { padding: 10px 12px; }
+.night { padding: 14px 16px; margin-bottom: 16px; }
+.night h2 { font-size: 17px; margin-bottom: 10px; }
+.lanecard .big { font-size: 22px; }
+.recsec { margin-bottom: 18px; }
+.recsec h2 { font-size: 16px; }
+.watchlist { font-size: 13px; }
+.watchlist li { padding: 4px 0; }
+.why, .group-p, .facts, .decision p, .card.pad p { font-size: 13.5px; }
+.decision h4 { font-size: 16px; }
+
+/* complaint page states (template: States reference, Case) */
+.stat.held .big { color: var(--violet-ink); }
+.stat.sent .big { color: var(--blue-ink); }
+.stat.zero .big { color: var(--ink-3); }
+.waitcard.clear { background: var(--card); border: 1px solid var(--line); }
+.waitcard.clear .label, .waitcard.clear .big, .waitcard.clear .sub { color: var(--green-ink); }
+.statusline { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.steps-top { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.steps-top li a { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--card);
+  color: var(--ink-2); text-decoration: none; font-size: 13px; font-weight: 600; }
+.steps-top li.on a { border-color: var(--amber); color: var(--amber-ink); background: var(--amber-soft); }
+.justdone { border-left: 4px solid var(--green); }
+.justdone p { margin: 0 0 6px; }
+.nothingwaiting p { margin: 0 0 4px; }
+.morecards { width: 100%; justify-content: center; }
+.bandstat.decisions.problem { background: #f9e1df; }
+.bandstat.decisions.problem .label, .bandstat.decisions.problem .big, .bandstat.decisions.problem .sub { color: var(--danger); }
+.same .v, .same .n { color: var(--ink-3) !important; }
+
+.decidedlines { list-style: none; padding: 0; margin: 8px 0 0; font-size: 13px; color: var(--ink-2); }
+.decidedlines li { padding: 6px 0; border-top: 1px solid var(--line-2); }
+tr.donerow td { color: var(--ink-3); background: var(--page); }
+
+/* genuine-customer card, as on the console design */
+.why.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 760px) { .why.three { grid-template-columns: 1fr; } }
+.cardmore { margin-top: 12px; font-size: 13px; }
+.cardmore summary { cursor: pointer; color: var(--ink-2); }
+.cardmore .why { margin-top: 6px; }
+
+/* Holds: one card per account */
+.holdtotal { margin: 6px 0 0; font-size: 15px; }
+.holdcards { display: grid; gap: 12px; }
+.holdcard { padding: 14px 18px; }
+.holdcard header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.holdcard h2 { font-size: 17px; margin: 0; }
+.holdcard .holdsum { font-size: 15px; }
+.holdcard ul { list-style: none; margin: 10px 0 0; padding: 0; }
+.holdcard li { padding: 9px 0 9px 12px; border-left: 3px solid var(--line); margin-top: 6px; }
+.holdcard li:first-child { margin-top: 0; }
+.holdcard li.released { opacity: .65; }
+.holdcard .holdline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.holdcard .whose { font-weight: 600; }
+.holdcard .note.was { margin-top: 3px; font-style: italic; }

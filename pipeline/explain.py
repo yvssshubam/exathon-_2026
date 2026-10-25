@@ -40,6 +40,31 @@ def bank_name(bank_id: str | None) -> str:
     return BANK_NAMES.get(bank_id or "", bank_id or "another bank")
 
 
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def ticket_label(c: dict, day: str = "2026-10-18") -> str:
+    """How the officer names a complaint: by the time it reached the bank ("the 02:13 complaint"), as on the screen.
+    A complaint from another day also gets its date. Internal case IDs stay in the database and the URLs."""
+    ts = str(c.get("reported_at") or "")
+    when = ts[11:16] or c.get("case_id", "")
+    if ts[:10] and ts[:10] != day:
+        when = f"{int(ts[8:10])} {MONTHS[int(ts[5:7]) - 1]} {when}"
+    kind = c.get("ticket_kind")
+    if kind == "ONWARD":
+        return f"{when} onward complaint from {bank_name(c.get('from_bank_id'))}"
+    if kind == "IO_NOTICE":
+        return f"{when} notice from the investigating officer"
+    return f"{when} complaint"
+
+
+def ticket_labels(conn) -> dict[str, str]:
+    """case_id -> ticket_label, for every complaint at this bank (one query)."""
+    keys = ("case_id", "reported_at", "ticket_kind", "from_bank_id")
+    return {r[0]: ticket_label(dict(zip(keys, r, strict=True)))
+            for r in conn.execute("SELECT case_id, reported_at, ticket_kind, from_bank_id FROM COMPLAINT").fetchall()}
+
+
 def _d(value) -> Decimal:
     return Decimal(str(value or 0))
 

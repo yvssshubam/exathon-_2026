@@ -21,6 +21,32 @@ def _ts(v) -> str | None:
     return str(v)[:19] if v is not None else None
 
 
+def labels(admin) -> dict[str, str]:
+    """Every bank's complaints by the name the officer sees ("02:13 complaint"), not the internal case ID."""
+    import re
+
+    from pipeline.explain import ticket_label
+
+    out = {}
+    for bank in BANKS:
+        for case, reported, kind, from_bank in admin.execute(
+                f"SELECT case_id, reported_at, ticket_kind, from_bank_id FROM {schema_for(bank)}.COMPLAINT").fetchall():
+            out[case] = ticket_label({"case_id": case, "reported_at": reported, "ticket_kind": kind,
+                                      "from_bank_id": from_bank})
+    for case, kind, at in admin.execute(
+            f"SELECT case_id, ticket_kind, created_at FROM {PORTAL_SCHEMA}.TICKET").fetchall():
+        out.setdefault(case, ticket_label({"case_id": case, "reported_at": at, "ticket_kind": kind}))
+    alts = "|".join(re.escape(c) for c in sorted(out, key=len, reverse=True))
+    out["__re__"] = re.compile(f"(?:ticket )?({alts})") if out else None
+    return out
+
+
+def humanise(text: str, names: dict) -> str:
+    """Swap internal case IDs in a sentence for the complaint's name."""
+    rx = names.get("__re__")
+    return rx.sub(lambda m: f"the {names[m.group(1)]}", text) if rx and text else text
+
+
 def timeline(admin, until: str | None = None) -> list[dict]:
     """What happened where and when: tickets, holds, filings, refused attempts, the portal's routing."""
     out = []
@@ -65,7 +91,8 @@ def timeline(admin, until: str | None = None) -> list[dict]:
                 "WHERE t.is_exit AND t.data_source = 'demo_case' ORDER BY t.ts", {"b": bank}).fetchall():
             out.append({"at": _ts(at), "bank": bank, "kind": "cash_out",
                         "text": f"{b['name']}: {acc} withdraws Rs {_d(amount):,.2f} ({ident}): the money is gone"})
-    out = [e for e in out if e["at"] and (until is None or e["at"] <= until)]
+    names = labels(admin)
+    out = [dict(e, text=humanise(e["text"], names)) for e in out if e["at"] and (until is None or e["at"] <= until)]
     return sorted(out, key=lambda e: (e["at"], e["bank"] or ""))
 
 
@@ -73,6 +100,7 @@ def victim_trail(admin, victim_tag: str) -> dict:
     """Where one victim's money is, per bank: held (each bank's holds, at most that bank's share), or gone."""
     banks = []
     total_held = Decimal(0)
+    names = labels(admin)
     for bank, b in BANKS.items():
         s = schema_for(bank)
         rows = admin.execute(
@@ -89,7 +117,8 @@ def victim_trail(admin, victim_tag: str) -> dict:
         for case, acc, name, victim, is_exit, lien, frozen in rows:
             protected = _d(victim) if int(frozen or 0) else min(_d(victim), _d(lien))
             held += Decimal(0) if is_exit else protected
-            accounts.append({"case_id": case, "account_id": acc, "name": name, "victim_inr": float(_d(victim)),
+            accounts.append({"case_id": case, "label": names.get(case, case), "account_id": acc, "name": name,
+                             "victim_inr": float(_d(victim)),
                              "held_inr": 0.0 if is_exit else float(protected), "is_exit": bool(is_exit)})
         waiting = admin.execute(f"SELECT COUNT(*) FROM {s}.TICKET t JOIN {s}.COMPLAINT c ON c.case_id = t.case_id "
                                 f"WHERE c.victim_tag = {{v}} AND t.ticket_status = 'QUEUED'",

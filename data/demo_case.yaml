@@ -1,29 +1,99 @@
-# The demo case: a cyber-fraud ticket that reaches the bank at 2:13 a.m. Invented people and numbers. Synthetic, MIT.
-# IDs are stable: tests, the video and the deck all depend on them. Do not rename.
+# The demo night: a cyber-fraud ticket reaches Bank X at 2:13 a.m.; the officer reads the morning log at 9 a.m.
+# Invented people and numbers. Synthetic, MIT. IDs are stable: tests, the video and the deck depend on them.
 # Amounts are rupees. Times are IST (Asia/Kolkata), stored without zone.
 #
-# Bank X runs the tool. A, C and Murugan's fuel pump (D) bank with Bank X; B is at Bank Y; the victim at Bank Z.
-# The transactions are what happens when nobody acts on the ticket until the desk opens: the replay cut-off
-# (DECISIONS D-06) decides how much of it the tool gets to stop.
+# Three banks (config/banks.yaml). Bank X and Bank Y run the agent; Bank Z has a human desk that opens at 10 a.m.
+# Each bank's schema gets only the rows that touch its own accounts (pipeline/load_cases.py).
+#   Bank X: A and C (mule-like), Murugan's fuel pump D, E (paid by A and C before), K (receives the bad-ticket money)
+#   Bank Y: B (A's onward hop), Ravi (victim 2), a diesel customer
+#   Bank Z: Lakshmi (victim 1), G (B's onward hop), F (where A tries to send money at 5:10), Meena (victim 3)
+#
+# The transactions are what happens if nobody acts on the tickets until the desks open (the Compare screen replays
+# them). With the agent, the holds refuse some of them: the simulated core banking records those as declined
+# attempts instead (DECLINED_ATTEMPT), and they never happen.
+#
+# The night, as the demo script tells it (docs/DESIGN.md, "Demo"):
+#   02:13  the ticket lands at Bank X; the agent holds on A, C and D, files the ATM exit, Bank Y's onward entry and the
+#          KYC packets, and proposes narrowing D to the victim's ₹500
+#   02:17  Bank Y's agent works the onward ticket: B still has ₹40,000; B's ₹30,000 hop to G at Bank Z is filed on
+#   03:20  a ticket with a UTR one digit off: no hold, sent back at once, the near match queued for the officer
+#   03:40  G cashes out at Bank Z: its desk is closed until 10 a.m.
+#   04:30  C tries the ATM; the hold refuses it; the agent proposes a full freeze on C
+#   04:31  C tries to send the money to E (same bank) by UPI; refused; E goes on the watch with no hold
+#   05:10  A tries to send ₹50,000 to F at Bank Z; refused; recorded for the police
+#   05:45  Ravi (victim 2) pays A ₹40,000: held as money not linked to a reported victim yet
+#   06:00  Ravi's ticket lands on A: the held money is linked to him, the split recorded, the total held unchanged
+#   07:00  B tries the ATM at Bank Y; refused there
+#   07:30  a customer pays Murugan for diesel: an honest receiver's new money, not held
+#   09:00  three decisions wait for the officer at Bank X: narrow D, freeze C, the unmatched ticket
+#   21 Oct an investigating officer's notice after an FIR repeats CASE_DEMO's transaction: linked, the hold confirmed
 
 case_id: CASE_DEMO
-complaint:
-  ack_no: "31025101800001"          # 14 digits; starts with 3 because it came via 1930
-  source: "1930"
-  victim_account: ACC_LAKSHMI
-  victim_tag: V_LAKSHMI
-  utr: IMPS2026101801520001
-  amount_inr: 200000.00
-  txn_at: "2026-10-18 01:52:00"
-  reported_at: "2026-10-18 02:13:00"   # the ticket reaches Bank X's CFCFRMS queue
-  beneficiary_account: ACC_A
-  lane: A
-  notice_legal_basis: "S.168 r/w S.94 BNSS"
-  notice_has_amount: true
-  ordering_authority: "Cyber Crime Police Station, Vellore (simulated)"
-  ordering_reference: "VLR/CCPS/2026/1018-01"
+complaints:
+  - case_id: CASE_DEMO
+    ack_no: "31025101800001"          # 14 digits; starts with 3 because it came via 1930
+    source: "1930"
+    victim_account: ACC_LAKSHMI
+    victim_tag: V_LAKSHMI
+    utr: IMPS2026101801520001
+    amount_inr: 200000.00
+    txn_at: "2026-10-18 01:52:00"
+    reported_at: "2026-10-18 02:13:00"   # the ticket reaches Bank X's CFCFRMS queue
+    beneficiary_account: ACC_A
+    lane: A
+    notice_legal_basis: "S.168 r/w S.94 BNSS"
+    notice_has_amount: true
+    ordering_authority: "Cyber Crime Police Station, Vellore (simulated)"
+    ordering_reference: "VLR/CCPS/2026/1018-01"
+  - case_id: CASE_BADUTR              # a separate case: the 1930 operator typed the UTR one digit off
+    ack_no: "31025101800014"
+    source: "1930"
+    victim_account: ACC_MEENA
+    victim_tag: V_MEENA
+    utr: IMPS2026101803050013         # the real payment is IMPS2026101803050012 (T_DEMO_12)
+    amount_inr: 25000.00
+    txn_at: "2026-10-18 03:05:00"
+    reported_at: "2026-10-18 03:20:00"
+    beneficiary_account: ACC_K
+    lane: A
+    notice_legal_basis: "S.168 r/w S.94 BNSS"
+    notice_has_amount: true
+    ordering_authority: "Cyber Crime Police Station, Katpadi (simulated)"
+    ordering_reference: "KPD/CCPS/2026/1018-03"
+  - case_id: CASE_DEMO_V2             # victim 2: money into an account that is already held
+    ack_no: "21025101800021"
+    source: NCRP
+    victim_account: ACC_RAVI
+    victim_tag: V_RAVI
+    utr: IMPS2026101805450021
+    amount_inr: 40000.00
+    txn_at: "2026-10-18 05:45:00"
+    reported_at: "2026-10-18 06:00:00"
+    beneficiary_account: ACC_A
+    lane: A
+    notice_legal_basis: "S.168 r/w S.94 BNSS"
+    notice_has_amount: true
+    ordering_authority: "Cyber Crime Police Station, Chennai North (simulated)"
+    ordering_reference: "CHN/CCPS/2026/1018-06"
+  - case_id: CASE_DEMO_IO             # days later, the investigating officer's notice after an FIR: same transaction
+    ticket_kind: IO_NOTICE
+    ack_no: "31025101800001"
+    source: IO
+    victim_account: ACC_LAKSHMI
+    victim_tag: V_LAKSHMI
+    utr: IMPS2026101801520001
+    amount_inr: 200000.00
+    txn_at: "2026-10-18 01:52:00"
+    reported_at: "2026-10-21 11:00:00"
+    beneficiary_account: ACC_A
+    lane: A
+    notice_legal_basis: "S.168 r/w S.94 BNSS"
+    notice_has_amount: true
+    ordering_authority: "Cyber Crime Police Station, Vellore (simulated)"
+    ordering_reference: "VLR/CCPS/2026/1021-IO"
+    fir_reference: "FIR 245/2026, Cyber Crime PS Vellore (simulated)"
 
-# When the agent's holds land (DECISIONS D-19: ticket + hold_minutes). Replay stops here.
+# When the agent's holds land on CASE_DEMO (DECISIONS D-19: ticket + hold_minutes). Replay stops here.
 tool_as_of: "2026-10-18 02:16:00"
 
 banks:
@@ -45,6 +115,22 @@ accounts:
   - {account_id: ACC_D, bank_id: BANK_X, holder: "Murugan (Sri Murugan Fuels)", account_type: current,
      holder_type: merchant, opened_on: "2023-10-02", profile_band: high, opening_balance_inr: 819000.00,
      history: merchant_300_per_day}
+  # New for the agentic night. Their histories are written out below (history_transactions), so the generated
+  # histories of the accounts above stay exactly as they were.
+  - {account_id: ACC_E, bank_id: BANK_X, holder: "E", account_type: savings, holder_type: individual,
+     opened_on: "2026-10-02", profile_band: low, opening_balance_inr: 0.00, history: none}
+  - {account_id: ACC_K, bank_id: BANK_X, holder: "K", account_type: savings, holder_type: individual,
+     opened_on: "2026-10-09", profile_band: low, opening_balance_inr: 0.00, history: none}
+  - {account_id: ACC_G, bank_id: BANK_Z, holder: "G", account_type: savings, holder_type: individual,
+     opened_on: "2026-10-06", profile_band: low, opening_balance_inr: 0.00, history: none}
+  - {account_id: ACC_F, bank_id: BANK_Z, holder: "F", account_type: savings, holder_type: individual,
+     opened_on: "2026-10-05", profile_band: low, opening_balance_inr: 0.00, history: none}
+  - {account_id: ACC_RAVI, bank_id: BANK_Y, holder: "Ravi (victim 2)", account_type: savings, holder_type: individual,
+     opened_on: "2011-03-02", profile_band: medium, opening_balance_inr: null, history: none}
+  - {account_id: ACC_MEENA, bank_id: BANK_Z, holder: "Meena (victim 3)", account_type: savings,
+     holder_type: individual, opened_on: "2016-08-19", profile_band: low, opening_balance_inr: null, history: none}
+  - {account_id: ACC_CUST1, bank_id: BANK_Y, holder: "A diesel customer", account_type: savings,
+     holder_type: individual, opened_on: "2019-01-11", profile_band: medium, opening_balance_inr: null, history: none}
 
 transactions:
   # Root: the victim's own payment. Everything downstream is traced from this UTR.
@@ -54,22 +140,67 @@ transactions:
      amount_inr: 70000.00, channel: IMPS}
   - {txn_id: T_DEMO_03, utr: IMPS2026101801553001, ts: "2026-10-18 01:55:30", from: ACC_A, to: ACC_C,
      amount_inr: 80000.00, channel: IMPS}
+  - {txn_id: T_DEMO_08, utr: IMPS2026101802010008, ts: "2026-10-18 02:01:00", from: ACC_B, to: ACC_G,
+     amount_inr: 30000.00, channel: IMPS}
   - {txn_id: T_DEMO_04, utr: UPI629180204000001, ts: "2026-10-18 02:04:00", from: ACC_C, to: ACC_D,
      amount_inr: 1000.00, channel: UPI}
   - {txn_id: T_DEMO_05, utr: ATM2026101802070001, ts: "2026-10-18 02:07:00", from: ACC_C, to: "EXIT:ATM:BX-ATM-0042",
      amount_inr: 50000.00, channel: ATM, exit_identifier: "ATM BX-ATM-0042, Katpadi"}
-  # After the ticket. With the tool these never happen (the money is already held); without it they do.
+  # After the ticket. Some of these never happen once the agent has acted: the holds refuse them.
+  - {txn_id: T_DEMO_12, utr: IMPS2026101803050012, ts: "2026-10-18 03:05:00", from: ACC_MEENA, to: ACC_K,
+     amount_inr: 25000.00, channel: IMPS, victim_tag: V_MEENA}
+  - {txn_id: T_DEMO_09, utr: ATM2026101803400009, ts: "2026-10-18 03:40:00", from: ACC_G, to: "EXIT:ATM:BZ-ATM-0310",
+     amount_inr: 30000.00, channel: ATM, exit_identifier: "ATM BZ-ATM-0310, Vellore Fort"}
   - {txn_id: T_DEMO_06, utr: ATM2026101804300001, ts: "2026-10-18 04:30:00", from: ACC_C, to: "EXIT:ATM:BX-ATM-0117",
      amount_inr: 29500.00, channel: ATM, exit_identifier: "ATM BX-ATM-0117, Gandhi Nagar"}
-  - {txn_id: T_DEMO_07, utr: CRYPTO2026101805100001, ts: "2026-10-18 05:10:00", from: ACC_A,
-     to: "EXIT:CRYPTO:0x5e1d0a77c3", amount_inr: 50000.00, channel: CRYPTO,
-     exit_identifier: "Crypto exchange deposit, wallet 0x5e1d0a77c3"}
+  - {txn_id: T_DEMO_07, utr: IMPS2026101805100007, ts: "2026-10-18 05:10:00", from: ACC_A, to: ACC_F,
+     amount_inr: 50000.00, channel: IMPS}
+  - {txn_id: T_DEMO_10, utr: IMPS2026101805450021, ts: "2026-10-18 05:45:00", from: ACC_RAVI, to: ACC_A,
+     amount_inr: 40000.00, channel: IMPS, victim_tag: V_RAVI}
+  - {txn_id: T_DEMO_13, utr: ATM2026101807000013, ts: "2026-10-18 07:00:00", from: ACC_B, to: "EXIT:ATM:BY-ATM-0221",
+     amount_inr: 40000.00, channel: ATM, exit_identifier: "ATM BY-ATM-0221, Ranipet"}
+  - {txn_id: T_DEMO_11, utr: UPI629180730000011, ts: "2026-10-18 07:30:00", from: ACC_CUST1, to: ACC_D,
+     amount_inr: 2400.00, channel: UPI}
 
-# Hand-checked answers (LIBR, as_of = tool_as_of). tests/test_oracle_demo.py asserts these.
+# Payments a holder tries only because the money is held: the next try after a refused withdrawal. They exist only
+# when the agent has acted (with no hold, C's ATM withdrawal at 04:30 goes through and nothing is left to send).
+payment_requests:
+  - {request_id: R_DEMO_01, ts: "2026-10-18 04:31:00", from: ACC_C, to: ACC_E, amount_inr: 29500.00, channel: UPI}
+
+# Earlier history written out by hand (loaded as history, before the case day, so the oracle never replays it):
+# E has been paid by A and C before, and sends money on within minutes.
+history_transactions:
+  - {txn_id: H_DEMO_E01, utr: IMPSH2026101214020001, ts: "2026-10-12 14:02:00", from: ACC_C, to: ACC_E,
+     amount_inr: 15000.00, channel: IMPS}
+  - {txn_id: H_DEMO_E02, utr: ATMH2026101214090002, ts: "2026-10-12 14:09:00", from: ACC_E,
+     to: "EXIT:ATM:BX-ATM-0091", amount_inr: 14500.00, channel: ATM, exit_identifier: "ATM BX-ATM-0091"}
+  - {txn_id: H_DEMO_E03, utr: IMPSH2026101419400003, ts: "2026-10-14 19:40:00", from: ACC_A, to: ACC_E,
+     amount_inr: 22000.00, channel: IMPS}
+  - {txn_id: H_DEMO_E04, utr: ATMH2026101419520004, ts: "2026-10-14 19:52:00", from: ACC_E,
+     to: "EXIT:ATM:BX-ATM-0091", amount_inr: 21800.00, channel: ATM, exit_identifier: "ATM BX-ATM-0091"}
+  - {txn_id: H_DEMO_E05, utr: IMPSH2026101611150005, ts: "2026-10-16 11:15:00", from: ACC_C, to: ACC_E,
+     amount_inr: 9000.00, channel: IMPS}
+  - {txn_id: H_DEMO_E06, utr: IMPSH2026101611220006, ts: "2026-10-16 11:22:00", from: ACC_E, to: ACC_A,
+     amount_inr: 8700.00, channel: IMPS}
+
+# Hand-checked answers for CASE_DEMO at tool_as_of (LIBR), over the whole synthetic world (the narrator's view).
+# tests/test_oracle_demo.py asserts these.
 #   A sent 70,000 to B and 80,000 to C; 50,000 of the victim's money is still there.
+#   B (Bank Y) sent 30,000 on to G (Bank Z) at 02:01 and kept 40,000.
 #   C had 500 of its own; under LIBR its own money left first, inside the 1,000 diesel payment to D.
 #   So of D's 1,000 credit only 500 is the victim's. D's own 8,19,000 never mixes with it.
 expected_libr:
+  ACC_A: 50000.00
+  ACC_B: 40000.00
+  ACC_G: 30000.00
+  ACC_C: 29500.00
+  ACC_D: 500.00
+  "EXIT:ATM:BX-ATM-0042": 50000.00
+  total: 200000.00
+
+# The same, as Bank X sees it: only its own accounts' transactions. B's hop to G happened at Bank Y, so Bank X sees
+# all 70,000 still at B (Bank Y's agent finds the rest).
+expected_libr_bank_x:
   ACC_A: 50000.00
   ACC_B: 70000.00
   ACC_C: 29500.00
@@ -77,7 +208,7 @@ expected_libr:
   "EXIT:ATM:BX-ATM-0042": 50000.00
   total: 200000.00
 
-# What the agent does at 2:13 a.m. (rules in config/rules.yaml; tests/rules_oracle.py checks them).
+# What the agent does at 2:13 a.m. at Bank X (rules in config/rules.yaml; tests/rules_oracle.py checks them).
 expected_actions:
   ACC_A: {automatic: MANDATORY_HOLD, amount_inr: 50000.00}
   ACC_B: {automatic: ONWARD_ENTRY, amount_inr: 70000.00}
@@ -85,10 +216,15 @@ expected_actions:
   ACC_D: {automatic: MANDATORY_HOLD, amount_inr: 1000.00, officer: PROPOSE_NARROW, proposed_inr: 500.00}
   "EXIT:ATM:BX-ATM-0042": {automatic: RECORD_EXIT, amount_inr: 50000.00}
 
-# Today vs the tool, on the same transactions (Compare screen). Bank X's view.
+# The officer's 9 a.m. view at Bank X: exactly these wait; everything else is in the morning log.
+expected_morning:
+  - {case_id: CASE_DEMO, account_id: ACC_D, action_code: PROPOSE_NARROW, amount_inr: 500.00}
+  - {case_id: CASE_DEMO, account_id: ACC_C, action_code: PROPOSE_FULL_FREEZE}
+  - {case_id: CASE_BADUTR, account_id: ACC_K, action_code: UNMATCHED_NOTICE, amount_inr: 25000.00}
+
+# Today vs the tool, on the same transactions (Compare screen). Bank X's view of CASE_DEMO.
 expected_compare:
   victim_money_held: {today: 500.00, tool: 80000.00}
-  honest_money_locked: {today: 819500.00, tool_overnight: 500.00, tool_after_review: 0.00}
   minutes_ticket_to_first_hold: {today: 487, tool: 3}
 
 # How today's desk works (FR-14 baseline): nothing happens until the desk opens; then each account on the trail

@@ -9,7 +9,12 @@ const STATUS = {
   WORKING: ["Agent working", "pill-plain"],
   DONE: ["Agent's part done", "pill-held"],
   SENT_BACK: ["Sent back to the police", "pill-other"],
+  LINKED: ["Linked to an earlier case", "pill-plain"],
   FAILED: ["Agent run failed", "pill-gone"],
+};
+const MATCH = {
+  EXACT: "Matches the payment", ACCEPTED: "Near match accepted by the officer", NEAR_MATCH: "Near match only",
+  NO_MATCH: "No such payment here", INCOMPLETE: "Incomplete",
 };
 
 // The simulated CFCFRMS queue at the bank, in the order tickets landed.
@@ -22,8 +27,8 @@ export default function Queue({ modelOn }) {
     setBusy(caseId + mode);
     setNote(null);
     try {
-      const r = caseId ? await api.workOne(caseId, mode) : await api.workQueue(mode);
-      setNote(caseId ? `${caseId}: ${(STATUS[r.status] || [r.status])[0].toLowerCase()} in ${Number(r.seconds || 0).toFixed(1)} s.` : `The agent worked ${plural(r.worked.length, "ticket")} in ${r.seconds} s.`);
+      const r = await api.workOne(caseId, mode);
+      setNote(`${caseId}: ${(STATUS[r.status] || [r.status])[0].toLowerCase()} in ${Number(r.seconds || 0).toFixed(1)} s.`);
       reload();
     } catch (e) {
       setNote(e.message);
@@ -34,25 +39,19 @@ export default function Queue({ modelOn }) {
 
   if (loading && !data) return <div className="wrap page"><Loading what="Loading the tickets" /></div>;
   if (error) return <div className="wrap page"><Failed error={error} retry={reload} /></div>;
-  const queued = data.filter((t) => t.ticket_status === "QUEUED").length;
   return (
     <main id="main" className="wrap page">
       <div className="pagehead">
         <div>
           <h1>Tickets</h1>
-          <p className="lede">Every ticket CFCFRMS sent this bank, in the order it landed. The agent picks each one up at once, whatever the hour.</p>
+          <p className="lede">Every ticket the portal delivered to this bank, in the order it landed: police tickets, and onward entries other banks filed. The agent picks each one up the minute it lands, whatever the hour. {plural(data.length, "ticket")}.</p>
         </div>
-        {queued > 0 && (
-          <button className="btn btn-primary" disabled={!!busy} onClick={() => work(null, "pipeline")}>
-            {busy === "nullpipeline" ? "The agent is working them…" : `Work the ${plural(queued, "waiting ticket")}`}
-          </button>
-        )}
       </div>
       {note && <p className="status" role="status">{note}</p>}
       <div className="table-wrap">
         <table className="table wide">
           <thead>
-            <tr><th>Landed</th><th>Ticket</th><th className="num">Reported</th><th>Notice</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr>
+            <tr><th>Landed</th><th>Ticket</th><th className="num">Reported</th><th>Intake</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr>
           </thead>
           <tbody>
             {data.map((t) => {
@@ -60,9 +59,11 @@ export default function Queue({ modelOn }) {
               return (
                 <tr key={t.case_id}>
                   <td><b>{clock(t.received_at)}</b>{t.after_hours && <div className="note">desk closed</div>}</td>
-                  <td><a href={`#/case/${t.case_id}`}>{t.case_id}</a><div className="note mono">{t.utr}</div></td>
+                  <td><a href={`#/case/${t.case_id}`}>{t.case_id}</a><div className="note mono">{t.utr}</div>
+                    {t.origin !== "POLICE" && <div className="note">onward entry from {String(t.origin).replace("BANK_", "Bank ")}</div>}</td>
                   <td className="num">{inr(t.amount_inr)}</td>
-                  <td>{t.notice_status === "VALID" ? "Complete" : <span className="error" style={{ margin: 0 }}>{t.problems}</span>}</td>
+                  <td>{MATCH[t.match_status] || "Not checked yet"}{t.related && t.related !== "NEW" && <div className="note">{t.related.toLowerCase().replace("_", " ")} of {t.related_case_id}</div>}
+                    {(t.mismatched || t.problems) && <div className="note" style={{ whiteSpace: "pre-wrap" }}>{t.mismatched || t.problems}</div>}</td>
                   <td>
                     <span className={`pill ${pill}`}>{label}</span>
                     {t.run_status === "CHECK_FAILED" && <div className="note">The checker stopped the holds</div>}

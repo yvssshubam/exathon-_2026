@@ -1,7 +1,23 @@
-# Display names of the banks in the synthetic data. Bank X runs the tool (OWN_BANK_ID in .env).
+# The banks in the simulation. Each has its own Exasol schema and its own database users (docs/DESIGN.md,
+# "Each bank sees only its own data"); the simulated CFCFRMS portal (schema PH_PORTAL) is the only link between them.
+#
+#   works_tickets: agent   the product: the same agent at every bank that runs it, at any hour
+#   works_tickets: desk    a bank without the product: its desk opens in the morning (answers "what if the next
+#                          bank doesn't use it?"). desk_opens and first_lookup_minutes say when it gets to a ticket.
+#
+# The officer console shows OWN_BANK_ID from .env (default BANK_X).
+
 BANK_X:
   name: "Bank X"
+  schema: PH_X
+  works_tickets: agent
 BANK_Y:
   name: "Bank Y"
+  schema: PH_Y
+  works_tickets: agent
 BANK_Z:
   name: "Bank Z"
+  schema: PH_Z
+  works_tickets: desk
+  desk_opens: "10:00"
+  first_lookup_minutes: 20

@@ -273,7 +273,7 @@ Reasons in `docs/DESIGN.md`. `config/lanes.yaml`, `templates/notices/`, `PH.LANE
 `PH.NOTICE` are gone (the schema drops them on rebuild). Every ticket is Lane A; the two generated Lane B tickets are
 now Lane A. FIFO and pro rata are still computed by the UDF and tested; only LIBR is shown.
 
-## D-34 · DEFAULT · Onward entries and exits are filed automatically; KYC packets wait
+## D-34 · SUPERSEDED by D-46 · Onward entries and exits are filed automatically; KYC packets wait
 
 Both are mandatory reports with no discretion in them, and the next bank's golden hour depends on the onward entry.
 KYC packets (due within a week) are drafted at once and sent by the officer. KYC data is synthetic, derived from the
@@ -317,7 +317,7 @@ it into `PH.TXN`, `PH.ACCOUNT` and `PH.BANK` next to the cases, so every step ru
 * **Persistence.** `PH_AML` survives `make db` and `make demo-reset`; the import runs once, the copy into `PH` on
   every reset (a few seconds in Exasol). `python -m pipeline.load_cases --no-amlworld` leaves it out.
 
-## D-38 · DEFAULT · The watch replays the day after the holds, in time order
+## D-38 · SUPERSEDED by D-47 · The watch replays the day after the holds, in time order
 
 The watch is a replay over the simulated clock, not a background process: after the agent works its tickets it reads
 every later transaction on the watched accounts from `PH.TXN` and treats each as an attempt. A debit is refused when
@@ -327,7 +327,7 @@ officers place later carry the real clock, so they do not affect the replayed ni
 named by their bank only, since a payer may be a victim whose ticket has not arrived yet. Alerts are recorded, not
 sent: the build has no messaging channel. Running the watch again replaces its events and its marker holds.
 
-## D-39 · DEFAULT · The agent drafts a freeze's reasons; the officer signs them
+## D-39 · SUPERSEDED by D-48 · The agent drafts a freeze's reasons; the officer signs them
 
 Courts ask for the material behind a whole-account freeze, so approving one needs written reasons. Opening the
 freeze form fetches a draft (`GET /api/accounts/{account}/reasons-draft`) built from the database: tickets naming the
@@ -337,7 +337,7 @@ for summaries (percentages, day counts and clock times count too). The draft is 
 edit or replace it, and only the text they approve is stored. Each draft served is written to the audit log with
 who wrote it (model or template).
 
-## D-40 · DEFAULT · A mule network is a connected group of mule-like accounts that pay each other
+## D-40 · SUPERSEDED by D-49 (dropped) · A mule network is a connected group of mule-like accounts that pay each other
 
 Links are deliberately narrow, so each one can be stated as a fact: money moved directly between two candidate
 accounts (any amount, 30 days back from the latest ticket) or both cashed out at the same ATM or wallet. Sharing a
@@ -347,7 +347,7 @@ network by the money that reached him. Grouping is union-find in Python over lin
 power: its single approval runs the same officer approval on each member's waiting freeze, with the officer's name and
 the reasons on each.
 
-## D-41 · DEFAULT · Notices are checked, never acted on alone
+## D-41 · SUPERSEDED by D-45 · Notices are checked, never acted on alone
 
 A police notice that reaches the desk by e-mail or post is read, checked and either matched to its ticket or sent
 back. It never places a hold by itself: holds come from tickets, whose trail the agent traces. A notice is sent back
@@ -358,3 +358,69 @@ officer, since under the SOP the bank holds the amount and a whole-account freez
 The model's reading counts only where the notice's own text bears it out (a UTR, reference or name found verbatim,
 an amount or date the parser also finds), so a misread cannot make a wrong notice look right. Letters are recorded
 as sent with the officer's name; the build sends no e-mail.
+
+## D-42 · DECIDED · The officer decides four things; everything else is automatic
+
+Narrow a hold to the victims' share, widen to a whole-account freeze, accept or leave an unmatched notice, release
+after 75 days on the watch with no police direction. Mandatory holds, exits, onward entries, KYC packets, send-backs,
+duplicate links, the victim split and the watch are automatic. The "confirm a borderline hold" decision is gone: a
+mandatory hold stands on the notice, and borderline evidence only shapes the reasons. The freeze proposal now needs
+the pattern courts accept from repeated tickets (`full_freeze_evidence.complaint_links_min` in `config/rules.yaml`)
+at the first pass, or a refused cash-out on a mule-like watched account later; one ticket is not a pattern.
+
+## D-43 · DECIDED · Maker proposes, checker acts, with separate database users
+
+The agent is the maker: its database user can read the bank's schema and write only its work tables and
+`PROPOSAL`. The checker is deterministic code with its own user: it reruns the checks, validates every proposal
+against what the rules engine produced (same account, same action, same amount), and only then holds, files, links or
+routes it to the officer. Whatever a model asks for is a proposal and can be refused; a model-only proposal is never
+carried out. The approver is the officer, through the checker. The audit log is insert-only for both users.
+
+## D-44 · DECIDED · One schema and two users per bank; the portal is the only link
+
+Each simulated bank has its own schema (PH_X, PH_Y, PH_Z) built from the same SQL, and sees only rows touching its
+own accounts. The simulated CFCFRMS is schema PH_PORTAL with its own service user: it delivers tickets into a bank's
+inbox when the clock reaches them, collects each bank's outbox, and turns an onward entry into the next bank's ticket
+a minute later. Bank X and Bank Y run the agent; Bank Z runs the same code in fixed mode when its desk opens at 10:00.
+The narrator's view reads every schema as the admin and is captioned "Narrator's view: no single bank sees this."
+
+## D-45 · DEFAULT · Intake matches the transaction, not just the account
+
+A ticket is acted on only when its UTR is a payment into the account it names, for the amount (or less, for an
+onward share) and within 15 minutes of the time it gives. A same-account, same-amount payment within two hours with
+a different UTR is a near match: nothing is held, the ticket is sent back at once, and the officer may accept the
+near match (the ticket is then worked as matched). Anything else is sent back. A ticket for a payment already in an
+earlier case is a duplicate and is linked, never held twice; the investigating officer's notice after an FIR is the
+modelled case.
+
+## D-46 · DEFAULT · KYC packets are filed in the same run
+
+The SOP allows a week; the agent files each held account's packet with the holds, so nothing waits on the officer.
+
+## D-47 · DEFAULT · The watch acts on what core banking refuses, and on new money
+
+Payments on held or watched accounts go through simulated core banking in time order. A refused cash-out on a
+mule-like watched account produces a full-freeze proposal; a refused transfer to an account at the same bank puts that
+account on the watch with no hold (no victim money reached it); a refused transfer to another bank is recorded for
+the police. New money on a mule-like watched account is held under the existing notice up to the amount reported,
+tagged "not linked to a reported victim yet"; when that victim's ticket arrives, the hold is linked to them and the
+total does not change. New money on an honest receiver is never held. Only cases that share an account with the new
+ticket are recalculated.
+
+## D-48 · DEFAULT · The rules decide the reasons; the model only words them
+
+Reasons are a structured list (the support, the case against, the numbers) built from the rules engine and the
+evidence. The model's sentences must each cite the items they use, repeat no number those items do not hold, and
+include the case against; otherwise the fixed template is used. Citations come from the fixed list. Mandatory holds
+are always template-worded, and the holder is told only the authority, the notice and the amount.
+
+## D-49 · DECIDED · Dropped: mule networks, the data Q&A, emailed letter reading
+
+Networks are the mule detector we said we wouldn't build, and they sweep in honest receivers; cross-ticket evidence
+stays as one signal. The Q&A had no pain behind it. Letters arrive through the portal as tickets.
+
+## D-50 · DEFAULT · The checker's conservation check counts the bank's whole view
+
+At a bank that sees only its own accounts, a victim's money can leave through another bank and come back into one
+of its accounts by a hop it cannot see. The money is still the victim's and still in the bank's view, so
+conservation sums the victim's money in every account and exit of the bank's attribution, not only on its own trail.

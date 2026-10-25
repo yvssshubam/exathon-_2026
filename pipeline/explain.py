@@ -1,6 +1,6 @@
 """Turn an action row into plain sentences: plain words over jargon, action first, reasons after.
 
-Every number comes from PH.CASE_ACTION (computed in Exasol); this module only words it. The console, the agent's
+Every number comes from CASE_ACTION (computed in Exasol); this module only words it. The console, the agent's
 case summary and the officer's review all use it, so the same numbers are always worded the same way.
 The question each account's reasons answer is not "is this a mule?" but "how much should we hold here, and can we
 defend it?" (docs/DESIGN.md).
@@ -8,10 +8,14 @@ defend it?" (docs/DESIGN.md).
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
-BANK_NAMES = {"BANK_X": "Bank X", "BANK_Y": "Bank Y", "BANK_Z": "Bank Z"}
+import yaml
+
+BANK_NAMES = {k: v["name"] for k, v in yaml.safe_load(
+    (Path(__file__).resolve().parents[1] / "config" / "banks.yaml").read_text(encoding="utf-8")).items()}
 AUTOMATIC = ("MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY")
-PROPOSALS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "CONFIRM_HOLD")
+PROPOSALS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE")
 
 
 def inr(amount) -> str:
@@ -55,15 +59,17 @@ def headline(a: dict) -> str:
         return f"Narrow the hold to {inr(amount)}?"
     if code == "PROPOSE_FULL_FREEZE":
         return "Freeze the whole account?"
-    if code == "CONFIRM_HOLD":
-        return f"Confirm the {inr(amount)} hold?"
+    if code == "UNMATCHED_NOTICE":
+        return "Unmatched notice: act on the near match?"
+    if code == "PROPOSE_RELEASE":
+        return f"Release the {inr(amount)} hold?"
     if str(a.get("account_id", "")).startswith("EXIT:"):
         return "Exit at another bank"
     return "No action here"
 
 
 def explain(a: dict) -> list[str]:
-    """Plain sentences for one PH.CASE_ACTION row (dict with its column names in lower case)."""
+    """Plain sentences for one CASE_ACTION row (dict with its column names in lower case)."""
     code, reason = a["action_code"], a.get("reason_code")
     victim, others = _d(a.get("victim_amount_inr")), _d(a.get("other_victims_inr"))
     out: list[str] = []
@@ -103,12 +109,15 @@ def explain(a: dict) -> list[str]:
         out.append("The account's history shows the exceptional pattern courts accept for a whole-account freeze "
                    "(Rajasthan HC, 20 Aug 2026). A label alone is not a reason, so the evidence is listed below.")
         if reason == "REPEATED_COMPLAINTS":
-            out.append("It received money from more than one fraud complaint in the last 7 days.")
+            out.append("It received money from three or more reported frauds in the last 7 days.")
         else:
-            out.append("Most of the money it receives is sent on within the hour, and some leaves as cash or crypto.")
+            out.append("After the hold it tried to take the money out as cash, and the hold refused it.")
         out.append("A freeze also stops money that arrives later from being moved. Only an officer can place it.")
-    elif code == "CONFIRM_HOLD":
-        out.append("The account's evidence is borderline. The amount-only hold stays; please confirm it after a look.")
+    elif code == "UNMATCHED_NOTICE":
+        out.append("The ticket does not match a transaction exactly, so nothing is held and it was sent back for "
+                   "correction at once. A payment on the account it names may be the one it means: you decide.")
+    elif code == "PROPOSE_RELEASE":
+        out.append("No police direction has confirmed this hold in 75 days. Lifting it needs your approval.")
     elif reason == "EXIT_AT_OTHER_BANK":
         out.append("The money left banking from another bank's account; that bank files the exit.")
     elif reason == "OTHER_BANK_DOWNSTREAM":

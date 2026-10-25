@@ -1,14 +1,16 @@
 """Proportionate Holds API (FastAPI). The officer console talks only to this.
 
-The agent (pipeline/agent.py) works tickets; every number comes from Exasol; officer decisions go through
-pipeline/officer.py, which enforces the rules. This layer only routes requests and shapes JSON. The only holds that
-exist without an officer are the ones the rules require; no endpoint can place a full freeze without an officer's
-name and written reasons.
+Every number comes from Exasol. The API holds no rules of its own and connects as the right database user for each
+request (pipeline/db.py): screens read as the bank's maker (read-only on its schema, no privilege on holds), the
+officer's decisions go through the checker (pipeline/checker.py: apply_decision), the demo controls and the
+narrator's view run as the admin. Only four things ever wait for the officer; no endpoint can place a full freeze
+without an officer's name on a proposal the checker already validated.
 
 Start it:   python -m app.api            (http://127.0.0.1:8000, interactive docs at /docs)
 """
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterator
 from decimal import Decimal
@@ -17,20 +19,22 @@ from pathlib import Path
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from pipeline import officer, steps
+from pipeline import steps
+from pipeline.checker import DecisionError
 from pipeline.explain import explain, headline
 
 ROOT = Path(__file__).resolve().parents[2]
 BANKS = yaml.safe_load((ROOT / "config" / "banks.yaml").read_text(encoding="utf-8"))
 RULES = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
 SCORING = yaml.safe_load((ROOT / "config" / "scoring.yaml").read_text(encoding="utf-8"))
+DECISIONS = tuple(RULES["officer"])
 
-app = FastAPI(title="Proportionate Holds API", version="0.2.0",
-              description="A golden-hour copilot for the bank nodal officer: the agent works every ticket the moment "
-                          "it lands; the officer decides every judgment call.")
+app = FastAPI(title="Proportionate Holds API", version="0.3.0",
+              description="A bank-side agent that works every cyber-fraud ticket the moment it lands, holds what the "
+                          "rules require, and leaves the officer only the judgment calls.")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -43,11 +47,40 @@ def root() -> RedirectResponse:
 
 # ---------------------------------------------------------------- helpers
 
-def get_conn() -> Iterator:
-    """One Exasol session per request, so CURRENT_STATEMENT and the audit log stay consistent."""
+def check_bank(bank: str) -> str:
+    if bank not in BANKS:
+        raise HTTPException(400, f"Unknown bank {bank!r}; known: {sorted(BANKS)}")
+    return bank
+
+
+def _open(role: str, bank: str | None = None):
     from pipeline.db import connect
 
-    conn = connect()
+    try:
+        return connect(role, bank)
+    except SystemExit as exc:          # missing .env settings or users: say so instead of a stack trace
+        raise HTTPException(503, str(exc)) from exc
+
+
+def get_conn(bank: str = Query("BANK_X")) -> Iterator:
+    """The bank's maker connection (reads). One session per request, so CURRENT_STATEMENT stays consistent."""
+    conn = _open("maker", check_bank(bank))
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def get_checker(bank: str = Query("BANK_X")) -> Iterator:
+    conn = _open("checker", check_bank(bank))
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def get_admin() -> Iterator:
+    conn = _open("admin")
     try:
         yield conn
     finally:
@@ -87,16 +120,10 @@ def one(conn, sql: str, params: dict | None = None) -> dict | None:
     return found[0] if found else None
 
 
-def check_bank(bank: str) -> str:
-    if bank not in BANKS:
-        raise HTTPException(400, f"Unknown bank {bank!r}; known: {sorted(BANKS)}")
-    return bank
-
-
 def check_case(conn, case_id: str) -> dict:
-    c = one(conn, "SELECT * FROM PH.COMPLAINT WHERE case_id = {c}", {"c": case_id})
+    c = one(conn, "SELECT * FROM COMPLAINT WHERE case_id = {c}", {"c": case_id})
     if c is None:
-        raise HTTPException(404, f"No case {case_id!r}")
+        raise HTTPException(404, f"No case {case_id!r} at this bank")
     return c
 
 
@@ -123,18 +150,35 @@ def present(action: dict, names: dict | None = None) -> dict:
 
 def holder_names(conn) -> dict:
     return {r["account_id"]: r["holder_name"] or r["account_id"]
-            for r in rows(conn, "SELECT account_id, holder_name FROM PH.ACCOUNT "
-                                "WHERE account_id IN (SELECT account_id FROM PH.CASE_ACCOUNT)")}
+            for r in rows(conn, "SELECT account_id, holder_name FROM ACCOUNT WHERE account_id IN "
+                                "(SELECT account_id FROM CASE_ACCOUNT UNION SELECT account_id FROM PROPOSAL "
+                                "UNION SELECT account_id FROM WATCH_EVENT)")}
+
+
+def sim_clock(conn) -> str | None:
+    try:
+        v = conn.execute("SELECT MAX(clock_at) FROM PH_PORTAL.SIM_CLOCK").fetchval()
+    except Exception:  # a bank user cannot read the portal schema
+        return None
+    return str(v)[:19] if v else None
+
+
+def clock_now() -> str | None:
+    conn = _open("admin")
+    try:
+        return sim_clock(conn)
+    finally:
+        conn.close()
 
 
 ACTION_SQL = """
     SELECT account_id, bank_id, hop, action_code, act_mode, amount_inr, current_hold_inr, victim_amount_inr,
            other_victims_inr, balance_now_inr, trail_amount_inr, band, score, reason_code, legal_basis,
            action_status, stmt_id
-    FROM PH.CASE_ACTION WHERE case_id = {c} AND viewing_bank_id = {b}"""
+    FROM CASE_ACTION WHERE case_id = {c} AND viewing_bank_id = {b}"""
 
 
-# ---------------------------------------------------------------- reference data
+# ---------------------------------------------------------------- reference data and the clock
 
 @app.get("/api/health")
 def health(conn=Depends(get_conn)):
@@ -145,11 +189,12 @@ def health(conn=Depends(get_conn)):
 
 @app.get("/api/config")
 def config():
-    from pipeline.db import settings
     from pipeline.llm import settings as llm_settings
 
     try:
-        own = settings()["own_bank_id"]
+        from pipeline.db import own_bank
+
+        own = own_bank()
     except SystemExit:
         own = "BANK_X"
     llm = llm_settings()
@@ -165,322 +210,289 @@ def config():
     }
 
 
+@app.get("/api/clock")
+def clock(admin=Depends(get_admin)):
+    """How far the simulated night has run."""
+    return {"clock": sim_clock(admin)}
+
+
+# ---------------------------------------------------------------- the demo: the night, reset, the narrator
+
+class NightRun(BaseModel):
+    until: str = Field("2026-10-18 09:00:00", description="Simulated time to run to")
+    mode: str = Field("pipeline", pattern="^(pipeline|llm)$")
+    reset: bool = Field(True, description="Reload the data and start the night again first")
+    banks: list[str] | None = Field(None, description="Only these banks (e.g. BANK_Z to open its desk)")
+
+
+@app.post("/api/night/run")
+def night_run(body: NightRun):
+    """Run the simulated night across every bank, in time order (pipeline/night.py)."""
+    from pipeline.night import run_night
+
+    for b in body.banks or []:
+        check_bank(b)
+    started = time.perf_counter()
+    try:
+        r = run_night(body.until, body.mode, body.reset, body.banks, quiet=True)
+    except steps.StepFailed as exc:
+        raise HTTPException(500, str(exc)) from exc
+    return {"from": r["from"], "until": r["until"], "events": r["events"], "lines": r["lines"],
+            "morning": r["morning"], "seconds": round(time.perf_counter() - started, 2)}
+
+
+@app.post("/api/demo/reset")
+def demo_reset(admin=Depends(get_admin)):
+    """Reload the data and empty every work table: every ticket waits on the portal again (same as `make seed`)."""
+    from pipeline.load_cases import reset
+
+    started = time.perf_counter()
+    reset(admin)
+    return {"reset": True, "seconds": round(time.perf_counter() - started, 2)}
+
+
+@app.get("/api/narrator")
+def narrator(victim: str = Query("V_LAKSHMI"), admin=Depends(get_admin)):
+    """The whole trail across every bank. No single bank sees this: it reads every schema as the admin."""
+    from pipeline.narrator import CAPTION, timeline, victim_trail
+
+    return {"caption": CAPTION, "clock": sim_clock(admin), "trail": victim_trail(admin, victim),
+            "timeline": timeline(admin)}
+
+
 # ---------------------------------------------------------------- the ticket queue and the agent
 
 @app.get("/api/queue")
 def queue(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """The simulated CFCFRMS queue: every ticket, when it landed and what the agent did with it."""
-    check_bank(bank)
+    """This bank's CFCFRMS inbox: every ticket that has reached it, when it landed and what happened to it."""
     out = rows(conn, """
-        SELECT t.case_id, t.received_at, t.ticket_status, t.run_id, c.amount_inr, c.utr, c.complaint_source,
-               k.notice_status, k.problems, r.run_status, r.run_mode, r.wall_seconds, r.sim_holds_at
-        FROM PH.TICKET t
-        JOIN PH.COMPLAINT c ON c.case_id = t.case_id
-        JOIN PH.COMPLAINT_CHECK k ON k.case_id = t.case_id
-        LEFT JOIN PH.AGENT_RUN r ON r.run_id = t.run_id
+        SELECT t.case_id, t.received_at, t.ticket_status, t.run_id, t.origin, c.amount_inr, c.utr,
+               c.complaint_source, c.ticket_kind, k.match_status, k.mismatched, k.problems, k.related,
+               k.related_case_id, r.run_status, r.run_mode, r.wall_seconds, r.sim_holds_at, r.summary_text
+        FROM TICKET t
+        JOIN COMPLAINT c ON c.case_id = t.case_id
+        LEFT JOIN INTAKE_CHECK k ON k.case_id = t.case_id
+        LEFT JOIN AGENT_RUN r ON r.run_id = t.run_id
         ORDER BY t.received_at, t.case_id""")
     for t in out:
         t["after_hours"] = after_hours(t["received_at"])
     return out
 
 
-def _work(conn, case_id: str, bank: str, mode: str) -> dict:
+@app.post("/api/tickets/{case_id}/work")
+def work_one(case_id: str, bank: str = Query("BANK_X"), mode: str = Query("pipeline", pattern="^(pipeline|llm)$")):
+    """Deliver the ticket if it is due and work it now: maker, then checker, then the portal collects the filings."""
+    from pipeline import portal
     from pipeline.agent import work_ticket
 
-    try:
-        return work_ticket(conn, case_id, bank, mode)
-    except steps.StepFailed as exc:
-        raise HTTPException(500, str(exc)) from exc
-
-
-@app.post("/api/tickets/{case_id}/work")
-def work_one(case_id: str, bank: str = Query("BANK_X"), mode: str = Query("pipeline", pattern="^(pipeline|llm)$"),
-             conn=Depends(get_conn)):
-    """The agent works one ticket now: trace, attribute, evidence, rules, checker, then only the required holds and
-    the paperwork. Judgment calls are queued for the officer."""
     check_bank(bank)
-    check_case(conn, case_id)
-    out = _work(conn, case_id, bank, mode)
-    out["watch"] = _watch(conn, bank, mode)
-    return out
-
-
-@app.post("/api/queue/work")
-def work_queue(bank: str = Query("BANK_X"), mode: str = Query("pipeline", pattern="^(pipeline|llm)$"),
-               limit: int = Query(50, ge=1, le=500), conn=Depends(get_conn)):
-    """Work every QUEUED ticket in the order it landed (the night, replayed)."""
-    from pipeline.agent import queued
-
-    check_bank(bank)
-    started = time.perf_counter()
-    results = [_work(conn, case_id, bank, mode) for case_id in queued(conn)[:limit]]
-    watch = _watch(conn, bank, mode) if results else None
-    return {"worked": results, "watch": watch, "seconds": round(time.perf_counter() - started, 3)}
-
-
-def _watch(conn, bank: str, mode: str) -> dict:
-    """After the tickets: the agent keeps watching the held accounts (pipeline/watch.py)."""
-    from pipeline.networks import run_networks
-    from pipeline.notices import run_notices
-    from pipeline.watch import run_watch
-
+    pconn, maker, checker = _open("portal"), _open("maker", bank), _open("checker", bank)
     try:
-        out = run_watch(conn, bank, mode)
-        out["networks"] = run_networks(conn, bank)["networks"]     # after the watch: it knows the latest balances
-        out["notices"] = run_notices(conn, bank, mode)               # police notices that arrived by e-mail or post
+        portal.deliver_one(pconn, case_id)
+        check_case(maker, case_id)
+        out = work_ticket(maker, checker, case_id, bank, mode, now=clock_now())
+        out["routed"] = portal.collect(pconn, bank)
         return out
     except steps.StepFailed as exc:
         raise HTTPException(500, str(exc)) from exc
+    finally:
+        for c in (pconn, maker, checker):
+            c.close()
 
 
-WATCH_SQL = """
-    SELECT w.event_id, w.account_id, COALESCE(a.holder_name, w.account_id) AS name, w.txn_id, w.event_at,
-           w.event_kind, w.amount_inr, w.counterparty, w.channel, w.held_inr, w.balance_inr, w.case_ids,
-           w.response, w.allowed_responses, w.chosen_by, w.alert_text, w.hold_id, h.amount_inr AS hold_amount, w.stmt_id
-    FROM PH.WATCH_EVENT w LEFT JOIN PH.ACCOUNT a ON a.account_id = w.account_id
-    LEFT JOIN PH.HOLD_LEDGER h ON h.hold_id = w.hold_id
-    WHERE w.viewing_bank_id = {b}"""
+# ---------------------------------------------------------------- the officer's morning
+
+def proposal_rows(conn, where: str, params: dict) -> list[dict]:
+    names = holder_names(conn)
+    out = rows(conn, f"""
+        SELECT p.proposal_id, p.case_id, p.account_id, p.action_code, p.act_mode, p.amount_inr, p.proposed_by,
+               p.proposed_at, p.reasons_json, p.draft_text, p.draft_by, p.claims_check, p.proposal_status,
+               p.checker_note, p.checked_at, p.stmt_id, t.received_at, acc.opened_on, acc.account_type,
+               acc.holder_type, ca.balance_now_inr, ca.victim_amount_inr, ca.other_victims_inr, ca.band,
+               ca.pass_through, ca.cash_exits, ca.complaint_links,
+               (SELECT SUM(h.amount_inr) FROM HOLD_LEDGER h WHERE h.account_id = p.account_id AND h.case_id = p.case_id
+                  AND h.hold_status = 'ACTIVE' AND h.hold_kind = 'LIEN') AS current_hold_inr
+        FROM PROPOSAL p
+        LEFT JOIN TICKET t ON t.case_id = p.case_id
+        LEFT JOIN ACCOUNT acc ON acc.account_id = p.account_id
+        LEFT JOIN CASE_ACCOUNT ca ON ca.case_id = p.case_id AND ca.account_id = p.account_id
+        WHERE {where} ORDER BY p.proposal_id""", params)
+    for p in out:
+        try:
+            p["reasons"] = json.loads(p.pop("reasons_json") or "{}")
+        except ValueError:
+            p["reasons"] = {}
+        p["name"] = names.get(p["account_id"], p["account_id"])
+        p["headline"] = headline({"action_code": p["action_code"], "amount_inr": p["amount_inr"],
+                                  "account_id": p["account_id"]})
+        p["case_against"] = [a["text"] for a in p["reasons"].get("against", [])]
+        p["reasons_for"] = [a["text"] for a in p["reasons"].get("support", [])]
+        p["citation"] = p["reasons"].get("citation")
+        p["record"] = f"/api/accounts/{p['account_id']}/record"
+    return out
+
+
+@app.get("/api/inbox")
+def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """The officer's morning: what was done automatically (read only), and the decisions waiting (the four only)."""
+    from pipeline.morning import latest
+
+    waiting = proposal_rows(conn, "p.proposal_status = 'WAITING'", {})
+    done = rows(conn, """
+        SELECT t.case_id, t.received_at, t.ticket_status, c.amount_inr, c.ticket_kind, r.run_id, r.run_status,
+               r.run_mode, r.sim_holds_at, r.wall_seconds, r.summary_text,
+               (SELECT COUNT(*) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.placed_by = 'agent'
+                  AND h.hold_kind = 'LIEN') AS holds,
+               (SELECT SUM(h.amount_inr) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.placed_by = 'agent'
+                  AND h.hold_kind = 'LIEN' AND h.hold_status <> 'REPLACED') AS held_inr,
+               (SELECT COUNT(*) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id) AS filed,
+               (SELECT COUNT(*) FROM PROPOSAL p WHERE p.case_id = t.case_id
+                  AND p.proposal_status = 'WAITING') AS waiting
+        FROM TICKET t
+        JOIN COMPLAINT c ON c.case_id = t.case_id
+        JOIN AGENT_RUN r ON r.run_id = t.run_id
+        WHERE t.ticket_status NOT IN ('QUEUED', 'WORKING')
+        ORDER BY t.received_at, t.case_id""")
+    for d in done:
+        d["after_hours"] = after_hours(d["received_at"])
+    watch = watch_rows(conn, bank)
+    queued = conn.execute("SELECT COUNT(*) FROM TICKET WHERE ticket_status = 'QUEUED'").fetchval()
+    return {"waiting": waiting, "done": done, "watch": watch, "morning_log": latest(conn, bank),
+            "queued": int(queued or 0)}
 
 
 def watch_rows(conn, bank: str, account_id: str | None = None) -> list[dict]:
-    from pipeline.watch import describe, out_of_hours
-
-    sql = WATCH_SQL + (" AND w.account_id = {a}" if account_id else "") + " ORDER BY w.event_at, w.event_id"
+    sql = ("SELECT w.event_id, w.account_id, COALESCE(a.holder_name, w.account_id) AS name, w.case_id, w.event_at, "
+           "w.event_kind, w.amount_inr, w.counterparty, w.channel, w.txn_ref, w.attempt_id, w.hold_id, w.proposal_id, "
+           "w.sentence, w.stmt_id FROM WATCH_EVENT w LEFT JOIN ACCOUNT a ON a.account_id = w.account_id "
+           "WHERE w.viewing_bank_id = {b}" + (" AND w.account_id = {a}" if account_id else "")
+           + " ORDER BY w.event_at, w.event_id")
     out = rows(conn, sql, {"b": bank, "a": account_id})
     for r in out:
-        r["options"] = r.pop("allowed_responses")
-        r["case_ids"] = [c for c in (r["case_ids"] or "").split(",") if c]
-        r["out_of_hours"] = out_of_hours(str(r["event_at"]))
-        r["sentence"] = describe(_event(r), r["name"])
-    return out
-
-
-def _event(r: dict):
-    from decimal import Decimal
-
-    from pipeline.watch import Event
-
-    return Event(r["account_id"], r["txn_id"], str(r["event_at"])[:19], r["event_kind"], Decimal(str(r["amount_inr"])),
-                 r["counterparty"] or "", r["channel"] or "", Decimal(str(r["held_inr"] or 0)),
-                 Decimal(str(r["balance_inr"] or 0)), r["channel"] in ("ATM", "CRYPTO", "CASH"), r["case_ids"],
-                 hold_amount=Decimal(str(r["hold_amount"] or 0)))
-
-
-@app.get("/api/accounts/{account_id}/reasons-draft")
-def freeze_reasons(account_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """The agent's draft of the reasons behind a whole-account freeze, for the officer to edit (pipeline/reasons.py).
-    Every number in it comes from the database; the officer's edited text is what gets approved."""
-    from pipeline.db import audit
-    from pipeline.reasons import draft_for
-
-    check_bank(bank)
-    try:
-        out = draft_for(conn, bank, account_id)
-    except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    audit(conn, "freeze_reasons_drafted", detail=f"account={account_id}; written_by={out['written_by']}")
-    return out
-
-
-def notice_rows(conn, bank: str, case_id: str | None = None) -> list[dict]:
-    import json
-
-    sql = ("SELECT n.*, t.received_at AS ticket_received_at FROM PH.NOTICE n "
-           "LEFT JOIN PH.TICKET t ON t.case_id = n.case_id WHERE n.viewing_bank_id = {b}"
-           + (" AND n.case_id = {c}" if case_id else "") + " ORDER BY n.received_at")
-    out = rows(conn, sql, {"b": bank, "c": case_id})
-    for r in out:
-        r["field_sources"] = json.loads(r["field_sources"]) if r.get("field_sources") else {}
-        r["problems"] = [p for p in (r.get("problems") or "").split("\n") if p]
-        r["agent_notes"] = [p for p in (r.get("agent_notes") or "").split("\n") if p]
-    return out
-
-
-@app.get("/api/notices")
-def notices(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """Police notices received directly, what the agent read in each and what it decided."""
-    check_bank(bank)
-    return notice_rows(conn, bank)
-
-
-@app.post("/api/notices/run")
-def notices_run(bank: str = Query("BANK_X"), mode: str = Query("pipeline", pattern="^(pipeline|llm)$"),
-                conn=Depends(get_conn)):
-    """Read every new notice (also runs after the agent works tickets)."""
-    from pipeline.notices import run_notices
-
-    check_bank(bank)
-    return run_notices(conn, bank, mode)
-
-
-class SendLetter(BaseModel):
-    officer: str
-    text: str | None = Field(None, description="The letter as the officer edited it; the draft if omitted")
-
-
-@app.post("/api/notices/{notice_id}/send")
-def notice_send(notice_id: str, body: SendLetter, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """The officer sends the letter asking the police to correct a notice (recorded; no e-mail in this build)."""
-    from pipeline.db import audit
-
-    check_bank(bank)
-    officer_name = (body.officer or "").strip()
-    if not officer_name:
-        raise HTTPException(400, "An officer name is required to send a letter.")
-    n = one(conn, "SELECT notice_status, sent_at FROM PH.NOTICE WHERE notice_id = {n} AND viewing_bank_id = {b}",
-            {"n": notice_id, "b": bank})
-    if n is None:
-        raise HTTPException(404, f"no notice {notice_id}")
-    if n["notice_status"] != "SENT_BACK":
-        raise HTTPException(400, "Only a notice the agent could not accept has a letter to send.")
-    if n["sent_at"]:
-        raise HTTPException(400, "This letter was already sent.")
-    conn.execute("UPDATE PH.NOTICE SET sent_at = CURRENT_TIMESTAMP, sent_by = {o}, "
-                 "reply_text = COALESCE({t}, reply_text) WHERE notice_id = {n}",
-                 {"o": officer_name, "t": body.text, "n": notice_id})
-    audit(conn, "notice_letter_sent", actor=officer_name, detail=f"notice={notice_id}")
-    return {"sent": True}
-
-
-@app.get("/api/networks")
-def networks(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """Mule networks across the worked tickets: members, why they belong together, tickets and money."""
-    from pipeline.networks import details
-
-    check_bank(bank)
-    return details(conn, bank)
-
-
-@app.get("/api/networks/{network_id}/reasons-draft")
-def network_reasons(network_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """The agent's draft of the reasons for freezing a whole network, and the note for the police."""
-    from pipeline.db import audit
-    from pipeline.llm import client
-    from pipeline.networks import details, draft
-
-    check_bank(bank)
-    found = details(conn, bank, network_id)
-    if not found:
-        raise HTTPException(404, f"no network {network_id}")
-    out = draft(found[0], client())
-    audit(conn, "network_reasons_drafted", detail=f"network={network_id}; written_by={out['written_by']}")
+        r["out_of_hours"] = after_hours(str(r["event_at"]))
     return out
 
 
 @app.get("/api/watch")
 def watch(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """What the agent saw and did on held accounts after the holds went on."""
-    check_bank(bank)
-    return watch_rows(conn, bank)
+    """What happened on watched accounts after the first pass, and what the agent did."""
+    return {"events": watch_rows(conn, bank),
+            "watch_list": rows(conn, "SELECT w.account_id, COALESCE(a.holder_name, w.account_id) AS name, w.case_id, "
+                                     "w.first_pass, w.reported_inr, w.added_at, w.added_why, w.left_at, w.left_why "
+                                     "FROM WATCH_LIST w LEFT JOIN ACCOUNT a ON a.account_id = w.account_id "
+                                     "ORDER BY w.added_at")}
 
 
-@app.post("/api/watch/run")
-def watch_run(bank: str = Query("BANK_X"), mode: str = Query("pipeline", pattern="^(pipeline|llm)$"),
-              conn=Depends(get_conn)):
-    """Replay the watch over every worked ticket (also runs after every ticket the agent works)."""
-    check_bank(bank)
-    return _watch(conn, bank, mode)
+class Decide(BaseModel):
+    officer: str = Field(..., description="Officer deciding; required")
+    comment: str | None = Field(None, description="Required to reject, or to change a narrowing amount")
+    amount: float | None = Field(None, description="Changed narrowing amount (optional)")
+    signed_text: str | None = Field(None, description="The reasons as the officer signs them (optional edit of the "
+                                                      "draft)")
 
 
-@app.get("/api/inbox")
-def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """The officer's morning view: what the agent did on its own, and what is waiting for a decision."""
-    check_bank(bank)
-    names = holder_names(conn)
-    done = rows(conn, """
-        SELECT t.case_id, t.received_at, c.amount_inr, r.run_id, r.run_status, r.sim_holds_at, r.wall_seconds,
-               r.run_mode, r.summary_text,
-               (SELECT COUNT(*) FROM PH.HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.viewing_bank_id = {b}
-                  AND h.placed_by = 'agent' AND h.hold_kind = 'LIEN') AS holds,
-               (SELECT SUM(h.amount_inr) FROM PH.HOLD_LEDGER h WHERE h.case_id = t.case_id
-                  AND h.viewing_bank_id = {b} AND h.placed_by = 'agent' AND h.hold_kind = 'LIEN') AS held_inr,
-               (SELECT COUNT(*) FROM PH.PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.viewing_bank_id = {b}
-                  AND p.entry_kind = 'EXIT') AS exits,
-               (SELECT COUNT(*) FROM PH.PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.viewing_bank_id = {b}
-                  AND p.entry_kind = 'ONWARD') AS onward,
-               (SELECT COUNT(*) FROM PH.PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.viewing_bank_id = {b}
-                  AND p.entry_kind = 'KYC') AS kyc,
-               (SELECT COUNT(*) FROM PH.CASE_ACTION a WHERE a.case_id = t.case_id AND a.viewing_bank_id = {b}
-                  AND a.act_mode = 'OFFICER' AND a.action_status IN ('PROPOSED', 'WAITING')) AS waiting
-        FROM PH.TICKET t
-        JOIN PH.COMPLAINT c ON c.case_id = t.case_id
-        JOIN PH.AGENT_RUN r ON r.run_id = t.run_id
-        WHERE t.ticket_status IN ('DONE', 'SENT_BACK', 'FAILED')
-        ORDER BY t.received_at DESC, t.case_id""", {"b": bank})
-    for d in done:
-        d["after_hours"] = after_hours(d["received_at"])
-    waiting = [present(a, names) for a in rows(conn, """
-        SELECT a.case_id, a.account_id, a.bank_id, a.hop, a.action_code, a.act_mode, a.amount_inr, a.current_hold_inr,
-               a.victim_amount_inr, a.other_victims_inr, a.balance_now_inr, a.trail_amount_inr, a.band, a.score,
-               a.reason_code, a.legal_basis, a.action_status, a.stmt_id,
-               acc.opened_on, acc.account_type, acc.holder_type, ca.pass_through, ca.cash_exits, ca.complaint_links,
-               t.received_at, h.placed_at AS held_since
-        FROM PH.CASE_ACTION a
-        JOIN PH.TICKET t ON t.case_id = a.case_id
-        LEFT JOIN PH.ACCOUNT acc ON acc.account_id = a.account_id
-        LEFT JOIN PH.CASE_ACCOUNT ca ON ca.case_id = a.case_id AND ca.viewing_bank_id = a.viewing_bank_id
-                                    AND ca.account_id = a.account_id
-        LEFT JOIN (SELECT case_id, account_id, MIN(placed_at) AS placed_at FROM PH.HOLD_LEDGER
-                   WHERE placed_by = 'agent' GROUP BY case_id, account_id) h
-               ON h.case_id = a.case_id AND h.account_id = a.account_id
-        WHERE a.viewing_bank_id = {b} AND a.act_mode = 'OFFICER' AND a.action_status IN ('PROPOSED', 'WAITING')
-        ORDER BY a.case_id, a.hop, a.account_id, a.action_code""", {"b": bank})]
-    kyc = rows(conn, "SELECT entry_id, case_id, account_id FROM PH.PORTAL_ENTRY WHERE viewing_bank_id = {b} "
-                     "AND entry_kind = 'KYC' AND entry_status = 'DRAFT' ORDER BY case_id, account_id", {"b": bank})
-    for k in kyc:
-        k["name"] = names.get(k["account_id"], k["account_id"])
-    queued = conn.execute("SELECT COUNT(*) FROM PH.TICKET WHERE ticket_status = 'QUEUED'").fetchval()
-    return {"done": done, "waiting": waiting, "kyc_to_send": kyc, "queued": int(queued or 0)}
+@app.post("/api/proposals/{proposal_id}/approve")
+def approve(proposal_id: int, body: Decide, bank: str = Query("BANK_X"), checker=Depends(get_checker)):
+    """The officer approves one of the four decisions; the checker carries it out."""
+    from pipeline import officer
+
+    try:
+        decision_id = officer.approve(checker, bank, proposal_id, body.officer, body.comment, body.amount,
+                                      body.signed_text, now=clock_now())
+    except DecisionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    rerun = None
+    code = checker.execute("SELECT action_code, case_id FROM PROPOSAL WHERE proposal_id = {p}",
+                           {"p": proposal_id}).fetchone()
+    if code and code[0] == "UNMATCHED_NOTICE":
+        rerun = work_one(code[1], bank, "pipeline")   # the officer accepted the near match: work the ticket now
+    return {"decision_id": decision_id, "rerun": rerun}
+
+
+@app.post("/api/proposals/{proposal_id}/reject")
+def reject(proposal_id: int, body: Decide, bank: str = Query("BANK_X"), checker=Depends(get_checker)):
+    from pipeline import officer
+
+    try:
+        return {"decision_id": officer.reject(checker, bank, proposal_id, body.officer, body.comment,
+                                              now=clock_now())}
+    except DecisionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/accounts/{account_id}/record")
+def record(account_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """The hold record: the notice, the path, the LIBR steps, the rule, who decided, every change, statement IDs."""
+    from pipeline.record import hold_record, to_json
+
+    try:
+        return json.loads(to_json(hold_record(conn, bank, account_id)))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/accounts/{account_id}/record.txt", response_class=PlainTextResponse)
+def record_text(account_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """The hold record as plain text, to attach to a grievance file."""
+    from pipeline.record import as_text, hold_record
+
+    try:
+        return as_text(hold_record(conn, bank, account_id))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 # ---------------------------------------------------------------- one case
 
 @app.get("/api/cases/{case_id}")
 def case_detail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    check_bank(bank)
     c = check_case(conn, case_id)
     c.pop("victim_account", None)          # the victim's details stay off the bank's screens
-    c["check"] = one(conn, "SELECT notice_status, problems FROM PH.COMPLAINT_CHECK WHERE case_id = {c}",
-                     {"c": case_id})
-    c["ticket"] = one(conn, "SELECT received_at, ticket_status, picked_up_at, run_id FROM PH.TICKET "
+    c["intake"] = one(conn, "SELECT * FROM INTAKE_CHECK WHERE case_id = {c}", {"c": case_id})
+    c["ticket"] = one(conn, "SELECT received_at, ticket_status, picked_up_at, run_id, origin FROM TICKET "
                             "WHERE case_id = {c}", {"c": case_id})
     run_id = (c["ticket"] or {}).get("run_id")
-    c["run"] = one(conn, "SELECT * FROM PH.AGENT_RUN WHERE run_id = {r}", {"r": run_id}) if run_id else None
-    c["checks"] = rows(conn, "SELECT check_name, check_passed, detail, stmt_id FROM PH.CHECK_RESULT "
+    c["run"] = one(conn, "SELECT * FROM AGENT_RUN WHERE run_id = {r}", {"r": run_id}) if run_id else None
+    c["checks"] = rows(conn, "SELECT check_name, check_passed, detail, stmt_id FROM CHECK_RESULT "
                              "WHERE case_id = {c} AND viewing_bank_id = {b} ORDER BY check_name",
                        {"c": case_id, "b": bank})
-    c["paid_inr"] = number(conn.execute("SELECT SUM(t.amount_inr) FROM PH.TXN t JOIN PH.COMPLAINT c "
-                                        "ON c.utr = t.utr WHERE c.case_id = {c}", {"c": case_id}).fetchval(), 2)
+    c["links"] = rows(conn, "SELECT case_id, linked_case_id, link_kind, account_id, detail, linked_at FROM CASE_LINK "
+                            "WHERE case_id = {c} OR linked_case_id = {c} ORDER BY linked_at", {"c": case_id})
+    matched = (c["intake"] or {}).get("matched_txn_id")
+    paid = one(conn, "SELECT amount_inr, channel FROM TXN WHERE txn_id = {t}", {"t": matched}) if matched else None
+    c["paid_inr"] = (paid or {}).get("amount_inr")
+    c["paid_channel"] = (paid or {}).get("channel")
     c["after_hours"] = after_hours((c["ticket"] or {}).get("received_at"))
-    c["paid_channel"] = conn.execute("SELECT MIN(t.channel) FROM PH.TXN t JOIN PH.COMPLAINT k ON k.utr = t.utr "
-                                      "WHERE k.case_id = {c}", {"c": case_id}).fetchval()
-    c["notices"] = notice_rows(conn, bank, case_id)
+    c["proposals"] = proposal_rows(conn, "p.case_id = {c}", {"c": case_id})
     return c
 
 
 @app.get("/api/cases/{case_id}/trail")
 def trail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """The money trail as nodes and edges, with the victim money each edge carried (LIBR) and what was done."""
-    check_bank(bank)
+    """The money trail at this bank as nodes and edges, with the victim money each edge carried (LIBR)."""
     c = check_case(conn, case_id)
     edges = rows(conn, """
         SELECT e.hop, e.txn_id, e.from_account, e.to_account, e.amount_inr, e.ts, e.is_exit, e.is_cycle,
                e.stmt_id, t.utr, t.channel, t.exit_identifier, COALESCE(f.victim_inr, 0) AS victim_inr
-        FROM PH.TRACE_EDGE e
-        JOIN PH.TXN t ON t.txn_id = e.txn_id
-        LEFT JOIN PH.ATTRIBUTION_FLOW f ON f.case_id = e.case_id AND f.txn_id = e.txn_id
-                                       AND f.trace_rule = 'LIBR' AND f.victim_tag = {v}
+        FROM TRACE_EDGE e
+        JOIN TXN t ON t.txn_id = e.txn_id
+        LEFT JOIN ATTRIBUTION_FLOW f ON f.case_id = e.case_id AND f.txn_id = e.txn_id
+                                    AND f.trace_rule = 'LIBR' AND f.victim_tag = {v}
         WHERE e.case_id = {c} ORDER BY e.hop, e.ts, e.txn_id""", {"c": case_id, "v": c["victim_tag"]})
     if not edges:
-        raise HTTPException(409, f"The agent has not worked {case_id} yet: POST /api/tickets/{case_id}/work")
+        raise HTTPException(409, f"Nothing traced for {case_id}: the agent has not worked it, or it matched no "
+                                 f"transaction")
     facts = {f["account_id"]: f for f in rows(conn, """
         SELECT ca.account_id, ca.bank_id, ca.hop, ca.is_exit, ca.is_own_bank, ca.victim_amount_inr,
                ca.balance_now_inr, ca.band, acc.holder_name, acc.holder_type
-        FROM PH.CASE_ACCOUNT ca LEFT JOIN PH.ACCOUNT acc ON acc.account_id = ca.account_id
+        FROM CASE_ACCOUNT ca LEFT JOIN ACCOUNT acc ON acc.account_id = ca.account_id
         WHERE ca.case_id = {c} AND ca.viewing_bank_id = {b}""", {"c": case_id, "b": bank})}
     acts: dict[str, list[dict]] = {}
     for a in rows(conn, ACTION_SQL, {"c": case_id, "b": bank}):
         acts.setdefault(a["account_id"], []).append(a)
+    waiting = {(p["account_id"], p["action_code"]) for p in rows(
+        conn, "SELECT account_id, action_code FROM PROPOSAL WHERE case_id = {c} AND proposal_status = 'WAITING'",
+        {"c": case_id})}
     receivers = {e["to_account"] for e in edges}
     nodes = []
     for acc in sorted({e["from_account"] for e in edges} | receivers):
@@ -488,7 +500,8 @@ def trail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
         mine = acts.get(acc, [])
         auto = next((a for a in mine if a["act_mode"] == "AUTOMATIC"), None)
         if acc not in receivers:
-            nodes.append({"id": acc, "kind": "victim", "label": "Victim", "hop": 0})
+            payer = "Victim" if c["ticket_kind"] != "ONWARD" else f"Paid from {bank_name(c.get('from_bank_id'))}"
+            nodes.append({"id": acc, "kind": "victim", "label": payer, "hop": 0})
             continue
         kind = "exit" if f.get("is_exit") else ("own" if f.get("is_own_bank") else "other")
         exit_label = next((e["exit_identifier"] for e in edges if e["to_account"] == acc), None)
@@ -499,15 +512,13 @@ def trail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
             "holder_type": f.get("holder_type"), "victim_amount_inr": f.get("victim_amount_inr"),
             "balance_now_inr": f.get("balance_now_inr"), "evidence": f.get("band"),
             "done": headline(auto) if auto else None,
-            "waiting": [headline(a) for a in mine if a["act_mode"] == "OFFICER"
-                        and a["action_status"] in ("PROPOSED", "WAITING")],
+            "waiting": [headline(a) for a in mine if a["act_mode"] == "OFFICER" and (acc, a["action_code"]) in waiting],
         })
     return {"case_id": case_id, "bank": bank, "nodes": nodes, "edges": edges}
 
 
 @app.get("/api/cases/{case_id}/actions")
 def case_actions(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    check_bank(bank)
     check_case(conn, case_id)
     names = holder_names(conn)
     return [present(a, names) for a in rows(conn, ACTION_SQL + " ORDER BY hop, account_id, act_mode, action_code",
@@ -517,80 +528,85 @@ def case_actions(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_con
 @app.get("/api/cases/{case_id}/accounts/{account_id}")
 def account_panel(case_id: str, account_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     """The account panel: the action first, then the split of the money, then the evidence behind the reasons."""
-    check_bank(bank)
+    from pipeline.reasons import cross_ticket, declined_lines
+
     check_case(conn, case_id)
     split = one(conn, """
         SELECT victim_amount_inr, other_victims_inr, own_funds_inr, balance_now_inr, as_of, stmt_id
-        FROM PH.ATTRIBUTION WHERE case_id = {c} AND account_id = {a} AND trace_rule = 'LIBR'""",
+        FROM ATTRIBUTION WHERE case_id = {c} AND account_id = {a} AND trace_rule = 'LIBR'""",
                 {"c": case_id, "a": account_id})
     if split is None:
         raise HTTPException(404, f"{account_id} is not on the trail of {case_id} (or the agent has not worked it)")
     account = one(conn, "SELECT account_id, bank_id, holder_name, opened_on, account_type, holder_type, "
-                        "profile_band FROM PH.ACCOUNT WHERE account_id = {a}", {"a": account_id})
+                        "profile_band FROM ACCOUNT WHERE account_id = {a}", {"a": account_id})
     if account:
         account["bank_name"] = bank_name(account["bank_id"])
-    facts = one(conn, "SELECT * FROM PH.CASE_ACCOUNT WHERE case_id = {c} AND viewing_bank_id = {b} "
+    facts = one(conn, "SELECT * FROM CASE_ACCOUNT WHERE case_id = {c} AND viewing_bank_id = {b} "
                       "AND account_id = {a}", {"c": case_id, "b": bank, "a": account_id})
-    score = one(conn, "SELECT score, band, stmt_id FROM PH.ACCOUNT_SCORE WHERE case_id = {c} AND account_id = {a}",
+    score = one(conn, "SELECT score, band, stmt_id FROM ACCOUNT_SCORE WHERE case_id = {c} AND account_id = {a}",
                 {"c": case_id, "a": account_id})
     signals = rows(conn, """
         SELECT signal_name, signal_value, weight, mule_likeness, contribution, sentence, mule_rank, honest_rank
-        FROM PH.ACCOUNT_SIGNALS WHERE case_id = {c} AND account_id = {a} ORDER BY mule_rank""",
+        FROM ACCOUNT_SIGNALS WHERE case_id = {c} AND account_id = {a} ORDER BY mule_rank""",
                    {"c": case_id, "a": account_id})
     top_key = "mule_rank" if score and score["band"] in ("MULE", "REVIEW") else "honest_rank"
     reasons = [s["sentence"] for s in sorted(signals, key=lambda s: s[top_key])][: SCORING["top_reasons"]]
     names = holder_names(conn)
     acts = [present(a, names) for a in rows(conn, ACTION_SQL + " AND account_id = {a} ORDER BY act_mode DESC",
                                            {"c": case_id, "b": bank, "a": account_id})]
-    holds = rows(conn, "SELECT hold_id, hold_kind, amount_inr, placed_at, placed_by, hold_status, replaced_by, "
-                       "action_code, reason_text, stmt_id FROM PH.HOLD_LEDGER WHERE case_id = {c} "
-                       "AND viewing_bank_id = {b} AND account_id = {a} ORDER BY hold_id",
-                 {"c": case_id, "b": bank, "a": account_id})
+    holds = rows(conn, "SELECT hold_id, case_id, hold_kind, amount_inr, hold_tag, placed_at, placed_by, hold_status, "
+                       "replaced_by, action_code, reason_text, stmt_id FROM HOLD_LEDGER WHERE account_id = {a} "
+                       "ORDER BY hold_id", {"a": account_id})
     decisions = rows(conn, "SELECT decision_id, action_code, decision_outcome, amount_inr, proposed_amount, "
-                           "decided_by, decided_at, reason_text, statement_ids FROM PH.DECISION WHERE case_id = {c} "
-                           "AND account_id = {a} AND viewing_bank_id = {b} ORDER BY decision_id",
-                     {"c": case_id, "a": account_id, "b": bank})
+                           "decided_by, decided_at, reason_text, draft_text, signed_text, statement_ids FROM DECISION "
+                           "WHERE account_id = {a} ORDER BY decision_id", {"a": account_id})
     flows = rows(conn, """
         SELECT e.from_account, e.to_account, e.amount_inr, e.ts, e.is_exit, t.exit_identifier,
                COALESCE(f.victim_inr, 0) AS victim_inr
-        FROM PH.TRACE_EDGE e JOIN PH.TXN t ON t.txn_id = e.txn_id
-        JOIN PH.COMPLAINT c ON c.case_id = e.case_id
-        LEFT JOIN PH.ATTRIBUTION_FLOW f ON f.case_id = e.case_id AND f.txn_id = e.txn_id AND f.trace_rule = 'LIBR'
-                                       AND f.victim_tag = c.victim_tag
+        FROM TRACE_EDGE e JOIN TXN t ON t.txn_id = e.txn_id
+        JOIN COMPLAINT c ON c.case_id = e.case_id
+        LEFT JOIN ATTRIBUTION_FLOW f ON f.case_id = e.case_id AND f.txn_id = e.txn_id AND f.trace_rule = 'LIBR'
+                                    AND f.victim_tag = c.victim_tag
         WHERE e.case_id = {c} AND (e.to_account = {a} OR e.from_account = {a}) ORDER BY e.ts""",
                  {"c": case_id, "a": account_id})
-    victims = {v for (v,) in conn.execute("SELECT victim_account FROM PH.COMPLAINT").fetchall()}
+    victims = {v for (v,) in conn.execute("SELECT victim_account FROM COMPLAINT WHERE victim_account IS NOT NULL"
+                                          ).fetchall()}
     for f in flows:
         # the victim's details stay off the bank's screens (SOP 9.1(ii))
         f["from_name"] = "the victim" if f["from_account"] in victims else names.get(f["from_account"],
                                                                                     f["from_account"])
         f["to_name"] = f["exit_identifier"] if f["is_exit"] else names.get(f["to_account"], f["to_account"])
+    splits = rows(conn, "SELECT version_no, victim_tag, case_id, victim_inr, all_victims_inr, held_inr, "
+                        "share_of_held_inr, valid_from, superseded_at, trigger_kind, reason_text, stmt_id FROM "
+                        "VICTIM_SPLIT WHERE account_id = {a} ORDER BY version_no, victim_tag", {"a": account_id})
     return {"case_id": case_id, "account_id": account_id, "bank": bank, "account": account, "split": split,
             "facts": facts, "evidence": score, "reasons": reasons, "signals": signals, "actions": acts,
-            "holds": holds, "decisions": decisions,
+            "holds": holds, "decisions": decisions, "splits": splits,
+            "cross_ticket": cross_ticket(conn, account_id, case_id), "declined": declined_lines(conn, account_id),
             "inflows": [f for f in flows if f["to_account"] == account_id],
             "outflows": [f for f in flows if f["from_account"] == account_id],
+            "proposals": proposal_rows(conn, "p.case_id = {c} AND p.account_id = {a}",
+                                       {"c": case_id, "a": account_id}),
             "watch": watch_rows(conn, bank, account_id)}
 
 
 @app.get("/api/cases/{case_id}/log")
 def agent_log(case_id: str, conn=Depends(get_conn)):
-    """Every run of the agent on this ticket, newest first, with each tool call and its Exasol statements."""
+    """Every run on this ticket, newest first, with each tool call, the checker's step and the Exasol statements."""
     check_case(conn, case_id)
-    runs = rows(conn, "SELECT * FROM PH.AGENT_RUN WHERE case_id = {c} ORDER BY run_id DESC", {"c": case_id})
+    runs = rows(conn, "SELECT * FROM AGENT_RUN WHERE case_id = {c} ORDER BY run_id DESC", {"c": case_id})
     for r in runs:
         r["steps"] = rows(conn, "SELECT step_no, tool_name, chosen_by, can_change, result_text, stmt_ids, wall_ms "
-                                "FROM PH.AGENT_STEP WHERE run_id = {r} ORDER BY step_no", {"r": r["run_id"]})
+                                "FROM AGENT_STEP WHERE run_id = {r} ORDER BY step_no", {"r": r["run_id"]})
     return runs
 
 
 @app.get("/api/cases/{case_id}/paperwork")
-def paperwork(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """Onward entries, exits and KYC packets: what the officer used to type by hand."""
-    check_bank(bank)
+def paperwork(case_id: str, conn=Depends(get_conn)):
+    """Onward entries, exits, KYC packets and send-backs: filed at once, what the officer used to type by hand."""
     check_case(conn, case_id)
-    out = rows(conn, "SELECT * FROM PH.PORTAL_ENTRY WHERE case_id = {c} AND viewing_bank_id = {b} "
-                     "ORDER BY entry_kind DESC, entry_id", {"c": case_id, "b": bank})
+    out = rows(conn, "SELECT * FROM PORTAL_ENTRY WHERE case_id = {c} ORDER BY entry_kind DESC, entry_id",
+               {"c": case_id})
     for e in out:
         e["bank_name"] = bank_name(e.get("bank_id"))
     return out
@@ -601,7 +617,6 @@ def compare_case(case_id: str, bank: str = Query("BANK_X"), refresh: bool = Fals
     """Today's desk vs the agent on the same ticket and the same transactions (computed in Exasol)."""
     from pipeline.today import compare, run_today
 
-    check_bank(bank)
     check_case(conn, case_id)
     try:
         if refresh:
@@ -611,62 +626,11 @@ def compare_case(case_id: str, bank: str = Query("BANK_X"), refresh: bool = Fals
         raise HTTPException(409, str(exc)) from exc
 
 
-# ---------------------------------------------------------------- officer decisions
-
-class Approve(BaseModel):
-    action_code: str = Field(..., description="PROPOSE_NARROW, PROPOSE_FULL_FREEZE or CONFIRM_HOLD")
-    officer: str = Field(..., description="Officer deciding; required")
-    comment: str | None = Field(None, description="Required for a full freeze and for an edited amount")
-    amount: float | None = Field(None, description="Edited narrowing amount")
-
-
-class Reject(BaseModel):
-    action_code: str
-    officer: str
-    reason: str = Field(..., description="Required")
-
-
-class Send(BaseModel):
-    officer: str
-
-
-@app.post("/api/cases/{case_id}/accounts/{account_id}/approve")
-def approve(case_id: str, account_id: str, body: Approve, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    check_bank(bank)
-    try:
-        decision_id = officer.approve(conn, case_id, bank, account_id, body.action_code, body.officer, body.comment,
-                                      body.amount)
-    except officer.DecisionError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {"decision_id": decision_id}
-
-
-@app.post("/api/cases/{case_id}/accounts/{account_id}/reject")
-def reject(case_id: str, account_id: str, body: Reject, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    check_bank(bank)
-    try:
-        decision_id = officer.reject(conn, case_id, bank, account_id, body.action_code, body.officer, body.reason)
-    except officer.DecisionError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {"decision_id": decision_id}
-
-
-@app.post("/api/cases/{case_id}/paperwork/{entry_id}/send")
-def send_kyc(case_id: str, entry_id: int, body: Send, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    check_bank(bank)
-    try:
-        decision_id = officer.send_kyc(conn, case_id, bank, entry_id, body.officer)
-    except officer.DecisionError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {"decision_id": decision_id}
-
-
 @app.get("/api/day")
 def day(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     """Today's desk vs the agent, summed over every ticket the agent has worked (the Review band)."""
     from pipeline.today import day_summary
 
-    check_bank(bank)
     try:
         return day_summary(conn, bank)
     except steps.StepFailed as exc:
@@ -674,34 +638,18 @@ def day(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
 
 
 @app.get("/api/holds")
-def holds(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    check_bank(bank)
-    out = rows(conn, "SELECT h.*, a.holder_name FROM PH.HOLD_LEDGER h LEFT JOIN PH.ACCOUNT a "
-                     "ON a.account_id = h.account_id WHERE h.viewing_bank_id = {b} ORDER BY h.hold_id DESC",
-               {"b": bank})
-    return out
+def holds(conn=Depends(get_conn)):
+    return rows(conn, "SELECT h.*, a.holder_name FROM HOLD_LEDGER h LEFT JOIN ACCOUNT a "
+                      "ON a.account_id = h.account_id ORDER BY h.hold_id DESC")
 
 
 @app.get("/api/decisions")
-def decisions(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    check_bank(bank)
-    return rows(conn, "SELECT * FROM PH.DECISION WHERE viewing_bank_id = {b} ORDER BY decision_id DESC", {"b": bank})
+def decisions(conn=Depends(get_conn)):
+    return rows(conn, "SELECT * FROM DECISION ORDER BY decision_id DESC")
 
 
 @app.get("/api/audit")
 def audit(case_id: str | None = None, limit: int = Query(200, le=1000), conn=Depends(get_conn)):
-    """Every pipeline step and officer action with its Exasol session and statement ID (NFR-06)."""
+    """Every step and every action, with its Exasol session and statement ID. Append-only."""
     where = "WHERE case_id = {c}" if case_id else ""
-    return rows(conn, f"SELECT * FROM PH.AUDIT_LOG {where} ORDER BY event_id DESC LIMIT {int(limit)}",
-                {"c": case_id})
-
-
-@app.post("/api/demo/reset")
-def demo_reset(conn=Depends(get_conn)):
-    """Reload the cases and empty every work table: the night starts again (same as `make seed`)."""
-    from pipeline.cases import load_case
-    from pipeline.load_cases import CASE_FILES, load, rows_for
-
-    started = time.perf_counter()
-    load(conn, rows_for({source: load_case(path) for source, path in CASE_FILES.items()}))
-    return {"reset": True, "seconds": round(time.perf_counter() - started, 3)}
+    return rows(conn, f"SELECT * FROM AUDIT_LOG {where} ORDER BY event_id DESC LIMIT {int(limit)}", {"c": case_id})

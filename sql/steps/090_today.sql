@@ -4,15 +4,16 @@
 -- holding too much). pipeline/today.py runs this once per own-bank account, cut at the moment the desk reaches it.
 -- Parameters: case_id, own_bank_id, probe_id, hop, action_at, replay_from, victim_tag, trail_amount, freeze_whole (1/0)
 --
--- Same Python UDF as step 2 (PH.ATTRIBUTE_CASE, LIBR only), over the accounts the trail reached, replayed up to
--- action_at: so later cash-outs (C at 04:30, A at 05:10 in the demo) are in, and the money is gone.
+-- Same Python UDF as step 2 (ATTRIBUTE_CASE, LIBR only), over the accounts the trail reached, replayed up to
+-- action_at over TXN (what happens if nobody acts): so later cash-outs (C at 04:30, A's transfer at 05:10 in the
+-- demo) are in, and the money is gone.
 
-DELETE FROM PH.TODAY_RAW WHERE case_id = {case_id} AND probe_id = {probe_id};
+DELETE FROM TODAY_RAW WHERE case_id = {case_id} AND probe_id = {probe_id};
 
-INSERT INTO PH.TODAY_RAW (case_id, probe_id, row_kind, ref_id, component, paise, stmt_id)
+INSERT INTO TODAY_RAW (case_id, probe_id, row_kind, ref_id, component, paise, stmt_id)
 SELECT {case_id}, {probe_id}, u.row_kind, u.ref_id, u.component, u.paise, CURRENT_STATEMENT
 FROM (
-    SELECT PH.ATTRIBUTE_CASE(i.trace_rule, i.row_kind, i.ts, i.txn_id, i.from_account, i.to_account,
+    SELECT ATTRIBUTE_CASE(i.trace_rule, i.row_kind, i.ts, i.txn_id, i.from_account, i.to_account,
                              i.amount_paise, i.victim_tag)
     FROM (
         SELECT 'LIBR' AS trace_rule, x.row_kind, x.ts, x.txn_id, x.from_account, x.to_account, x.amount_paise,
@@ -28,9 +29,9 @@ FROM (
             FROM (
                 SELECT account_id, balance_inr,
                        ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY ts DESC) AS rn
-                FROM PH.BALANCE_SNAPSHOT
+                FROM BALANCE_SNAPSHOT
                 WHERE ts <= TO_TIMESTAMP({replay_from}, 'YYYY-MM-DD HH24:MI:SS')
-                  AND account_id IN (SELECT to_account FROM PH.TRACE_EDGE WHERE case_id = {case_id})
+                  AND account_id IN (SELECT to_account FROM TRACE_EDGE WHERE case_id = {case_id})
             ) s
             WHERE s.rn = 1
             UNION ALL
@@ -41,29 +42,30 @@ FROM (
                    CAST(t.amount_inr * 100 AS DECIMAL(18,0)), c.victim_tag
             FROM (
                 SELECT x.ts, x.txn_id, x.from_account, x.to_account, x.amount_inr, x.utr
-                FROM PH.TXN x
-                JOIN (SELECT DISTINCT to_account AS acc FROM PH.TRACE_EDGE WHERE case_id = {case_id}) e
+                FROM TXN x
+                JOIN (SELECT DISTINCT to_account AS acc FROM TRACE_EDGE WHERE case_id = {case_id}) e
                   ON e.acc = x.from_account
                 WHERE x.ts > TO_TIMESTAMP({replay_from}, 'YYYY-MM-DD HH24:MI:SS')
                   AND x.ts <= TO_TIMESTAMP({action_at}, 'YYYY-MM-DD HH24:MI:SS')
                 UNION
                 SELECT x.ts, x.txn_id, x.from_account, x.to_account, x.amount_inr, x.utr
-                FROM PH.TXN x
-                JOIN (SELECT DISTINCT to_account AS acc FROM PH.TRACE_EDGE WHERE case_id = {case_id}) e
+                FROM TXN x
+                JOIN (SELECT DISTINCT to_account AS acc FROM TRACE_EDGE WHERE case_id = {case_id}) e
                   ON e.acc = x.to_account
                 WHERE x.ts > TO_TIMESTAMP({replay_from}, 'YYYY-MM-DD HH24:MI:SS')
                   AND x.ts <= TO_TIMESTAMP({action_at}, 'YYYY-MM-DD HH24:MI:SS')
             ) t
-            LEFT JOIN PH.COMPLAINT c ON c.utr = t.utr
+            LEFT JOIN ROOT_PAYMENT c ON c.utr = t.utr
+                                    AND c.reported_at <= TO_TIMESTAMP({action_at}, 'YYYY-MM-DD HH24:MI:SS')
         ) x
     ) i
     GROUP BY i.trace_rule
 ) u;
 
-DELETE FROM PH.TODAY_OUTCOME
+DELETE FROM TODAY_OUTCOME
 WHERE case_id = {case_id} AND viewing_bank_id = {own_bank_id} AND account_id = {probe_id};
 
-INSERT INTO PH.TODAY_OUTCOME (case_id, viewing_bank_id, account_id, hop, action_at, balance_then_inr,
+INSERT INTO TODAY_OUTCOME (case_id, viewing_bank_id, account_id, hop, action_at, balance_then_inr,
                               victim_then_inr, today_action, locked_inr, honest_locked_inr, stmt_id)
 SELECT {case_id},
        {own_bank_id},
@@ -88,7 +90,7 @@ FROM (
                 AS DECIMAL(18,2)) AS victim,
            CAST(COALESCE(SUM(CASE WHEN r.component <> 'clean' THEN r.paise ELSE 0 END), 0) / 100
                 AS DECIMAL(18,2)) AS tainted
-    FROM PH.TODAY_RAW r
+    FROM TODAY_RAW r
     WHERE r.case_id = {case_id} AND r.probe_id = {probe_id}
       AND r.row_kind = 'HOLD' AND r.ref_id = {probe_id}
 ) x;

@@ -1,73 +1,107 @@
-"""Freeze reasons drafted for the officer (pipeline/reasons.py, DECISIONS D-39). No database."""
-from decimal import Decimal as D
+"""Written reasons (Module 4), no database: the rules decide the reasons, the model only words them, every claim is
+checked against what it cites, the case against is always there, citations come from the fixed list, and the holder
+is told only the authority, the notice and the amount."""
+import json
 
-from pipeline import reasons as r
+import pytest
 
-FACTS = {
-    "account_id": "ACC_A", "name": "A", "account_type": "savings", "bank_name": "Bank X", "age_days": 20,
-    "tickets": [{"case_id": "CASE_DEMO", "received_at": "2026-10-18 02:13:00", "reported_inr": D("200000"),
-                 "victim_inr": D("50000"), "balance": D("50000")}],
-    "signals": {"median_dwell_minutes": 14.0, "pass_through_ratio": 0.882, "cash_or_crypto_exits": 3.0,
-                "complaint_linked_credits_7d": 1.0},
-    "since_hold": ["05:10: A tried to move Rs 50,000 to a crypto wallet; refused, Rs 50,000 is held."],
-    "balance_inr": D("50000"), "held_inr": D("50000"),
+from pipeline.reasons import RULES, claims_check, holder_message, mandatory_text, numbers, template, word
+
+NARROW = {
+    "action_code": "PROPOSE_NARROW", "account_id": "ACC_D", "name": "Murugan (Sri Murugan Fuels)",
+    "case_id": "CASE_DEMO", "rule": RULES["officer"]["PROPOSE_NARROW"], "citation": RULES["legal_basis"]["narrow"],
+    "numbers": {"proposed": "500.00", "held": "1000.00", "victim": "500.00", "balance": "820000.00"},
+    "support": [{"id": "S1", "text": "The account is 3.0 years old."},
+                {"id": "S2",
+                 "text": "It is paid by many different small payers (12% from its top three), like a shop."}],
+    "against": [{"id": "C1", "text": "It received Rs 1,000 directly from account C, which is held."}],
 }
 
 
-def test_the_template_states_every_fact_once_in_plain_words():
-    text = r.template(FACTS)
-    assert text.startswith("A holds a savings account at Bank X, opened 20 days before the first ticket.")
-    assert "It is named in 1 fraud ticket: the 02:13 ticket, Rs 2,00,000 reported, Rs 50,000 of it traced" in text
-    assert ("Over the last 90 days money it receives usually stays 14 minutes; 88% of what it received was sent on "
-            "within an hour; 3 withdrawals went to cash or crypto; it was paid by 1 reported fraud in the last 7 "
-            "days.") in text
-    assert "05:10: A tried to move Rs 50,000 to a crypto wallet; refused" in text
-    assert text.endswith("cannot be moved on before the police act.")
-
-
-def test_numbers_are_normalised():
-    assert r.numbers("Rs 1,19,500 at 05:10, 88% of 50,000.00") == {"119500", "5", "10", "88", "50000"}
-
-
 class Model:
-    def __init__(self, text=None, fail=False):
-        self.text, self.fail = text, fail
+    model = "fake"
+
+    def __init__(self, sentences=None, raw=None, fail=False):
+        self.sentences, self.raw, self.fail = sentences, raw, fail
 
     def write(self, system, facts):
         if self.fail:
             raise RuntimeError("down")
-        return self.text
+        return self.raw if self.raw is not None else json.dumps({"sentences": self.sentences})
 
 
-def test_a_grounded_model_paragraph_is_used():
-    para = ("Account A at Bank X was opened 20 days before the first ticket and received Rs 50,000 of a reported "
-            "Rs 2,00,000 fraud. 88% of what it receives leaves within an hour, and 3 withdrawals went to cash or "
-            "crypto. At 05:10 it tried to send Rs 50,000 to a crypto wallet. A freeze stops money arriving later "
-            "from being moved on.")
-    d = r.draft(FACTS, Model(para))
-    assert d["written_by"] == "model" and d["text"] == para
+def test_the_template_has_the_proposal_the_reasons_the_case_against_and_the_fixed_citation():
+    text = template(NARROW)
+    assert text.splitlines()[0].startswith("Narrow the hold on Murugan (Sri Murugan Fuels) from Rs 1,000 to Rs 500")
+    assert "Why: The account is 3.0 years old." in text
+    assert "Case against: It received Rs 1,000 directly from account C, which is held." in text
+    assert text.endswith("Legal basis: " + RULES["legal_basis"]["narrow"])
 
 
-def test_a_model_paragraph_with_an_invented_number_is_thrown_away():
-    d = r.draft(FACTS, Model("A sent 95% of its money on within an hour."))
-    assert d["written_by"] == "template" and d["text"] == r.template(FACTS)
+def test_a_model_draft_that_cites_its_reasons_is_kept_and_the_citation_is_still_fixed():
+    good = [{"text": "The account is 3.0 years old and is paid by many small payers, like a shop.",
+             "cites": ["S1", "S2"]},
+            {"text": "It did receive Rs 1,000 straight from account C, which is held.", "cites": ["C1"]}]
+    out = word(NARROW, Model(good))
+    assert out["by"] == "model" and out["note"] is None
+    assert out["text"].endswith("Legal basis: " + RULES["legal_basis"]["narrow"])
 
 
-def test_no_model_or_a_failed_model_gives_the_template():
-    assert r.draft(FACTS)["written_by"] == "template"
-    assert r.draft(FACTS, Model(fail=True))["written_by"] == "template"
+@pytest.mark.parametrize("sentences,why", [
+    ([{"text": "It is 3.0 years old.", "cites": ["S1"]}], "the case against is missing"),
+    ([{"text": "It is 3.0 years old.", "cites": []}, {"text": "From C.", "cites": ["C1"]}], "points to no given"),
+    ([{"text": "It is 3.0 years old.", "cites": ["S9"]}, {"text": "From C.", "cites": ["C1"]}], "not given"),
+    ([{"text": "It is 4 years old.", "cites": ["S1"]}, {"text": "From C.", "cites": ["C1"]}], "a number not in"),
+    ([{"text": "It is clearly a shop.", "cites": ["S2"]}, {"text": "From C.", "cites": ["C1"]}], "overstates"),
+    ([{"text": "The holder is not a mule.", "cites": ["S1"]}, {"text": "From C.", "cites": ["C1"]}], "verdict"),
+])
+def test_the_claims_check_rejects(sentences, why):
+    note = claims_check(sentences, NARROW)
+    assert note and why in note
+    out = word(NARROW, Model(sentences))
+    assert out["by"] == "template" and why in out["note"]
 
 
-def test_an_account_with_no_watch_events_and_unknown_age():
-    f = {**FACTS, "age_days": None, "since_hold": [], "signals": {}}
-    text = r.template(f)
-    assert text.startswith("A holds a savings account at Bank X.") and "Over the last 90 days" not in text
+def test_a_number_from_another_reason_does_not_count():
+    # 12 is in S2, not in S1: a sentence citing only S1 may not use it
+    note = claims_check([{"text": "It is 3.0 years old and 12% comes from three payers.", "cites": ["S1"]},
+                         {"text": "From C.", "cites": ["C1"]}], NARROW)
+    assert note and "12" in note
+    assert numbers("12% and 1,000") == {"12", "1000"}
+    # but the proposal's own numbers (held 1,000, proposed 500) may be repeated anywhere
+    assert claims_check([{"text": "Hold Rs 500 instead of Rs 1,000.", "cites": ["S1"]},
+                         {"text": "From C.", "cites": ["C1"]}], NARROW) is None
 
 
-def test_the_model_may_not_call_the_holder_fraudulent():
-    from pipeline.reasons import grounded
+@pytest.mark.parametrize("model", [None, Model(fail=True), Model(raw="not json at all")])
+def test_no_model_or_a_failed_model_gives_the_template(model):
+    out = word(NARROW, model)
+    assert out["by"] == "template" and out["text"] == template(NARROW)
 
-    facts = "2 accounts at Bank X act as one network: A, C. A sent Rs 80,000 to C."
-    assert grounded("Accounts A and C at Bank X act together; A sent Rs 80,000 to C.", facts)
-    assert not grounded("Accounts A and C are involved in fraudulent activity; A sent Rs 80,000 to C.", facts)
-    assert not grounded("The criminals moved Rs 80,000.", facts)
+
+def test_mandatory_holds_are_never_model_worded():
+    r = dict(NARROW, action_code="MANDATORY_HOLD")
+    assert word(r, Model([{"text": "x", "cites": ["S1"]}]))["by"] == "template"
+    c = {"case_id": "CASE_DEMO", "ordering_reference": "VLR/CCPS/2026/1018-01",
+         "ordering_authority": "Cyber Crime Police Station, Vellore (simulated)",
+         "notice_legal_basis": "S.168 r/w S.94 BNSS"}
+    text = mandatory_text(c, "IMPS2026101801520001", "50000.00")
+    assert text.startswith("Notice VLR/CCPS/2026/1018-01 from Cyber Crime Police Station, Vellore (simulated), "
+                           "transaction IMPS2026101801520001: held (amount only): Rs 50,000 under S.168 r/w S.94 BNSS")
+
+
+def test_the_holder_is_told_the_authority_the_notice_and_the_amount_only():
+    c = {"case_id": "CASE_DEMO", "ordering_reference": "VLR/CCPS/2026/1018-01",
+         "ordering_authority": "Cyber Crime Police Station, Vellore (simulated)",
+         "notice_legal_basis": "S.168 r/w S.94 BNSS"}
+    text = holder_message(c, "ACC_D", "500.00")
+    assert "Rs 500" in text and "VLR/CCPS/2026/1018-01" in text and "Vellore" in text and "XXXXCC_D" in text
+    for evidence in ("mule", "pass", "complaint", "victim", "score", "ticket", "fraud"):
+        assert evidence not in text.lower()
+    assert "frozen" in holder_message(c, "ACC_C", "29500.00", "ACCOUNT_FREEZE")
+
+
+def test_every_action_cites_from_the_fixed_list():
+    from pipeline.reasons import CITATION
+
+    assert set(CITATION.values()) <= set(RULES["legal_basis"])

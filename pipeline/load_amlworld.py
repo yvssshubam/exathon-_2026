@@ -10,8 +10,9 @@ Steps, all in Exasol except the patterns file, which is small and needs parsing:
   5. sql/amlworld/030_map.sql     build PH_AML.BANK, ACCOUNT and TXN in the shape of the PH tables
   6. verify                       row counts against the files; stop loudly if the file has changed shape
 
-PH_AML survives `make db` and `make demo-reset`. `make seed` (pipeline/load_cases.py) copies it into PH, next to
-the cases, so the agent works its tickets against a table of about 5 million transactions.
+PH_AML survives `make db` and `make seed`. `make seed` (pipeline/load_cases.py) makes each AMLworld bank a branch of
+Bank X, Y or Z and copies into each bank's schema only the rows touching its own branches, next to the cases, so each
+bank's agent works its tickets against a full-size transaction table.
 
   python -m pipeline.load_amlworld             # load, then `python -m pipeline.load_cases --verify`
   python -m pipeline.load_amlworld --check     # only check the files are there and look right (no database)
@@ -229,11 +230,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         n = conn.execute("SELECT COUNT(*) FROM PH_AML.TXN").fetchval()
         audit(conn, "load_amlworld", detail=f"{n} transactions")
-    except Exception as exc:  # PH.AUDIT_LOG missing: `make db` has not run yet
+    except Exception as exc:  # no bank schema yet: `make db` has not run
         print(f"(audit skipped: {exc})", file=sys.stderr)
     conn.close()
     print(f"{'done' if good else 'FINISHED WITH PROBLEMS'} in {time.perf_counter() - started:.0f}s. "
-          "Next: python -m pipeline.load_cases --verify  (copies AMLworld into PH next to the cases)")
+          "Next: python -m pipeline.load_cases --verify  (gives each bank its share of AMLworld)")
     return 0 if good else 1
 
 

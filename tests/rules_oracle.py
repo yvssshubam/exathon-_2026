@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from pipeline.cases import Case, TxnRow
+from pipeline.cases import Case, TxnRow, bank_view
 from tests.helpers import run
 from tests.score_oracle import score, signals
 
@@ -27,8 +27,9 @@ def _t(ts: str) -> datetime:
 
 
 def trace(case: Case, complaint: dict, as_of: str, max_hops: int | None = None,
-          window_hours: int | None = None) -> dict[str, tuple[TxnRow, int]]:
-    """txn_id -> (transaction, shortest hop), following the money forward like 040_trace.sql."""
+          window_hours: int | None = None, own_bank: str | None = None) -> dict[str, tuple[TxnRow, int]]:
+    """txn_id -> (transaction, shortest hop), following the money forward like 040_trace.sql: only out of the
+    viewing bank's own accounts (another bank's account ends the path) when own_bank is given."""
     max_hops = max_hops or DEFAULTS["max_hops"]
     window = timedelta(hours=window_hours or DEFAULTS["window_hours"])
     cut = _t(as_of)
@@ -37,9 +38,10 @@ def trace(case: Case, complaint: dict, as_of: str, max_hops: int | None = None,
         return {}
     found: dict[str, tuple[TxnRow, int]] = {root.txn_id: (root, 1)}
     queue = deque([(root, 1)])
+    own = {a["account_id"] for a in case.accounts if a["bank_id"] == own_bank} if own_bank else None
     while queue:
         parent, hop = queue.popleft()
-        if hop >= max_hops:
+        if hop >= max_hops or (own is not None and parent.to_account not in own):
             continue
         for child in case.txns:
             if (child.from_account == parent.to_account and child.txn_id != parent.txn_id
@@ -52,18 +54,20 @@ def trace(case: Case, complaint: dict, as_of: str, max_hops: int | None = None,
 
 def facts(case: Case, rows: dict, own_bank: str, complaint: dict | None = None, as_of: str | None = None,
           evidence: bool = True) -> dict:
-    """One dict per account or exit on the trail: what PH.CASE_ACCOUNT holds. evidence=False skips the (slow)
+    """One dict per account or exit on the trail: what CASE_ACCOUNT holds. evidence=False skips the (slow)
     signals, which only the officer proposals read."""
     complaint = complaint or case.complaints[0]
     as_of = as_of or case.tool_as_of
     victim = complaint["victim_tag"]
-    edges = trace(case, complaint, as_of)
+    case = bank_view(case, own_bank)            # what this bank sees: its own accounts' transactions
+    edges = trace(case, complaint, as_of, own_bank=own_bank)
     banks = {a["account_id"]: a for a in case.accounts}
     r = run(case, "LIBR", as_of)
     carried = {}
     for txn_id, component, paise in r.moves:
         if component == victim:
             carried[txn_id] = carried.get(txn_id, 0) + paise
+    everywhere = sum(r.tainted(acc, victim) for acc in {*r.holdings, *r.exits})
     out: dict[str, dict] = {}
     for txn, hop in edges.values():
         acc = txn.to_account
@@ -84,9 +88,11 @@ def facts(case: Case, rows: dict, own_bank: str, complaint: dict | None = None, 
         f["victim"] = r.tainted(acc, victim)
         f["others"] = r.tainted(acc) - f["victim"]
         f["balance"] = sum(r.holdings.get(acc, {}).values())
+        f["reported"] = int(round(float(complaint["amount_inr"]) * 100))
+        f["victim_everywhere"] = everywhere
         if f["is_own"] and not f["is_exit"]:
             named = f["trail"] if complaint.get("notice_has_amount", True) else f["victim"] + f["others"]
-            f["hold"] = min(named, f["balance"])
+            f["hold"] = min(named, f["balance"], f["reported"])
         else:
             f["hold"] = 0
         f["band"] = f["pass_through"] = f["cash_exits"] = f["complaint_links"] = None
@@ -112,7 +118,7 @@ def actions(facts_by_account: dict) -> list[dict]:
             amount = f["onward"] if code == "ONWARD_ENTRY" else None
         elif f["hold"] <= 0:
             code = "HOLD_MARKER" if f["hop"] == 1 and not f["never_full"] else "NONE"
-            amount = None
+            amount = min(f["trail"], f["reported"]) if code == "HOLD_MARKER" else None
         else:
             code, amount = "MANDATORY_HOLD", f["hold"]
         out.append({"account_id": f["account_id"], "action_code": code, "mode": "INFO" if code == "NONE"
@@ -123,28 +129,27 @@ def actions(facts_by_account: dict) -> list[dict]:
         if f["hold"] > 0 and tainted < f["hold"] and (f["band"] in ("HONEST", "REVIEW") or f["never_full"]):
             out.append({"account_id": f["account_id"], "action_code": "PROPOSE_NARROW", "mode": "OFFICER",
                         "amount": tainted})
-        pattern = ((f["complaint_links"] or 0) >= ev["complaint_links_min"]
-                   or ((f["pass_through"] or 0) >= ev["pass_through_min"]
-                       and (f["cash_exits"] or 0) >= ev["cash_exits_min"]))
-        if f["band"] == "MULE" and not f["never_full"] and pattern:
+        if f["band"] == "MULE" and not f["never_full"] and (f["complaint_links"] or 0) >= ev["complaint_links_min"]:
             out.append({"account_id": f["account_id"], "action_code": "PROPOSE_FULL_FREEZE", "mode": "OFFICER",
                         "amount": f["balance"]})
-        if f["band"] == "REVIEW" and not f["never_full"] and f["hold"] > 0 and tainted >= f["hold"]:
-            out.append({"account_id": f["account_id"], "action_code": "CONFIRM_HOLD", "mode": "OFFICER",
-                        "amount": f["hold"]})
     return out
 
 
 def check(case: Case, facts_by_account: dict, acts: list[dict], complaint: dict | None = None) -> dict[str, bool]:
     """The checker, as in 075_check.sql."""
     complaint = complaint or case.complaints[0]
-    paid = sum(t.amount_paise for t in case.txns if t.utr == complaint["utr"])
-    on_trail = sum(f["victim"] for f in facts_by_account.values())
+    paid = min(sum(t.amount_paise for t in case.txns if t.utr == complaint["utr"]),
+               int(round(float(complaint["amount_inr"]) * 100)))
+    # the victim's money anywhere in the bank's view: on the trail, plus any that came back into one of the bank's
+    # own accounts through another bank (that bank files its onward entry; this bank's trace stops at the border)
+    on_trail = next(iter(facts_by_account.values()), {}).get("victim_everywhere",
+                                                             sum(f["victim"] for f in facts_by_account.values()))
     holds = [(a, facts_by_account[a["account_id"]]) for a in acts if a["action_code"] == "MANDATORY_HOLD"]
     return {
         "conservation": on_trail == paid,
         "holds_within_balance": all(a["amount"] <= f["balance"] for a, f in holds),
         "holds_within_trail": all(a["amount"] <= f["trail"] for a, f in holds),
+        "holds_within_report": all(a["amount"] <= f["reported"] for a, f in holds),
         "automatic_allowed": all(a["action_code"] in ("MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY")
                                  for a in acts if a["mode"] == "AUTOMATIC"),
         "own_accounts_only": all(facts_by_account[a["account_id"]]["is_own"] for a in acts

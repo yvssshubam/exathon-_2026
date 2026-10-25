@@ -65,17 +65,17 @@ def run_today(conn, case_id: str, bank: str) -> list[dict]:
 
     s = desk_settings(case_id)
     c = steps.complaint(conn, case_id)
-    received = conn.execute("SELECT received_at FROM PH.TICKET WHERE case_id = {c}", {"c": case_id}).fetchval()
+    received = conn.execute("SELECT received_at FROM TICKET WHERE case_id = {c}", {"c": case_id}).fetchval()
     received = str(received or c["reported_at"])[:19]
     accounts = conn.execute(
-        "SELECT account_id, hop, trail_amount_inr FROM PH.CASE_ACCOUNT WHERE case_id = {c} AND viewing_bank_id = {b} "
+        "SELECT account_id, hop, trail_amount_inr FROM CASE_ACCOUNT WHERE case_id = {c} AND viewing_bank_id = {b} "
         "AND is_own_bank AND NOT is_exit", {"c": case_id, "b": bank}).fetchall()
     if not accounts:
         raise steps.StepFailed(f"No accounts for {case_id}: let the agent work the ticket first.")
     times = plan(received, [(a, int(h)) for a, h, _ in accounts], s)
-    root_ts = str(conn.execute("SELECT MIN(ts) FROM PH.TXN WHERE utr = {u}", {"u": c["utr"]}).fetchval())[:19]
+    root_ts = str(conn.execute("SELECT MIN(ts) FROM TXN WHERE utr = {u}", {"u": c["utr"]}).fetchval())[:19]
     snapshot = conn.execute(
-        "SELECT MAX(ts) FROM PH.BALANCE_SNAPSHOT WHERE ts <= TO_TIMESTAMP({r}, 'YYYY-MM-DD HH24:MI:SS')",
+        "SELECT MAX(ts) FROM BALANCE_SNAPSHOT WHERE ts <= TO_TIMESTAMP({r}, 'YYYY-MM-DD HH24:MI:SS')",
         {"r": root_ts}).fetchval()
     replay_from = str(snapshot)[:19] if snapshot else (
         datetime.strptime(root_ts, FMT) - timedelta(seconds=1)).strftime(FMT)
@@ -103,17 +103,17 @@ def _minutes(a: str | None, b: str | None) -> int | None:
 def compare(conn, case_id: str, bank: str) -> dict:
     """The scoreboard: victim money held, honest money locked, time from ticket to first hold, onward ticket time."""
     q = lambda sql, **p: conn.execute(sql, {"c": case_id, "b": bank, **p})  # noqa: E731
-    received = str(q("SELECT received_at FROM PH.TICKET WHERE case_id = {c}").fetchval() or "")[:19]
+    received = str(q("SELECT received_at FROM TICKET WHERE case_id = {c}").fetchval() or "")[:19]
     s = desk_settings(case_id)
 
     today_rows = q("SELECT account_id, hop, action_at, balance_then_inr, victim_then_inr, today_action, locked_inr, "
-                   "honest_locked_inr, stmt_id FROM PH.TODAY_OUTCOME WHERE case_id = {c} AND viewing_bank_id = {b} "
+                   "honest_locked_inr, stmt_id FROM TODAY_OUTCOME WHERE case_id = {c} AND viewing_bank_id = {b} "
                    "ORDER BY action_at").fetchall()
     if not today_rows:
         run_today(conn, case_id, bank)
         return compare(conn, case_id, bank)
-    names = dict(q("SELECT account_id, COALESCE(holder_name, account_id) FROM PH.ACCOUNT "
-                   "WHERE account_id IN (SELECT to_account FROM PH.TRACE_EDGE WHERE case_id = {c})").fetchall())
+    names = dict(q("SELECT account_id, COALESCE(holder_name, account_id) FROM ACCOUNT "
+                   "WHERE account_id IN (SELECT to_account FROM TRACE_EDGE WHERE case_id = {c})").fetchall())
     today_accounts, t_victim, t_honest, t_first = [], Decimal(0), Decimal(0), None
     for acc, _hop, at, bal, victim, action, locked, honest, stmt in today_rows:
         held_victim = min(_num(victim), _num(locked))
@@ -128,14 +128,14 @@ def compare(conn, case_id: str, bank: str) -> dict:
                                "stmt_id": stmt})
 
     facts = {a: (_num(v), _num(o)) for a, v, o in q(
-        "SELECT account_id, victim_amount_inr, other_victims_inr FROM PH.CASE_ACCOUNT WHERE case_id = {c} "
+        "SELECT account_id, victim_amount_inr, other_victims_inr FROM CASE_ACCOUNT WHERE case_id = {c} "
         "AND viewing_bank_id = {b}").fetchall()}
 
     def tool_side(where: str) -> tuple[Decimal, Decimal, list[dict]]:
         """Totals per account: the widest hold on an account counts once (a freeze covers the lien under it)."""
         rows, widest = [], {}
         for acc, kind, amount, by, placed in q(
-                "SELECT account_id, hold_kind, amount_inr, placed_by, placed_at FROM PH.HOLD_LEDGER "
+                "SELECT account_id, hold_kind, amount_inr, placed_by, placed_at FROM HOLD_LEDGER "
                 f"WHERE case_id = {{c}} AND viewing_bank_id = {{b}} AND {where} ORDER BY hold_id").fetchall():
             if kind == "MARKER":
                 continue
@@ -151,30 +151,35 @@ def compare(conn, case_id: str, bank: str) -> dict:
 
     o_victim, o_honest, o_rows = tool_side("placed_by = 'agent'")
     n_victim, n_honest, n_rows = tool_side("hold_status = 'ACTIVE'")
-    first_hold = q("SELECT MIN(placed_at) FROM PH.HOLD_LEDGER WHERE case_id = {c} AND viewing_bank_id = {b} "
+    first_hold = q("SELECT MIN(placed_at) FROM HOLD_LEDGER WHERE case_id = {c} AND viewing_bank_id = {b} "
                    "AND placed_by = 'agent'").fetchval()
     first_hold = str(first_hold)[:19] if first_hold else None
-    onward_tool = q("SELECT MIN(filed_at) FROM PH.PORTAL_ENTRY WHERE case_id = {c} AND viewing_bank_id = {b} "
+    onward_tool = q("SELECT MIN(filed_at) FROM PORTAL_ENTRY WHERE case_id = {c} AND viewing_bank_id = {b} "
                     "AND entry_kind = 'ONWARD'").fetchval()
     # Today the onward entry is typed after the paying account has been looked up.
-    payer_time = q("SELECT MIN(t.action_at) FROM PH.TODAY_OUTCOME t JOIN PH.PORTAL_ENTRY p "
+    payer_time = q("SELECT MIN(t.action_at) FROM TODAY_OUTCOME t JOIN PORTAL_ENTRY p "
                    "ON p.case_id = t.case_id AND p.from_account = t.account_id AND p.entry_kind = 'ONWARD' "
                    "WHERE t.case_id = {c} AND t.viewing_bank_id = {b}").fetchval()
     onward_today = ((datetime.strptime(str(payer_time)[:19], FMT) + timedelta(minutes=int(s["per_account_minutes"])))
                     .strftime(FMT) if payer_time else None)
-    paid = q("SELECT SUM(t.amount_inr) FROM PH.TXN t JOIN PH.COMPLAINT c ON c.utr = t.utr "
+    paid = q("SELECT SUM(t.amount_inr) FROM TXN t JOIN COMPLAINT c ON c.utr = t.utr "
              "WHERE c.case_id = {c}").fetchval()
     last_today = max((a["action_at"] for a in today_accounts), default=received)
     # Money that walked out of the trail's own-bank accounts after the ticket, before today's desk got there.
     walked = [{"at": str(ts)[:19], "account_id": acc, "name": names.get(acc, acc), "amount_inr": float(_num(amt)),
-               "where": ident or to}
-              for ts, acc, amt, ident, to in q(
-                  "SELECT t.ts, t.from_account, t.amount_inr, t.exit_identifier, t.to_account FROM PH.TXN t "
-                  "JOIN PH.CASE_ACCOUNT ca ON ca.account_id = t.from_account AND ca.case_id = {c} "
+               "where": ident or (f"an account at {bank_name}" if bank_name else to)}
+              for ts, acc, amt, ident, to, bank_name in q(
+                  "SELECT t.ts, t.from_account, t.amount_inr, t.exit_identifier, t.to_account, b.bank_name FROM TXN t "
+                  "JOIN CASE_ACCOUNT ca ON ca.account_id = t.from_account AND ca.case_id = {c} "
                   "AND ca.viewing_bank_id = {b} AND ca.is_own_bank "
-                  "WHERE t.is_exit AND t.ts > TO_TIMESTAMP({r}, 'YYYY-MM-DD HH24:MI:SS') "
+                  "LEFT JOIN ACCOUNT ta ON ta.account_id = t.to_account LEFT JOIN BANK b ON b.bank_id = ta.bank_id "
+                  "WHERE (t.is_exit OR (ta.bank_id IS NOT NULL AND ta.bank_id <> {b})) "
+                  "AND t.ts > TO_TIMESTAMP({r}, 'YYYY-MM-DD HH24:MI:SS') "
                   "AND t.ts <= TO_TIMESTAMP({l}, 'YYYY-MM-DD HH24:MI:SS') ORDER BY t.ts",
                   r=received, l=last_today).fetchall()]
+    decisions = int(q("SELECT COUNT(*) FROM PROPOSAL WHERE case_id = {c} AND act_mode = 'OFFICER' "
+                      "AND proposal_status IN ('WAITING', 'APPROVED', 'EDITED', 'REJECTED')").fetchval() or 0)
+    kyc_at = q("SELECT MIN(filed_at) FROM PORTAL_ENTRY WHERE case_id = {c} AND entry_kind = 'KYC'").fetchval()
     return {
         "case_id": case_id, "bank": bank, "received_at": received, "victim_paid_inr": float(_num(paid)),
         "desk": {k: str(v) for k, v in s.items()},
@@ -186,7 +191,12 @@ def compare(conn, case_id: str, bank: str) -> dict:
                  "honest_locked_now_inr": float(n_honest), "victim_held_now_inr": float(n_victim),
                  "first_hold_at": first_hold, "minutes_to_first_hold": _minutes(received, first_hold),
                  "onward_filed_at": str(onward_tool)[:19] if onward_tool else None,
-                 "holds_overnight": o_rows, "holds_now": n_rows},
+                 "holds_overnight": o_rows, "holds_now": n_rows,
+                 "officer_decisions": decisions,
+                 "kyc_filed_at": str(kyc_at)[:19] if kyc_at else None,
+                 "kyc_minutes": _minutes(received, str(kyc_at)[:19]) if kyc_at else None},
+        "today_process": {"manual_steps": int(RULES["today_defaults"]["manual_steps_per_ticket"]),
+                          "kyc_allowed_days": int(RULES["today_defaults"]["kyc_allowed_days"])},
     }
 
 
@@ -204,7 +214,7 @@ def day_summary(conn, bank: str) -> dict:
     """Today's desk vs the agent over every ticket the agent has worked (the Review band and the Whole day tab).
     An account frozen whole in several tickets' replays counts once, at its largest."""
     worked = [c for (c,) in conn.execute(
-        "SELECT t.case_id FROM PH.TICKET t JOIN PH.AGENT_RUN r ON r.run_id = t.run_id "
+        "SELECT t.case_id FROM TICKET t JOIN AGENT_RUN r ON r.run_id = t.run_id "
         "WHERE r.run_status = 'DONE' ORDER BY t.received_at, t.case_id").fetchall()]
     tickets, frozen_today = [], {}
     for case_id in worked:

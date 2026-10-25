@@ -1,8 +1,10 @@
 """Optional local model for the agent (docs/DESIGN.md, "Where AI fits"). Free and offline: Ollama on the laptop.
 
-The model only picks the next tool from the ones the runtime says are allowed, and writes words for people
-(the case summary, a send-back note). It never computes an amount, never chooses an action, never writes to the
-database. If it is switched off, not running, slow or wrong, the agent's fixed pipeline does the same work.
+The model only picks the next tool from the ones the runtime says are allowed (it may name one action to propose,
+which the checker then validates), words the reasons for narrow and widen proposals (pipeline/reasons.py, claim by
+claim checked) and the morning log (pipeline/morning.py, from the audit log only). It never computes an amount,
+never chooses the reasons, has no tool that changes data. If it is switched off, not running, slow or wrong, the
+fixed pipeline does the same work through the same checker.
 
 Settings (.env):
   PH_LLM=ollama                      turn it on (default: off)
@@ -73,16 +75,27 @@ class Ollama:
 
     def pick_tool(self, system: str, state: str, tools: list[dict]) -> str:
         """Ask for exactly one tool call; return its name."""
+        return self.pick_call(system, state, tools)[0]
+
+    def pick_call(self, system: str, state: str, tools: list[dict]) -> tuple[str, dict]:
+        """Ask for exactly one tool call; return its name and arguments (an empty dict when it gave none)."""
         msg = self.chat([{"role": "system", "content": system}, {"role": "user", "content": state}], tools)
         calls = msg.get("tool_calls") or []
         if calls:
-            return calls[0]["function"]["name"]
+            fn = calls[0]["function"]
+            args = fn.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    args = {}
+            return fn["name"], args if isinstance(args, dict) else {}
         # Some small models answer in text; accept a bare tool name.
         text = (msg.get("content") or "").strip()
         names = [t["function"]["name"] for t in tools]
         for name in names:
             if re.search(rf"\b{re.escape(name)}\b", text):
-                return name
+                return name, {}
         raise LLMUnavailable(f"no tool call in the reply: {text[:120]!r}")
 
     def write(self, system: str, facts: str) -> str:

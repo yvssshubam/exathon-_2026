@@ -1,49 +1,70 @@
-# What the agent may do on its own, and what waits for the officer (docs/DESIGN.md, "Automatic vs officer").
-# Configuration, not code: sql/steps/070_actions.sql reads these values as parameters, and tests/rules_oracle.py
-# applies the same table in plain Python.
+# What the agent does on its own, and the four things only the officer decides (docs/DESIGN.md, "Who does what").
+# Configuration, not code: sql/steps/070_actions.sql reads these values as parameters, pipeline/checker.py validates
+# every proposal against them, and tests/rules_oracle.py applies the same table in plain Python.
 #
 # The principle: the agent does what the rules already require, instantly and at any hour; the officer decides what
-# the rules leave to judgment. The agent never places a full freeze on its own.
+# the rules leave to judgment. The model never places, sizes or releases a hold: it proposes and words things, and
+# the checker (deterministic code with its own database user) is the only component that carries anything out.
 
 lane_a:
   name: "Police-instructed hold"
   source: "MHA I4C SOP for NCRP-CFCFRMS, 2 Jan 2026 (judicially monitored, SC order 9 Feb 2026)"
   legal_basis: "S.168 read with S.94 BNSS"
 
+# The fixed citation list behind each kind of action. Reasons cite these and nothing else: the model never writes a
+# citation (docs/DESIGN.md, "Written reasons").
 legal_basis:
   hold: "S.168 r/w S.94 BNSS: hold the reported amount, or the part of it available (SOP 6.1(j), 9.1(i))"
   narrow: "Amount-only lien sized to the money traceable to the victim (SOP 5(xii), 9.1(i); Delhi HC, Neelkanth Pharma)"
   freeze: "Whole-account freeze at the bank's or IO's discretion (I4C FAQ); exceptional cases only (Rajasthan HC, 20 Aug 2026)"
   trail: "Trail update to CFCFRMS: onward transfers, exits and KYC (SOP 6.1(k), 9.1(i))"
+  release: "Lifting a hold needs approval (Department Head); a hold with no police direction is reviewed, not kept by default"
+  send_back: "Notice that does not match a transaction: returned for correction, nothing held (Rajasthan HC: clarify unclear notices)"
 
-# Automatic: the bank cannot refuse these, so the agent does them the moment the ticket lands.
+# Automatic: the bank cannot refuse these, or they move no money, so the agent does them the moment the ticket lands.
+# Filings are filed, never left as drafts: a draft onward entry sitting until 9 a.m. stalls the next bank's ticket.
 automatic:
-  MANDATORY_HOLD: "Own-bank account with money left: lien up to the amount the trail names, capped at the balance"
-  HOLD_MARKER: "First-layer own-bank account with nothing left (not nodal, pool or escrow): catch later credits"
-  RECORD_EXIT: "Money left banking from an own-bank account: file the exit with its identifiers"
-  ONWARD_ENTRY: "Money moved from an own-bank account to another bank: file the onward entry with the victim's share"
-  KYC_PACKET: "Draft the holder's KYC for every own-bank account held (sent by the officer; due within a week)"
+  MANDATORY_HOLD: "Own account the victim's money reached, money left: lien up to the amount the trail names, never above the balance or the reported amount"
+  HOLD_MARKER: "First-layer own account with nothing left (not nodal, pool or escrow): catch later credits up to the amount the trail names"
+  RECORD_EXIT: "Money left banking from an own account: file the exit with its identifiers"
+  ONWARD_ENTRY: "Money moved from an own account to another bank: file the onward entry with the victim's share"
+  KYC_PACKET: "File the holder's KYC for every own account held, in the same run (the SOP allows a week)"
+  SEND_BACK: "The ticket does not match a transaction: return it for correction, naming only the fields that differ"
+  LINK_DUPLICATE: "The same transaction reached the bank twice: link the tickets, place no second hold"
+  RECORD_SPLIT: "Several victims' money in one account: record the split for the refund stage (moves no money)"
+  WATCH_HOLD: "New money on a mule-like watched account: hold it up to the reported amount, tagged not linked to a reported victim yet"
+  WATCH_ADD: "Add an account to the watch (a failed transfer named it), with no hold"
 
-# Officer: judgment calls. The agent prepares the proposal and the reasons; nothing changes until approved.
+# The officer's four decisions. The agent prepares the proposal, the reasons and the case against; nothing changes
+# until the officer approves. Nothing else ever waits for the officer.
 officer:
-  PROPOSE_NARROW: "Likely honest receiver (HONEST or REVIEW evidence), or a nodal/pool/escrow account, holding less victim money than the mandatory hold: narrow the lien to the victims' money"
-  PROPOSE_FULL_FREEZE: "Mule-like account whose history shows the exceptional pattern courts accept: propose a whole-account freeze, with the reasons written down"
-  CONFIRM_HOLD: "Borderline evidence (REVIEW) and nothing to narrow: the officer confirms the hold"
+  PROPOSE_NARROW: "Likely honest receiver, or a nodal/pool/escrow account, holding less victim money than the mandatory hold: narrow the lien to the victims' money"
+  PROPOSE_FULL_FREEZE: "Mule-like account whose own behaviour shows the pattern courts accept: propose a whole-account freeze (widen), with the reasons written down"
+  UNMATCHED_NOTICE: "The ticket matches no transaction exactly but a near match exists on the named account: decide what to do with it"
+  PROPOSE_RELEASE: "A hold with no police direction for 75 days: decide whether to release it"
 
-# The pattern that justifies proposing a full freeze (Rajasthan HC: a deliberately operated mule account, or repeated
-# suspicious credits followed by onward transfers). Evidence band MULE plus EITHER of these.
+# When a full freeze may be proposed (Rajasthan HC: a deliberately operated account, or repeated credits followed by
+# onward transfers). Never on a nodal, pool or escrow account; never placed without the officer.
 full_freeze_evidence:
-  complaint_links_min: 2        # money from 2+ fraud complaints in 7 days
-  pass_through_min: 0.8         # OR: 80%+ of credits sent on within an hour ...
-  cash_exits_min: 2             # ... and 2+ cash or crypto withdrawals in 90 days
+  complaint_links_min: 3                 # first pass: band MULE and money from 3+ fraud tickets in 7 days
+  watch_cash_out_channels: [ATM, CASH, CRYPTO]   # watch: a mule-like account tried to cash out and the hold refused it
+  watch_bands: [MULE, REVIEW]            # what counts as mule-like at the first pass
 
-# Never, whoever asks: the checker refuses these (sql/steps/075_check.sql).
+# The watch (pipeline/watch.py). A query a minute is enough: the hold already protects the money, so a refused
+# attempt is evidence for a morning decision, not an emergency.
+watch:
+  release_review_days: 75                # no police direction by then: one release flag to the officer
+  business_holder_types: [merchant, business]   # a refused transfer to these is noted, never labelled a next mule
+
+# Never, whoever asks: the checker refuses these.
 forbidden:
-  - "A full freeze placed by the agent"
+  - "A full freeze placed without an officer"
   - "A full freeze on a nodal, pool or escrow account"
-  - "A hold above the balance, or above the amount the trail names"
+  - "A hold above the balance, the amount the trail names or the reported amount"
   - "A hold on another bank's account"
+  - "A hold without a notice behind it (Lane A only)"
   - "Any change at all when the victim's money does not reconcile to the paisa"
+  - "A proposal the rules engine did not produce for these facts"
 
 # Today's desk, for the Compare screen (each case file can override; data/demo_case.yaml does).
 today_defaults:
@@ -51,3 +72,6 @@ today_defaults:
   first_lookup_minutes: 20
   per_account_minutes: 15
   freezes_whole_account: true
+  manual_steps_per_ticket: 8             # read, pass to core banking, look up the UTR, mark the lien, type the onward
+                                         # entry, type the exit, screenshot to the branch, upload the KYC
+  kyc_allowed_days: 7

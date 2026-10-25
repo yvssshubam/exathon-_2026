@@ -1,4 +1,4 @@
-# Body of the Exasol Python 3 SET script PH.ATTRIBUTE_CASE (requirements s9, step 2; FR-06, FR-07).
+# Body of the Exasol Python 3 SET script ATTRIBUTE_CASE (one per bank schema) (requirements s9, step 2; FR-06, FR-07).
 # sql/050_attribute_udf.sql wraps this file into CREATE OR REPLACE PYTHON3 SET SCRIPT via --@include.
 #
 # One call = one tracing rule (the SQL groups by rule). Input rows are of two kinds:
@@ -112,7 +112,9 @@ def replay(rule, opening, txns):
             ledgers[acc] = Ledger(opening.get(acc, 0))
         return ledgers[acc]
 
-    for _ts, txn_id, frm, to, paise, victim in sorted(txns, key=lambda t: (t[0], t[1])):
+    # A ticket that reports only part of a payment (an onward ticket carries the victim's share) arrives as two
+    # rows with the same transaction: the tagged part first, then the rest as an ordinary (clean) movement.
+    for _ts, txn_id, frm, to, paise, victim in sorted(txns, key=lambda t: (t[0], t[1], t[5] is None)):
         if victim:
             pieces = [(victim, paise)]
         else:

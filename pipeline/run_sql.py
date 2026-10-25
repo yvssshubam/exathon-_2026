@@ -1,16 +1,22 @@
-"""Run the numbered SQL files in order (`make db`). Requirements s8: numbered, idempotent, run in order.
+"""Build the database (`make db`): one schema per bank, the portal schema, then the users and their privileges.
 
-Rules for files in sql/:
+  1. every file in sql/bank/ runs once per bank in config/banks.yaml, after OPEN SCHEMA <the bank's schema>
+     (PH_X, PH_Y, PH_Z), so the same files build identical, separate schemas
+  2. every file in sql/portal/ runs once, after OPEN SCHEMA PH_PORTAL
+  3. pipeline/users.py creates the maker, checker and portal users and grants each only what it may touch
+The schema PH of earlier builds (one schema for every bank) is dropped first.
+
+Rules for the files:
   * names are NNN_name.sql and run in numeric order
   * ordinary statements end with ';' at the end of a line
-  * CREATE ... SCRIPT bodies end at a line holding only '/' (same as `exasol connect`, requirements s7)
+  * CREATE ... SCRIPT bodies end at a line holding only '/' (same as `exasol connect`)
   * inside a script body, a line `--@include sql/udf/file.py` is replaced by that file's contents, so UDF
     Python lives in real .py files that CI can test without Exasol (DECISIONS D-10)
 
 Usage:
-  python -m pipeline.run_sql sql              # all files
-  python -m pipeline.run_sql sql --only 040   # one file
-  python -m pipeline.run_sql sql --dry-run    # print what would run
+  python -m pipeline.run_sql                  # everything (the folder argument `sql` is accepted and ignored)
+  python -m pipeline.run_sql --only 050       # files starting with 050, in every bank
+  python -m pipeline.run_sql --dry-run        # print what would run
 """
 from __future__ import annotations
 
@@ -27,6 +33,9 @@ SCRIPT_START = re.compile(
 )
 INCLUDE = re.compile(r"^\s*--@include\s+(\S+)\s*$")
 FILE_NAME = re.compile(r"^\d{3}_.+\.sql$")
+BANK_SQL = ROOT / "sql" / "bank"
+PORTAL_SQL = ROOT / "sql" / "portal"
+OLD_SCHEMAS = ("PH",)
 
 
 def split_statements(text: str, root: Path = ROOT) -> list[str]:
@@ -68,45 +77,72 @@ def sql_files(folder: Path, only: str | None = None) -> list[Path]:
     return files
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("folder", nargs="?", default="sql")
-    ap.add_argument("--only", help="run only files starting with this prefix, e.g. 040")
-    ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args(argv)
+def plan(only: str | None = None) -> list[tuple[str, Path]]:
+    """(schema, file) pairs in the order they run."""
+    from pipeline.db import BANKS, PORTAL_SCHEMA, schema_for
 
-    files = sql_files(ROOT / args.folder, args.only)
-    if not files:
-        print(f"no NNN_*.sql files in {args.folder}", file=sys.stderr)
-        return 1
+    out = [(schema_for(bank), path) for bank in BANKS for path in sql_files(BANK_SQL, only)]
+    out += [(PORTAL_SCHEMA, path) for path in sql_files(PORTAL_SQL, only)]
+    return out
 
-    conn = None
-    if not args.dry_run:
-        from pipeline.db import connect
 
-        conn = connect()
-    for path in files:
+def build(conn, only: str | None = None, dry_run: bool = False) -> int:
+    """Run the plan on an admin connection. Returns 0 on success, 1 on the first failure."""
+    if not only and not dry_run:
+        for old in OLD_SCHEMAS:
+            conn.execute(f"DROP SCHEMA IF EXISTS {old} CASCADE")
+    opened = None
+    for schema, path in plan(only):
         statements = split_statements(path.read_text(encoding="utf-8"))
         started = time.perf_counter()
+        if dry_run:
+            for i, stmt in enumerate(statements, 1):
+                print(f"{schema:9} {path.parent.name}/{path.name} [{i}] {stmt.splitlines()[0][:80]}")
+            continue
+        if schema != opened:
+            conn.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+            conn.execute(f"OPEN SCHEMA {schema}")
+            opened = schema
         for i, stmt in enumerate(statements, 1):
-            first = stmt.splitlines()[0][:90]
-            if args.dry_run:
-                print(f"{path.name} [{i}] {first}")
-                continue
             try:
                 conn.execute(stmt)
             except Exception as exc:  # show exactly where it broke, then stop
-                print(f"\nFAILED {path.name} statement {i}: {first}\n{exc}", file=sys.stderr)
+                first = stmt.splitlines()[0][:90]
+                print(f"\nFAILED {schema} {path.name} statement {i}: {first}\n{exc}", file=sys.stderr)
                 return 1
-        if conn is not None:
-            print(f"ok  {path.name:32} {len(statements):3} statements  {time.perf_counter() - started:6.2f}s")
-    if conn is not None:
-        try:
-            from pipeline.db import audit
+        print(f"ok  {schema:9} {path.parent.name + '/' + path.name:30} {len(statements):3} statements  "
+              f"{time.perf_counter() - started:6.2f}s")
+    return 0
 
-            audit(conn, "make_db", detail=",".join(p.name for p in files))
-        except Exception as exc:  # AUDIT_LOG may not exist when running a single early file
-            print(f"(audit skipped: {exc})", file=sys.stderr)
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("folder", nargs="?", default="sql", help="ignored; kept so `run_sql sql` still works")
+    ap.add_argument("--only", help="run only files starting with this prefix, e.g. 050")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-users", action="store_true", help="skip creating users and grants")
+    args = ap.parse_args(argv)
+
+    if args.dry_run:
+        return build(None, args.only, dry_run=True)
+    from pipeline.db import audit, connect, settings
+
+    conn = connect()
+    try:
+        code = build(conn, args.only)
+        if code:
+            return code
+        if not args.no_users:
+            from pipeline.users import apply
+
+            if apply(conn, settings()["role_password"]):
+                return 1
+        from pipeline.db import BANKS, schema_for
+
+        for bank in BANKS:
+            conn.execute(f"OPEN SCHEMA {schema_for(bank)}")
+            audit(conn, "make_db", actor="admin", detail=f"only={args.only or 'all'}")
+    finally:
         conn.close()
     return 0
 

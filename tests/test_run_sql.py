@@ -43,19 +43,34 @@ def test_unterminated_statement_is_an_error():
 
 
 def test_repo_sql_files_parse_and_are_numbered():
-    files = sql_files(ROOT / "sql")
-    assert [p.name for p in files] == ["010_schema.sql", "015_smoke_udf.sql", "050_attribute_udf.sql",
-                                   "090_views.sql"]
-    schema = split_statements((ROOT / "sql" / "010_schema.sql").read_text())
+    from pipeline.run_sql import BANK_SQL, PORTAL_SQL
+
+    assert [p.name for p in sql_files(BANK_SQL)] == ["010_schema.sql", "015_smoke_udf.sql", "050_attribute_udf.sql",
+                                                     "090_views.sql"]
+    assert [p.name for p in sql_files(PORTAL_SQL)] == ["010_portal.sql"]
+    schema = split_statements((BANK_SQL / "010_schema.sql").read_text())
     tables = [s for s in schema if s.upper().startswith("CREATE OR REPLACE TABLE")]
-    assert len(tables) == 31
-    for stmt in tables:                       # every table carries a COMMENT for the MCP server (s7)
+    assert len(tables) == 38
+    for stmt in tables:                       # every table says what it is for
         assert ") COMMENT IS '" in stmt, stmt.splitlines()[0]
-    for f in files:
-        split_statements(f.read_text())
+    for folder in ("bank", "portal", "lab", "steps", "amlworld"):
+        for f in sql_files(ROOT / "sql" / folder):
+            split_statements(f.read_text())
+
+
+def test_every_bank_gets_its_own_schema_and_names_stay_unqualified():
+    from pipeline.run_sql import plan
+
+    schemas = [schema for schema, _ in plan()]
+    assert schemas.count("PH_X") == schemas.count("PH_Y") == schemas.count("PH_Z") == 4
+    assert schemas.count("PH_PORTAL") == 1
+    for folder in ("bank", "steps"):          # bank SQL runs in whichever bank schema is open: no PH. prefix
+        for f in sql_files(ROOT / "sql" / folder):
+            assert "PH." not in f.read_text(), f.name
 
 
 def test_seed_rows_are_consistent():
+
     rows = rows_for({k: load_case(v) for k, v in CASE_FILES.items()})
     accounts = {r[0] for r in rows["ACCOUNT"]}
     for txn in rows["TXN"]:
@@ -63,6 +78,41 @@ def test_seed_rows_are_consistent():
         assert txn[4] in accounts or txn[4].startswith(("EXIT:", "EXT_"))
         assert txn[2].endswith(".000")
     assert len(rows["SCORING_CONFIG"]) == 8 and len(rows["PROFILE_BAND"]) == 3
-    assert [r[2] for r in rows["TICKET"]] == ["QUEUED"] * len(rows["COMPLAINT"])
-    assert sum(1 for r in rows["BANK"] if r[2] == "TRUE") == 1
-    assert len(rows["COMPLAINT"]) == 22       # 1 demo + 20 extra + 1 loop
+    assert len(rows["PORTAL_TICKET"]) == len(rows["COMPLAINTS"])
+    assert sum(1 for r in rows["BANK"] if r[2] == "TRUE") == 0       # the world belongs to no bank
+
+
+def test_each_bank_gets_only_its_own_share():
+    from pipeline.load_cases import bank_rows
+
+    rows = rows_for({k: load_case(v) for k, v in CASE_FILES.items()}, history=False)
+    bank_of = {r[0]: r[1] for r in rows["ACCOUNT"]}
+    for bank in ("BANK_X", "BANK_Y", "BANK_Z"):
+        share = bank_rows(rows, bank)
+        assert [r[0] for r in share["BANK"] if r[2] == "TRUE"] == [bank]
+        assert all(bank_of.get(t[3]) == bank or bank_of.get(t[4]) == bank for t in share["TXN"])
+        own = [r for r in share["ACCOUNT"] if r[1] == bank]
+        stubs = [r for r in share["ACCOUNT"] if r[1] != bank]
+        assert own and all(r[3] is None for r in stubs)              # other banks' accounts: no KYC, no history
+        assert all(bank_of[r[0]] == bank for r in share["BALANCE_SNAPSHOT"])
+
+
+def test_every_seed_row_has_one_value_per_column():
+    """Each bank's rows match its tables' column counts, so IMPORT never sees a short row."""
+    import re
+
+    from pipeline.load_cases import BANK_TABLES, bank_rows
+
+    columns = {}
+    for stmt in split_statements((ROOT / "sql" / "bank" / "010_schema.sql").read_text()):
+        m = re.match(r"CREATE OR REPLACE TABLE (\w+) \(", stmt)
+        if m:
+            body = stmt[m.end():]
+            columns[m.group(1)] = len([ln for ln in body.splitlines()
+                                       if re.match(r"\s+[a-z_]+\s+[A-Z]", ln) and "CONSTRAINT" not in ln])
+    world = rows_for({k: load_case(v) for k, v in CASE_FILES.items()}, history=False)
+    for bank in ("BANK_X", "BANK_Y", "BANK_Z"):
+        share = bank_rows(world, bank)
+        for table in BANK_TABLES:
+            widths = {len(r) for r in share[table]}
+            assert widths <= {columns[table]}, (bank, table, widths, columns[table])

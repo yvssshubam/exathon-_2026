@@ -50,7 +50,7 @@ def test_config_maps_every_amlworld_payment_format():
     cfg = yaml.safe_load(aml.CONFIG.read_text(encoding="utf-8"))
     assert set(cfg["channels"]) == {"ACH", "Wire", "Cheque", "Credit Card", "Cash", "Bitcoin", "Reinvestment"}
     assert cfg["channels"]["Reinvestment"] is None
-    assert all(len(v) <= 10 for v in cfg["channels"].values() if v)       # PH.TXN.channel is VARCHAR(10)
+    assert all(len(v) <= 10 for v in cfg["channels"].values() if v)       # TXN.channel is VARCHAR(10)
     assert str(cfg["last_day"]) < "2026-10-18"                            # ends before the case day (D-37)
     assert cfg["usd_to_inr"] > 0
     assert cfg["fallback_usd_per_unit"]["US Dollar"] == 1

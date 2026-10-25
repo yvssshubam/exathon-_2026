@@ -1,236 +1,40 @@
-"""The watch: the agent keeps working after the holds go on (docs/DESIGN.md, "The watch"; DECISIONS D-38).
+"""The case stays live (Module 5; idea 1 with a smaller claim, idea 9's tag, idea 3's exit). No model here: a trigger,
+a lookup and three branches, every time.
 
-A ticket's run ends when its holds are placed, but the money keeps moving. The watch replays every transaction that
-touches a watched account after that moment, in time order, as the bank's core system would see it:
+After the first pass, every own account a case touched is on the watch list with its first-pass decision
+(mule-like, or an honest receiver). The simulated clock checks the watched accounts as payments happen
+(pipeline/night.py; a query a minute is enough, because the hold already protects the money):
 
-  watched   own-bank accounts the agent held, plus accounts with a whole-account freeze waiting for the officer
-  BLOCKED   a debit that needs held money is refused (the balance stays); the attempt is evidence for the officer
-  MOVED     a mule-like account moves money that was not held: evidence that it is still passing money on
-  NEW_MONEY a mule-like account receives new money: money that a freeze would now protect
-  MARKER_HOLD a first-layer marker catches a later credit (rules: HOLD_MARKER), up to the trail amount
+  new money, mule-like account   hold it up to the ticket's reported amount, tagged "not linked to a reported victim
+                                 yet" (under LIBR it is not the first victim's money). Above that amount: one line for
+                                 the officer, no hold. A later ticket for that payment links the money to its victim
+  new money, honest receiver     let it through and say why: it arrived after the victim's money left
+  refused cash-out, mule-like    record it as evidence and propose a full freeze (the officer decides)
+  refused transfer               the recipient is at this bank: check its evidence, put it on the watch, no hold
+                                 (no victim money reached it); a business recipient is noted, never labelled; at
+                                 another bank: recorded in the case for the police
+  day 75, no police direction    the account leaves the watch and the officer gets one release flag
 
-For every event the rules decide what is allowed (`options`); then the controller picks one:
-  * pipeline  a fixed policy: alert the officer out of hours when an exit is refused or a large amount is at stake
-  * llm       the local model picks from the allowed options and may word the alert; any failure, and the fixed
-              policy decides that event
-The only money the watch can hold is a marker's catch, and only within the rule's cap. Alerts and evidence change
-nothing in the bank; whole-account freezes stay with the officer.
-
-    python -m pipeline.watch                 # replay the watch over every worked ticket (fixed policy)
-    python -m pipeline.watch --mode llm      # let the local model choose the responses
+Every action goes through the checker (pipeline/checker.py). The watch never holds above the reported amount and
+never alerts anyone at night: the morning log is the notification.
 """
 from __future__ import annotations
 
-import argparse
-import json
-import sys
-from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from decimal import Decimal
 
+import yaml
+
+from pipeline.db import ROOT
 from pipeline.explain import inr
+from pipeline.recalc import propose
 
+RULES = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
+CASH_OUT = tuple(RULES["full_freeze_evidence"]["watch_cash_out_channels"])
+BUSINESS = tuple(RULES["watch"]["business_holder_types"])
+RELEASE_DAYS = int(RULES["watch"]["release_review_days"])
 FMT = "%Y-%m-%d %H:%M:%S"
-DESK_HOURS = (10, 18)
-ALERT_MIN_INR = Decimal("25000")          # out of hours, the fixed policy alerts at this amount or on any exit
 
-OPTIONS = {
-    "evidence": "Add it to the evidence on the officer's decision for this account; nothing else.",
-    "evidence_and_alert": "Add it to the evidence and alert the officer now, out of hours.",
-    "hold": "Hold the credit (the marker rule requires it), within the rule's cap.",
-    "hold_and_alert": "Hold the credit and alert the officer now, out of hours.",
-}
-SYSTEM_PICK = (
-    "You watch bank accounts that hold a fraud victim's money, after the holds were placed, while the desk is "
-    "closed. For one event, call exactly one of the offered tools. Alert the officer only when waking them is "
-    "worth it: money leaving to cash or crypto, or a large amount at stake. You never compute amounts; the rules "
-    "already decided what is allowed.")
-SYSTEM_WRITE = (
-    "Write one short out-of-hours alert for a bank's nodal officer: what happened, when, and what is waiting for "
-    "them. One or two sentences. Copy every rupee figure exactly as written; add no other figures.")
-
-
-def out_of_hours(ts: str) -> bool:
-    h = int(ts[11:13])
-    return h < DESK_HOURS[0] or h >= DESK_HOURS[1]
-
-
-# ---------------------------------------------------------------- the replay (pure: no database)
-
-@dataclass
-class Txn:
-    txn_id: str
-    ts: str
-    from_account: str
-    to_account: str
-    amount: Decimal
-    channel: str
-    is_exit: bool
-    exit_identifier: str | None = None
-
-
-@dataclass
-class Watched:
-    account_id: str
-    name: str
-    since: str                      # first hold or proposal on it (simulated clock)
-    balance: Decimal                # balance at `since` (LIBR replay at the hold time)
-    mule_like: bool                 # band MULE or REVIEW, or a freeze waiting
-    marker_cap: Decimal = Decimal(0)   # HOLD_MARKER: how much later credit it may still catch
-    cases: list[str] = field(default_factory=list)
-
-
-@dataclass
-class Hold:
-    account_id: str
-    placed_at: str
-    amount: Decimal
-    kind: str                       # LIEN, MARKER or ACCOUNT_FREEZE
-    ends_at: str | None = None      # when a narrower or wider hold replaced it
-
-
-@dataclass
-class Event:
-    account_id: str
-    txn_id: str
-    at: str
-    kind: str
-    amount: Decimal
-    counterparty: str
-    channel: str
-    held: Decimal
-    balance: Decimal
-    is_exit: bool
-    cases: list[str]
-    options: list[str] = field(default_factory=list)
-    response: str = ""
-    chosen_by: str = ""
-    alert_text: str | None = None
-    hold_amount: Decimal = Decimal(0)
-
-
-def held_at(holds: list[Hold], account: str, t: str) -> tuple[Decimal, bool]:
-    """(money under lien, frozen?) on an account at moment t: holds placed by then and not yet replaced."""
-    live = [h for h in holds if h.account_id == account and h.placed_at <= t and (h.ends_at is None or h.ends_at > t)]
-    frozen = any(h.kind == "ACCOUNT_FREEZE" for h in live)
-    return sum((h.amount for h in live if h.kind == "LIEN"), Decimal(0)), frozen
-
-
-def replay(txns: list[Txn], watched: dict[str, Watched], holds: list[Hold],
-           names: dict[str, str] | None = None) -> list[Event]:
-    """Every event on the watched accounts, in time order. A refused debit never reaches its receiver."""
-    names = names or {}
-    balance = {a: w.balance for a, w in watched.items()}
-    caught = {a: Decimal(0) for a in watched}
-    events: list[Event] = []
-    for t in sorted(txns, key=lambda x: (x.ts, x.txn_id)):
-        src = watched.get(t.from_account)
-        if src and t.ts > src.since:
-            held, frozen = held_at(holds, src.account_id, t.ts)
-            other = t.exit_identifier or names.get(t.to_account, t.to_account)
-            if frozen or t.amount > balance[src.account_id] - held:
-                events.append(Event(src.account_id, t.txn_id, t.ts, "BLOCKED", t.amount, other, t.channel, held,
-                                    balance[src.account_id], t.is_exit, src.cases))
-                continue                                  # refused: nothing left the account, nothing arrives
-            balance[src.account_id] -= t.amount
-            if src.mule_like:
-                events.append(Event(src.account_id, t.txn_id, t.ts, "MOVED", t.amount, other, t.channel, held,
-                                    balance[src.account_id], t.is_exit, src.cases))
-        dst = watched.get(t.to_account)
-        if dst and t.ts > dst.since:
-            balance[dst.account_id] += t.amount
-            held, _ = held_at(holds, dst.account_id, t.ts)
-            other = names.get(t.from_account, t.from_account)
-            room = dst.marker_cap - caught[dst.account_id]
-            if room > 0:
-                take = min(room, t.amount)
-                caught[dst.account_id] += take
-                holds.append(Hold(dst.account_id, t.ts, take, "LIEN"))
-                ev = Event(dst.account_id, t.txn_id, t.ts, "MARKER_HOLD", t.amount, other, t.channel, held + take,
-                           balance[dst.account_id], False, dst.cases, hold_amount=take)
-                events.append(ev)
-            elif dst.mule_like:
-                events.append(Event(dst.account_id, t.txn_id, t.ts, "NEW_MONEY", t.amount, other, t.channel, held,
-                                    balance[dst.account_id], False, dst.cases))
-    return events
-
-
-def options_for(e: Event) -> list[str]:
-    """What the rules allow for one event. Alerts only out of hours; a marker's catch is always held."""
-    first = "hold" if e.kind == "MARKER_HOLD" else "evidence"
-    return [first, f"{first}_and_alert"] if out_of_hours(e.at) else [first]
-
-
-def fixed_policy(e: Event) -> str:
-    """The default choice: out of hours, alert on any refused exit or when the amount is large."""
-    alert = [o for o in e.options if o.endswith("_and_alert")]
-    if alert and (e.kind == "BLOCKED" and e.is_exit or e.amount >= ALERT_MIN_INR or e.kind == "MARKER_HOLD"):
-        return alert[0]
-    return e.options[0]
-
-
-def describe(e: Event, name: str) -> str:
-    """One plain sentence for the officer; also the facts given to the model."""
-    when = e.at[11:16]
-    if e.kind == "BLOCKED":
-        where = "to cash at " + e.counterparty if e.channel == "ATM" else (
-            "to a crypto wallet" if e.channel == "CRYPTO" else "to " + e.counterparty)
-        return (f"{when}: {name} tried to move {inr(e.amount)} {where}; refused, {inr(e.held)} is held. "
-                f"A decision on {name} is waiting for you.")
-    if e.kind == "MOVED":
-        return f"{when}: {name} moved {inr(e.amount)} that was not held, to {e.counterparty}."
-    if e.kind == "NEW_MONEY":
-        return (f"{when}: {name} received {inr(e.amount)} from {e.counterparty}; a freeze would protect it. "
-                f"A decision on {name} is waiting for you.")
-    return f"{when}: {name} received {inr(e.amount)}; the marker held {inr(e.hold_amount)} of it."
-
-
-class Controller:
-    """Picks the response for each event: the fixed policy, or the local model within the allowed options."""
-
-    def __init__(self, mode: str = "pipeline", llm=None):
-        self.mode, self.llm = mode, llm
-        self.llm_ok = mode == "llm" and llm is not None
-
-    def choose(self, e: Event, sentence: str) -> tuple[str, str]:
-        if len(e.options) == 1:
-            return e.options[0], "rule"
-        if not self.llm_ok:
-            return fixed_policy(e), "pipeline" if self.mode == "pipeline" else "fallback"
-        tools = [{"type": "function", "function": {"name": o, "description": OPTIONS[o],
-                                                   "parameters": {"type": "object", "properties": {}}}}
-                 for o in e.options]
-        brief = json.dumps({"event": sentence, "kind": e.kind, "to_cash_or_crypto": e.is_exit,
-                            "amount_inr": float(e.amount), "time": e.at[11:16]})
-        try:
-            name = self.llm.pick_tool(SYSTEM_PICK, brief, tools)
-        except Exception:
-            self.llm_ok = False                         # the fixed policy decides the rest of this watch
-            return fixed_policy(e), "fallback"
-        return (name, "llm") if name in e.options else (fixed_policy(e), "fallback")
-
-    def alert(self, sentence: str) -> str:
-        if not self.llm_ok:
-            return sentence
-        from pipeline.llm import numbers_are_grounded
-
-        try:
-            text = self.llm.write(SYSTEM_WRITE, sentence)
-        except Exception:
-            return sentence
-        return text if numbers_are_grounded(text, sentence) else sentence
-
-
-def decide(events: list[Event], names: dict[str, str], controller: Controller) -> list[Event]:
-    for e in events:
-        e.options = options_for(e)
-        sentence = describe(e, names.get(e.account_id, e.account_id))
-        choice, e.chosen_by = controller.choose(e, sentence)
-        e.response = {"evidence": "EVIDENCE", "hold": "HELD"}.get(choice, "ALERT")
-        e.alert_text = controller.alert(sentence) if choice.endswith("_and_alert") else None
-    return events
-
-
-# ---------------------------------------------------------------- Exasol
 
 def _d(v) -> Decimal:
     return Decimal(str(v)) if v is not None else Decimal(0)
@@ -240,133 +44,202 @@ def _ts(v) -> str:
     return str(v)[:19]
 
 
-def load_state(conn, bank: str) -> tuple[list[Txn], dict[str, Watched], list[Hold], dict[str, str]]:
-    """What the watch needs from Exasol: watched accounts with their balance at the first hold, the hold timeline,
-    and every later transaction touching them. Holds the watch placed before are left out (it places them again)."""
-    q = lambda sql, **p: conn.execute(sql, {"b": bank, **p}).fetchall()  # noqa: E731
-    rows = q("""
-        SELECT ca.account_id, ca.case_id, r.sim_holds_at, ca.balance_now_inr, ca.band,
-               COALESCE(acc.holder_name, ca.account_id), ca.trail_amount_inr,
-               (SELECT MAX(CASE WHEN x.action_code = 'HOLD_MARKER' THEN 1 ELSE 0 END) FROM PH.CASE_ACTION x
-                 WHERE x.case_id = ca.case_id AND x.viewing_bank_id = ca.viewing_bank_id
-                   AND x.account_id = ca.account_id) AS is_marker,
-               (SELECT MAX(CASE WHEN x.action_code = 'PROPOSE_FULL_FREEZE'
-                                 AND x.action_status IN ('PROPOSED', 'WAITING') THEN 1 ELSE 0 END)
-                  FROM PH.CASE_ACTION x WHERE x.case_id = ca.case_id AND x.viewing_bank_id = ca.viewing_bank_id
-                   AND x.account_id = ca.account_id) AS freeze_waiting,
-               (SELECT COUNT(*) FROM PH.HOLD_LEDGER h WHERE h.case_id = ca.case_id
-                   AND h.viewing_bank_id = ca.viewing_bank_id AND h.account_id = ca.account_id
-                   AND h.placed_by = 'agent' AND h.action_code <> 'WATCH_HOLD') AS agent_holds
-        FROM PH.CASE_ACCOUNT ca
-        JOIN PH.TICKET t ON t.case_id = ca.case_id
-        JOIN PH.AGENT_RUN r ON r.run_id = t.run_id AND r.run_status = 'DONE'
-        LEFT JOIN PH.ACCOUNT acc ON acc.account_id = ca.account_id
-        WHERE ca.viewing_bank_id = {b} AND ca.is_own_bank AND NOT ca.is_exit
-        ORDER BY r.sim_holds_at, ca.case_id""")
-    watched: dict[str, Watched] = {}
-    names: dict[str, str] = {}
-    for acc, case, since, bal, band, name, trail, is_marker, freeze, agent_holds in rows:
-        names[acc] = name
-        if not (int(agent_holds or 0) or int(freeze or 0)):
-            continue
-        w = watched.get(acc)
-        if w is None:
-            w = watched[acc] = Watched(acc, name, _ts(since), _d(bal), False)
-        w.cases.append(case)
-        w.mule_like |= band in ("MULE", "REVIEW") or bool(int(freeze or 0))
-        if int(is_marker or 0):
-            w.marker_cap += _d(trail)
-    holds = [Hold(a, _ts(p), _d(amt), kind, _ts(end) if end else None) for a, p, amt, kind, end in q("""
-        SELECT h.account_id, h.placed_at, h.amount_inr, h.hold_kind, n.placed_at AS ended_at
-        FROM PH.HOLD_LEDGER h LEFT JOIN PH.HOLD_LEDGER n ON n.hold_id = h.replaced_by
-        WHERE h.viewing_bank_id = {b} AND h.action_code <> 'WATCH_HOLD' AND h.hold_kind <> 'MARKER'""")]
-    if not watched:
-        return [], watched, holds, names
-    start = min(w.since for w in watched.values())
-    txns = [Txn(i, _ts(ts), f, to, _d(amt), ch, bool(ex), ident) for i, ts, f, to, amt, ch, ex, ident in q("""
-        SELECT txn_id, ts, from_account, to_account, amount_inr, channel, is_exit, exit_identifier
-        FROM PH.TXN
-        WHERE ts > TO_TIMESTAMP({s}, 'YYYY-MM-DD HH24:MI:SS')
-          AND (from_account IN ({accs}) OR to_account IN ({accs}))""", s=start, accs=list(watched))]
-    # Accounts outside the trails are named only by their bank: a payer may be a victim whose ticket has not
-    # arrived yet, and victims' details stay off the bank's screens (SOP 9.1(ii)).
-    others = ({t.from_account for t in txns} | {t.to_account for t in txns}) - set(names)
-    for a, b, own in q("SELECT a.account_id, COALESCE(b.bank_name, a.bank_id), b.is_own_bank FROM PH.ACCOUNT a "
-                       "LEFT JOIN PH.BANK b ON b.bank_id = a.bank_id WHERE a.account_id IN ({a})",
-                       a=list(others) or ["-"]):
-        names[a] = counterparty_label(b, bool(own))
-    return txns, watched, holds, names
+class Watch:
+    def __init__(self, maker, checker, bank: str):
+        from pipeline.checker import Checker
 
+        self.maker, self.bank = maker, bank
+        self.checker = Checker(checker, bank)
 
-def counterparty_label(bank_name: str, own_bank: bool) -> str:
-    return "another account at this bank" if own_bank else f"an account at {bank_name}"
+    def _q(self, sql: str, **p):
+        return self.maker.execute(sql, {"b": self.bank, **p})
 
+    def name(self, account: str) -> str:
+        return self._q("SELECT COALESCE(holder_name, account_id) FROM ACCOUNT WHERE account_id = {a}",
+                       a=account).fetchval() or account
 
-def save(conn, bank: str, events: list[Event]) -> None:
-    conn.execute("DELETE FROM PH.WATCH_EVENT WHERE viewing_bank_id = {b}", {"b": bank})
-    conn.execute("DELETE FROM PH.HOLD_LEDGER WHERE viewing_bank_id = {b} AND action_code = 'WATCH_HOLD'", {"b": bank})
-    for e in events:
+    def entries(self, account: str) -> list[dict]:
+        rows = self._q("SELECT case_id, first_pass, reported_inr, added_at FROM WATCH_LIST WHERE account_id = {a} "
+                       "AND left_at IS NULL ORDER BY added_at, case_id", a=account).fetchall()
+        return [{"case_id": c, "first_pass": f, "reported": _d(r), "added_at": _ts(t)} for c, f, r, t in rows]
+
+    def event(self, account: str, case_id: str | None, at: str, kind: str, sentence: str, amount=None,
+              counterparty: str | None = None, channel: str | None = None, ref: str | None = None,
+              attempt_id: int | None = None, proposal_id: int | None = None) -> None:
         hold_id = None
-        if e.kind == "MARKER_HOLD" and e.hold_amount > 0:
-            case = e.cases[0]
-            conn.execute(
-                "INSERT INTO PH.HOLD_LEDGER (case_id, viewing_bank_id, account_id, hold_kind, amount_inr, placed_at, "
-                "placed_by, hold_status, action_code, reason_text, stmt_id) SELECT {c}, {b}, {a}, 'LIEN', {amt!d}, "
-                "TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS'), 'agent', 'ACTIVE', 'WATCH_HOLD', {why}, CURRENT_STATEMENT",
-                {"c": case, "b": bank, "a": e.account_id, "amt": str(e.hold_amount), "t": e.at,
-                 "why": f"Marker caught a later credit ({e.txn_id})"})
-            hold_id = conn.execute("SELECT MAX(hold_id) FROM PH.HOLD_LEDGER WHERE viewing_bank_id = {b} "
-                                   "AND action_code = 'WATCH_HOLD'", {"b": bank}).fetchval()
-        conn.execute(
-            "INSERT INTO PH.WATCH_EVENT (viewing_bank_id, account_id, txn_id, event_at, event_kind, amount_inr, "
-            "counterparty, channel, held_inr, balance_inr, case_ids, response, allowed_responses, chosen_by, "
-            "alert_text, hold_id, stmt_id) "
-            "SELECT {b}, {a}, {tx}, TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS'), {k}, {amt!d}, {cp}, {ch}, "
-            "{held!d}, {bal!d}, {cases}, {r}, {opts}, {by}, {alert}, {hid}, CURRENT_STATEMENT",
-            {"b": bank, "a": e.account_id, "tx": e.txn_id, "t": e.at, "k": e.kind, "amt": str(e.amount),
-             "cp": e.counterparty[:200], "ch": e.channel, "held": str(e.held), "bal": str(e.balance),
-             "cases": ",".join(e.cases)[:400], "r": e.response, "opts": ",".join(e.options), "by": e.chosen_by,
-             "alert": e.alert_text, "hid": None if hold_id is None else str(int(hold_id))})
+        if proposal_id:
+            hold_id = self._q("SELECT MAX(hold_id) FROM HOLD_LEDGER WHERE proposal_id = {p!d}",
+                              p=str(proposal_id)).fetchval()
+        self._q("INSERT INTO WATCH_EVENT (viewing_bank_id, account_id, case_id, event_at, event_kind, amount_inr, "
+                "counterparty, channel, txn_ref, attempt_id, hold_id, proposal_id, sentence, stmt_id) VALUES "
+                "({b}, {a}, {c}, TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS'), {k}, {amt}, {cp}, {ch}, {ref}, {att}, "
+                "{h}, {p}, {s}, CURRENT_STATEMENT)",
+                a=account, c=case_id, t=at, k=kind, amt=None if amount is None else str(amount),
+                cp=(counterparty or "")[:200] or None, ch=channel, ref=ref,
+                att=None if attempt_id is None else str(int(attempt_id)),
+                h=None if hold_id is None else str(int(hold_id)),
+                p=None if proposal_id is None else str(int(proposal_id)), s=sentence[:1000])
 
+    def counterparty(self, account: str | None) -> str:
+        if not account:
+            return "another account"
+        row = self._q("SELECT a.bank_id, b.bank_name, b.is_own_bank FROM ACCOUNT a LEFT JOIN BANK b "
+                      "ON b.bank_id = a.bank_id WHERE a.account_id = {a}", a=account).fetchone()
+        if not row:
+            return "an account at another bank"
+        return f"{self.name(account)} (this bank)" if row[2] else f"an account at {row[1] or row[0]}"
 
-def run_watch(conn, bank: str, mode: str = "pipeline", llm=None) -> dict:
-    """Replay the watch over every worked ticket and store what the agent saw and did."""
-    if mode == "llm" and llm is None:
-        from pipeline.llm import client
+    # ------------------------------------------------------------ new money
+    def on_credit(self, account: str, txn_id: str, at: str, amount: Decimal, payer: str) -> list[str]:
+        out = []
+        for w in self.entries(account):
+            if at <= w["added_at"]:
+                continue
+            name, when = self.name(account), at[11:16]
+            if w["first_pass"] == "MULE_LIKE":
+                room = w["reported"] - self.checker.held(account, w["case_id"])
+                take = min(amount, max(room, Decimal(0)))
+                if take > 0:
+                    pid = propose(self.maker, w["case_id"], account, "WATCH_HOLD", "AUTOMATIC", take, "watch", at,
+                                  {"trigger": "watch", "source_txn_id": txn_id, "room": str(room)})
+                    r = self.checker.process(None, at, [pid])
+                    sentence = (f"{when}: {name} received {inr(amount)}; {inr(take)} held under the existing notice, "
+                                f"tagged not linked to a reported victim yet (under the lowest-balance rule it is "
+                                f"not the first victim's money)." if r["done"] else
+                                f"{when}: {name} received {inr(amount)}; the checker refused to hold it ({r['text']}).")
+                    self.event(account, w["case_id"], at, "NEW_MONEY_HELD", sentence, amount, self.counterparty(payer),
+                               ref=txn_id, proposal_id=pid)
+                    out.append(sentence)
+                if amount > take:
+                    sentence = (f"{when}: {name} received {inr(amount)}; {inr(amount - take)} of it is above what the "
+                                f"notice covers, so it is not held. For the officer: one line, no decision needed.")
+                    self.event(account, w["case_id"], at, "NEW_MONEY_ABOVE_NOTICE", sentence, amount - take,
+                               self.counterparty(payer), ref=txn_id)
+                    out.append(sentence)
+                break                              # one case's notice catches it; the next case's would double it
+            if w["first_pass"] == "HONEST":
+                sentence = (f"{when}: {name} received {inr(amount)}: not held. It arrived after the victim's money "
+                            f"left (lowest-balance rule), so it is the holder's own.")
+                self.event(account, w["case_id"], at, "NEW_MONEY_HONEST", sentence, amount, self.counterparty(payer),
+                           ref=txn_id)
+                out.append(sentence)
+                break
+        return out
 
-        llm = client()
-    txns, watched, holds, names = load_state(conn, bank)
-    events = decide(replay(txns, watched, holds, names), names, Controller(mode, llm))
-    save(conn, bank, events)
-    count = lambda k: sum(1 for e in events if e.kind == k)  # noqa: E731
-    return {"watched": len(watched), "events": len(events), "blocked": count("BLOCKED"),
-            "new_money": count("NEW_MONEY"), "moved": count("MOVED"), "caught": count("MARKER_HOLD"),
-            "alerts": sum(1 for e in events if e.response == "ALERT")}
+    def on_debit(self, account: str, txn_id: str, at: str, amount: Decimal, to_account: str, channel: str,
+                 exit_identifier: str | None) -> list[str]:
+        """A debit that went through (the money above the hold was free): evidence on a mule-like account."""
+        mule = [w for w in self.entries(account) if w["first_pass"] == "MULE_LIKE" and at > w["added_at"]]
+        if not mule:
+            return []
+        where = exit_identifier or self.counterparty(to_account)
+        sentence = f"{at[11:16]}: {self.name(account)} moved {inr(amount)} that was not held, to {where}."
+        self.event(account, mule[0]["case_id"], at, "MOVED", sentence, amount, where, channel, txn_id)
+        return [sentence]
 
+    # ------------------------------------------------------------ refused attempts
+    def on_declined(self, a: dict) -> list[str]:
+        account, at = a["account_id"], a["at"]
+        ws = [w for w in self.entries(account) if at > w["added_at"]]
+        name, when = self.name(account), at[11:16]
+        case = ws[0]["case_id"] if ws else None
+        mule = next((w for w in ws if w["first_pass"] == "MULE_LIKE"), None)
+        out = []
+        if a["channel"] in CASH_OUT or a["is_exit"]:
+            where = f"at {a['exit_identifier']}" if a.get("exit_identifier") else f"by {a['channel']}"
+            sentence = f"{when}: {name} tried to withdraw {inr(a['amount'])} {where}; the hold refused it."
+            pid = None
+            if mule:
+                from pipeline import reasons
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["pipeline", "llm"], default="pipeline")
-    ap.add_argument("--bank")
-    args = ap.parse_args(argv)
-    from pipeline.db import connect, settings
+                balance = self.checker.balance_at(account, at)
+                held = self.checker.held(account)
+                r = reasons.structured(self.maker, mule["case_id"], account, "PROPOSE_FULL_FREEZE",
+                                       {"balance": balance, "held": held})
+                pid = propose(self.maker, mule["case_id"], account, "PROPOSE_FULL_FREEZE", "OFFICER", balance,
+                              "watch", at, {**r, "trigger": "watch", "attempt_id": a["attempt_id"]},
+                              reasons.template(r))
+                res = self.checker.process(None, at, [pid])
+                sentence += (" A full freeze is proposed: the officer decides." if res["waiting"] else
+                             f" No new freeze proposal ({res['text']}).")
+            self.event(account, case, at, "CASHOUT_BLOCKED", sentence, a["amount"], a.get("exit_identifier"),
+                       a["channel"], a["ref"], a["attempt_id"], pid)
+            return [sentence]
+        to, to_bank = a.get("to_account"), a.get("to_bank_id")
+        sentence = (f"{when}: {name} tried to send {inr(a['amount'])} by {a['channel']} to "
+                    f"{self.counterparty(to)}; the hold refused it.")
+        self.event(account, case, at, "TRANSFER_BLOCKED", sentence, a["amount"], self.counterparty(to), a["channel"],
+                   a["ref"], a["attempt_id"])
+        out.append(sentence)
+        if to_bank == self.bank and to:
+            out += self.check_recipient(to, case, at, a)
+        elif to:
+            bank = self._q("SELECT bank_name FROM BANK WHERE bank_id = {t}", t=to_bank).fetchval() or "another bank"
+            s2 = (f"The account it tried to pay is at {bank}: recorded in the case for the police (this bank cannot "
+                  f"look at another bank's accounts).")
+            self.event(account, case, at, "RECIPIENT_OTHER_BANK", s2, a["amount"], f"an account at {bank}",
+                       a["channel"], a["ref"], a["attempt_id"])
+            out.append(s2)
+        return out
 
-    bank = args.bank or settings()["own_bank_id"]
-    conn = connect()
-    try:
-        r = run_watch(conn, bank, args.mode)
-        print(f"watched {r['watched']} accounts: {r['events']} events, {r['blocked']} refused, "
-              f"{r['new_money']} new money, {r['moved']} moved, {r['caught']} caught; {r['alerts']} alerts")
-        for at, kind, name, amount, resp, by, alert in conn.execute(
-                "SELECT w.event_at, w.event_kind, COALESCE(a.holder_name, w.account_id), w.amount_inr, w.response, "
-                "w.chosen_by, w.alert_text FROM PH.WATCH_EVENT w LEFT JOIN PH.ACCOUNT a ON a.account_id = w.account_id "
-                "WHERE w.viewing_bank_id = {b} ORDER BY w.event_at, w.event_id", {"b": bank}).fetchall():
-            print(f"  {str(at)[:16]}  {kind:11} {name[:26]:26} {inr(amount):>12}  {resp:8} [{by}]"
-                  + (f"  alert: {alert}" if alert else ""))
-    finally:
-        conn.close()
-    return 0
+    def check_recipient(self, recipient: str, case: str | None, at: str, a: dict) -> list[str]:
+        """The agent decides by itself to look at an account no ticket named: its evidence, then the watch, no hold."""
+        from pipeline import steps
+        from pipeline.reasons import cross_ticket
 
+        acc = self._q("SELECT holder_type, account_type FROM ACCOUNT WHERE account_id = {a} AND bank_id = {b}",
+                      a=recipient).fetchone()
+        name = self.name(recipient)
+        if acc and (acc[0] in BUSINESS or acc[1] in ("nodal", "pool", "escrow")):
+            s = (f"{name} is a business account at this bank: noted in the case, not labelled and not watched "
+                 f"(businesses receive from many payers).")
+            self.event(recipient, case, at, "RECIPIENT_BUSINESS", s, a["amount"], self.name(a["account_id"]),
+                       a["channel"], a["ref"], a["attempt_id"])
+            return [s]
+        key = f"WATCH:{recipient}"
+        self._q("DELETE FROM SCORE_TARGET WHERE case_id = {k}", k=key)
+        self._q("INSERT INTO SCORE_TARGET (case_id, account_id) VALUES ({k}, {a})", k=key, a=recipient)
+        steps.score(self.maker, key, self.bank, at, targets=False)
+        band = self._q("SELECT band FROM ACCOUNT_SCORE WHERE case_id = {k} AND account_id = {a}", k=key,
+                       a=recipient).fetchval()
+        lines = cross_ticket(self.maker, recipient)
+        words = {"MULE": "a pass-through pattern", "REVIEW": "a mixed pattern",
+                 "HONEST": "an ordinary customer's pattern"}.get(band or "", "no history to read")
+        evidence = f"its 90-day history shows {words}." + ((" " + " ".join(lines)) if lines else "")
+        pid = propose(self.maker, case or key, recipient, "WATCH_ADD", "AUTOMATIC", None, "watch", at,
+                      {"trigger": "watch", "band": band, "why": f"Named by a refused transfer from "
+                                                                 f"{self.name(a['account_id'])}; " + evidence})
+        res = self.checker.process(None, at, [pid])
+        s = (f"The account it tried to pay, {name}, is at this bank: {evidence} "
+             + ("It is on the watch now, with no hold: no victim money reached it." if res["done"] else
+                f"Not added to the watch ({res['text']})."))
+        self.event(recipient, case, at, "RECIPIENT_WATCHED", s, a["amount"], self.name(a["account_id"]),
+                   a["channel"], a["ref"], a["attempt_id"], pid)
+        return [s]
 
-if __name__ == "__main__":
-    sys.exit(main())
+    # ------------------------------------------------------------ day 75
+    def tick(self, now: str) -> list[str]:
+        """Accounts on the watch for 75 days with no police direction: leave the watch, one release flag each."""
+        cutoff = (datetime.strptime(now[:19], FMT) - timedelta(days=RELEASE_DAYS)).strftime(FMT)
+        out = []
+        for acc, case, added in self._q(
+                "SELECT w.account_id, w.case_id, w.added_at FROM WATCH_LIST w WHERE w.left_at IS NULL "
+                "AND w.added_at <= TO_TIMESTAMP({c}, 'YYYY-MM-DD HH24:MI:SS') "
+                "AND NOT EXISTS (SELECT 1 FROM CASE_LINK l WHERE l.case_id = w.case_id "
+                "AND l.link_kind = 'POLICE_CONFIRMED') ORDER BY w.added_at", c=cutoff).fetchall():
+            held = self.checker.held(acc, case)
+            if held <= 0:
+                continue
+            from pipeline import reasons
+
+            lines = [f"The account has been on the watch since {_ts(added)[:10]} and no police direction has "
+                     f"confirmed the hold."]
+            r = reasons.structured(self.maker, case, acc, "PROPOSE_RELEASE", {"held": held, "lines": lines})
+            pid = propose(self.maker, case, acc, "PROPOSE_RELEASE", "OFFICER", held, "watch", now,
+                          {**r, "trigger": "day_75"}, reasons.template(r))
+            self.checker.process(None, now, [pid])
+            s = (f"{self.name(acc)}: {RELEASE_DAYS} days on the watch with no police direction; it leaves the watch "
+                 f"and a release decision waits for the officer.")
+            self.event(acc, case, now, "RELEASE_FLAGGED", s, held, proposal_id=pid)
+            out.append(s)
+        return out

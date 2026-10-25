@@ -1,6 +1,6 @@
 """AT-05 (oracle side): every victim's money is accounted for, to the paisa, under every rule.
 
-held in accounts + gone through exits == amount the victim reported, for all 21 victims,
+held in accounts + gone through exits == amount the victim reported, for all 23 victims,
 plus property tests on random small graphs (Hypothesis).
 """
 import pytest
@@ -14,9 +14,10 @@ from tests.oracle import CLEAN, RULES, Txn, replay
 demo, extra, loop = load_case(DEMO_CASE), load_case(EXTRA_CASES), load_case(LOOP_CASE)
 
 
-def test_there_are_21_victims():
+def test_there_are_23_victims():
+    # the demo night's three (Lakshmi, Meena, Ravi; the investigating officer's notice repeats Lakshmi's) and 20 more
     victims = {c["victim_tag"] for c in demo.complaints + extra.complaints}
-    assert len(victims) == 21
+    assert len(victims) == 23
 
 
 @pytest.mark.parametrize("rule", RULES)

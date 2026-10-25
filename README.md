@@ -1,13 +1,15 @@
 # Proportionate Holds
 
-A golden-hour copilot for the bank nodal officer. When a cyber-fraud ticket reaches the bank, at any hour, an agent
-works it at once: it follows the victim's money through the bank, works out how much of each account is really the
-victim's, places the holds the rules require (amount only), files the onward entries and exits, and leaves the
-officer a short list of judgment calls, each sized to the victim's share and written up with its reasons.
+A bank-side agent that works every cyber-fraud ticket the moment it lands, at any hour: it checks the ticket against
+the bank's transactions, follows the victim's money through the bank, works out how much of each account is really
+the victim's, has the holds the rules require placed (amount only), files the onward entries, exits and KYC packets,
+and keeps watching the accounts it touched. The bank nodal officer handles four kinds of exception only, each sized
+to the victim's share and written up with its reasons and the case against.
 
 Built for **ExaThon India 2026** (Track 01: Money, Risk & Regulation). Every number is computed in
 **Exasol Personal**: the trace (`CONNECT BY NOCYCLE`), the victim's share (a Python UDF), the account evidence, the
-rules engine, the checker, the hold ledger and the "today's desk" replay. The agent only orders the tools.
+rules engine, the checker's checks, the hold ledger and the "today's desk" replay, and every number on screen
+traces to an Exasol statement ID. The agent only orders the tools and proposes.
 
 ## Problem statement
 
@@ -31,15 +33,27 @@ open at 10:00, by which time two accounts have cashed out and the desk freezes a
 | Victim's money held | ₹500 | ₹80,000 |
 | Honest money locked | ₹8,19,500 (Murugan's whole account) | ₹500 overnight, ₹0 after the officer narrows it |
 | Ticket to first action | 8 h 7 min | 3 min |
-| Bank Y gets its onward ticket | 10:35 | 02:16 |
+| Bank Y gets its onward ticket | 10:35 | 02:17, and its own agent holds ₹40,000 on B |
 
-At 9 a.m. the officer sees what was done overnight and three decisions waiting: narrow Murugan's hold to the ₹500
-that is traceable to the victim, and whole-account freezes proposed (never placed) for two mule-like accounts.
+The night goes on. At 03:20 a ticket arrives with a UTR one digit off: nothing is held, it goes back to the police at
+once, and the near match waits for the officer. At 04:30 account C tries an ATM; the hold refuses it and the watch
+proposes a full freeze. At 04:31 C tries to send the money to E at the same bank; refused, and E goes on the watch
+with no hold. At 05:45 a second victim's money lands on A and is held as "not linked to a reported victim yet"; at
+06:00 that victim's ticket arrives and the held money is linked to them, the total unchanged. At 07:30 a customer
+pays Murugan for diesel: not held, and the log says why. Bank Z, which has no agent, opens its desk at 10:00 and
+finds G already emptied at 03:40.
 
-**The agent orchestrates, the database calculates, the rules permit, the officer decides.** The agent can place
-only the holds the bank is required to place; a deterministic checker (conservation to the paisa, policy rules) must
-pass first; there is no full-freeze tool. An optional local model can choose the order of the tools and word the
-summary, and the fixed order takes over whenever it fails ([DESIGN.md](docs/DESIGN.md#where-ai-fits)).
+At 9 a.m. Bank X's officer sees two lists: everything done automatically overnight, and three decisions: narrow
+Murugan's hold to the ₹500 traceable to the victim, a full freeze on C (proposed, never placed), and the unmatched
+ticket.
+
+**The agent proposes, the checker acts, the officer decides four things.** The maker (the agent, optionally led by
+a local model) has no tool that changes data: it writes proposals. A deterministic checker, with its own database
+user, validates each one against the rules engine and the checks (conservation to the paisa, holds within balance,
+trail and report) and only then holds, files or routes it. The officer decides only: narrow a hold, widen it to a
+full freeze, accept or leave an unmatched notice, release after 75 days on the watch. Each bank has its own schema
+and users and cannot read another bank's data; the simulated portal is the only link between them
+([DESIGN.md](docs/DESIGN.md)).
 
 ## Data is synthetic
 
@@ -71,17 +85,21 @@ launcher offers Podman). Python 3.11+, Node 20.19+ or 22.12+ for the console. No
 
 ```sh
 make setup            # exasol launcher, `exasol install local`, `exasol slc install python3` (macOS/Linux)
-# copy host:port (and fingerprint, if shown) from `exasol info` into .env (start from .env.example)
+cp .env.example .env  # fill EXA_DSN (and fingerprint, if shown) from `exasol info`; pick a PH_ROLE_PASSWORD
+make db               # schemas PH_X, PH_Y, PH_Z (one per bank), PH_PORTAL, and the maker/checker/portal users
+make seed             # each bank gets only its own accounts and transactions; the tickets wait on the portal
 make doctor           # every check should say PASS
-make check-db         # builds schema PH, loads the cases, runs the database tests (incl. the 2:13 a.m. run)
+make night            # the demo night across the three banks, to 09:00
+make check-db         # every database test (it resets the data: run `make night` again afterwards)
 ```
 
 Without `make` (Windows PowerShell), the same steps are:
 
 ```sh
+python -m pipeline.run_sql                  # schemas, users and grants
+python -m pipeline.load_cases --verify      # the synthetic world, cut into each bank's share
 python -m pipeline.doctor
-python -m pipeline.run_sql sql              # build schema PH
-python -m pipeline.load_cases --verify      # load the cases; every ticket QUEUED
+python -m pipeline.night                    # reset, then run the night to 09:00
 python -m pytest -q -m db
 ```
 
@@ -92,11 +110,12 @@ Don't open and re-save them in Excel: it drops the leading zeros of the bank cod
 
 ```sh
 python -m pipeline.load_amlworld --check    # files present and shaped as expected (no database)
-make data                                   # or: python -m pipeline.load_amlworld
-                                            #     python -m pipeline.load_cases --verify
+make data                                   # imports into PH_AML once, then gives each bank its share
+make lab                                    # trace and scoring tests on the labelled patterns (PH_LAB)
 ```
 
-The import runs once into schema `PH_AML`; `make db`, `make demo-reset` and the console's Reset keep it.
+Each AMLworld bank becomes a branch of Bank X, Y or Z, and each bank's schema gets only the AMLworld rows touching
+its own branches. The import into `PH_AML` runs once; `make seed` and the console's Reset keep it.
 
 Exasol Personal is used under its EULA and is not redistributed here; the `exasol` launcher is MIT.
 
@@ -107,51 +126,76 @@ python -m app.api                                     # API on http://127.0.0.1:
 cd app/web && npm install && npm run dev              # console on http://localhost:5173
 ```
 
-In the console, **Review** opens with what the agent already did and a band of before/after figures for the day.
-*Replay the day* (demo controls, bottom of the page) lets the agent work every queued ticket. The decisions are
-grouped by account: honest customers whose hold can be cut to the victim's share, and mule accounts that could be
-frozen whole (one approval covers every ticket that names the account). Open a ticket to see where the money went,
-hop by hop, with the account's evidence and your buttons on the right; the agent's log (every tool call with its
-Exasol statement IDs) and the paperwork are below. **Before / after** replays today's manual process on the same
-ticket, or the whole day. *Reset* puts every ticket back in the queue.
+The console is Bank X's nodal desk. **This morning** has the two lists: done automatically overnight (the morning
+log, every ticket worked, what the watch saw) and waiting for you (the four decisions only, each with its reasons,
+the case against, its fixed legal citation and the agent's draft for you to sign). The demo controls at the bottom
+replay the night to 09:00, continue it to 10:30 so Bank Z's desk opens, or reset. Every account opens a **hold
+record**: the notice, the path, the lowest-balance steps, the rule, who decided, every change and the Exasol
+statement behind each number, also as a text file to attach. **The whole night** is the narrator's view across all
+three banks, captioned "Narrator's view: no single bank sees this."; no bank's user can produce it.
 
 From a terminal instead:
 
 ```sh
-python -m pipeline.agent CASE_DEMO                    # the agent works the 2:13 a.m. ticket and prints its log
-python -m pipeline.officer waiting                    # what is waiting for the officer
-python -m pipeline.officer approve CASE_DEMO ACC_D PROPOSE_NARROW --officer priya
+python -m pipeline.night                              # reset, run the night to 09:00, print what happened where
+python -m pipeline.night --until "2026-10-18 10:30:00" --no-reset     # Bank Z's desk opens at 10
+python -m pipeline.officer waiting                    # what waits for Bank X's officer (approve/reject <id>)
+python -m pipeline.record ACC_A                       # the hold record for one account
 python -m pipeline.today CASE_DEMO                    # today's desk vs the agent, as JSON
 ```
 
 **Optional local model** (free, offline): install [Ollama](https://ollama.com), `ollama pull qwen2.5:7b`, set
-`PH_LLM=ollama` in `.env`, then `python -m pipeline.agent CASE_DEMO --mode llm` (or *With the model* in the ticket
-queue). The holds come out the same; the log shows which tool the model chose at each step.
+`PH_LLM=ollama` in `.env`, then `python -m pipeline.night --mode llm`. The model chooses the order of the agent's
+tools and words the narrow and freeze reasons and the morning log; every sentence must cite the reasons it uses and
+repeat no number it was not given, or the fixed template is used. The holds come out the same with the model off.
 
 ## Repository
 
 ```
-config/      rules.yaml (automatic vs officer, legal bases), scoring.yaml (signals), banks.yaml, mcp_settings.json
-data/        demo_case.yaml (the 2:13 a.m. ticket), extra_cases.yaml (generated, seed 42), loop_case.yaml
-sql/         schema and views (make db); sql/steps/ the agent's tools, run inside Exasol
-pipeline/    agent.py (the agent), steps.py, officer.py, today.py (Compare), llm.py (optional local model),
-             loaders, generators, doctor
+config/      rules.yaml (automatic actions, the four officer decisions, legal bases), scoring.yaml, banks.yaml
+data/        demo_case.yaml (the night), extra_cases.yaml (generated, seed 42), loop_case.yaml
+sql/bank/    one bank's schema and views (run once per bank); sql/portal/ the simulated CFCFRMS;
+             sql/steps/ the agent's analysis tools and the checker's actions, run inside Exasol;
+             sql/amlworld/, sql/lab/ the AMLworld import and tests
+pipeline/    agent.py (the maker), checker.py, night.py (the simulation), portal.py, core.py (simulated core
+             banking), watch.py, recalc.py, reasons.py, record.py, morning.py, narrator.py, users.py, loaders
 app/api/     FastAPI service the console talks to
 app/web/     officer console (React + Vite)
 tests/       oracles (attribution, scoring, rules) and their tests; -m db tests run against Exasol
 docs/        PROBLEM_STATEMENT.md, PROBLEM_DISCOVERY.md, DESIGN.md, DECISIONS.md, REQUIREMENTS.md (first spec)
 ```
 
+## Assumptions
+
+Stated as assumptions, not as how banks work. Each one is a question for anyone who has worked a bank fraud desk.
+
+- CFCFRMS, core banking and the other banks are simulated, and the demo says so. The portal turns an onward entry
+  into the next bank's ticket within a minute.
+- Murugan's account is at the same bank as account A.
+- A hop to another account in the same bank is handled in the same pass, not as a fresh ticket.
+- Declined ATM and UPI attempts reach Exasol within minutes. In a real bank they come from the card or UPI switch or
+  the fraud-monitoring system.
+- A hold larger than the balance catches later credits until it is filled (bank practice varies). Here the watch
+  holds new money on a mule-like account up to the amount the notice reported.
+- An investigating officer's notice after an FIR can repeat a transaction already ticketed on the portal; it is
+  linked to the first case, not held twice.
+- The split between several victims is a record for the refund stage. The investigating officer decides the actual
+  payout.
+- AMLworld is synthetic and labels laundering, not cyber-fraud mule accounts.
+- The scoring weights are hand-set (unless the AMLworld scoring test runs).
+- The model runs locally, so account data doesn't leave the bank.
+- Bank Z works tickets by hand: its desk opens at 10:00 and takes about 20 minutes for a ticket. Today's desk in
+  Before / after is the same kind of stated model (desk hours, lookup times, whole-account freezes), not a
+  measurement.
+- AMLworld amounts are converted at the dataset's own exchange rates and ₹95 per US dollar.
+
 ## Limits
 
 - The tool cannot make victims report faster or skip police checks, FIRs or court orders.
-- A real bank sees only its own accounts; other banks' hops arrive via CFCFRMS. The demo simulates that boundary
-  with a shared synthetic dataset, and the next bank's outcome depends on how that bank works its ticket.
+- A real bank sees only its own accounts. Here each bank's schema holds only its own rows and its users cannot read
+  another bank's, but all three banks run on one Exasol Personal for the demo.
 - Cash already withdrawn is gone; the tool records where it left.
-- Today's desk in Compare is a stated model (desk hours, lookup times, whole-account freezes), not a measurement.
-- Scoring weights are hand-set for the demo, not validated on real data; they inform the rules and are never shown
-  as a verdict.
-- Releasing a mandatory hold, notices to holders and the refund stage are out of scope.
+- Releasing a mandatory hold without the officer, the refund stage and court orders are out of scope.
 
 ## Licence
 

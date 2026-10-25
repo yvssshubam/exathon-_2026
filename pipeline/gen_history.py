@@ -9,7 +9,7 @@ Two shapes, chosen by each account's `history` field in the case files:
                         supplier once a day in the evening (Murugan's pump, the extra merchants)
   fast_pass_through     a handful of large credits from a few payers, sent on within minutes, often as cash
                         (A, B, C and the generated mules); only after the account was opened
-Counterparties that are not case accounts are named EXT_... and are not rows in PH.ACCOUNT.
+Counterparties that are not case accounts are named EXT_... and are not rows in any bank's ACCOUNT table.
 """
 from __future__ import annotations
 

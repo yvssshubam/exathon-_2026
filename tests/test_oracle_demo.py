@@ -13,9 +13,12 @@ def test_case_file_is_the_2_13_am_story():
     assert case.complaints[0]["reported_at"] == "2026-10-18 02:13:00"
     assert case.tool_as_of == "2026-10-18 02:16:00"
     assert case.complaints[0]["utr"] == "IMPS2026101801520001"
-    assert case.opening_paise() == {"ACC_A": 0, "ACC_B": 0, "ACC_C": 50000, "ACC_D": 81900000}
+    assert case.opening_paise() == {"ACC_A": 0, "ACC_B": 0, "ACC_C": 50000, "ACC_D": 81900000, "ACC_E": 0,
+                                    "ACC_K": 0, "ACC_G": 0, "ACC_F": 0}
     assert case.account("ACC_D")["bank_id"] == "BANK_X"          # Murugan banks where the tool runs
     assert case.account("ACC_B")["bank_id"] == "BANK_Y"          # the onward entry goes to Bank Y
+    assert case.account("ACC_G")["bank_id"] == "BANK_Z"          # and Bank Y's goes to Bank Z
+    assert [c["case_id"] for c in case.police_tickets()] == ["CASE_DEMO", "CASE_BADUTR", "CASE_DEMO_V2", "CASE_DEMO_IO"]
 
 
 @pytest.mark.parametrize("account", ["ACC_A", "ACC_B", "ACC_C", "ACC_D", "EXIT:ATM:BX-ATM-0042"])
@@ -41,12 +44,26 @@ def test_tool_holds_80000_of_the_victims_money_at_bank_x():
     assert held == paise(case.expected_compare["victim_money_held"]["tool"])
 
 
-def test_by_the_time_the_desk_opens_a_and_c_are_empty():
+def test_by_the_time_the_desks_open_the_victims_money_is_gone():
+    """With nobody acting (today): what is left of Lakshmi's money when the desks open at 10."""
     at_desk = run(case, "LIBR", "2026-10-18 10:20:00")
-    assert at_desk.tainted("ACC_A") == at_desk.tainted("ACC_C") == 0
+    assert at_desk.tainted("ACC_A", VICTIM) == at_desk.tainted("ACC_C", VICTIM) == 0
+    assert at_desk.tainted("ACC_A", "V_RAVI") == paise(40000)                 # only victim 2's money is in A
     assert at_desk.tainted("EXIT:ATM:BX-ATM-0117") == paise(29500)          # C at 04:30
-    assert at_desk.tainted("EXIT:CRYPTO:0x5e1d0a77c3") == paise(50000)       # A at 05:10
-    assert at_desk.tainted("ACC_D", VICTIM) == paise(500)                     # the only victim money left here
+    assert at_desk.tainted("ACC_F", VICTIM) == paise(50000)                  # A sent it to Bank Z at 05:10
+    assert at_desk.tainted("EXIT:ATM:BY-ATM-0221", VICTIM) == paise(40000)   # B cashed out at Bank Y at 07:00
+    assert at_desk.tainted("EXIT:ATM:BZ-ATM-0310", VICTIM) == paise(30000)   # G cashed out at Bank Z at 03:40
+    assert at_desk.tainted("ACC_D", VICTIM) == paise(500)                     # the only victim money left in a bank
+
+
+def test_bank_x_sees_only_its_own_accounts():
+    from pipeline.cases import bank_view
+
+    x = run(bank_view(case, "BANK_X"), "LIBR", AS_OF)
+    for account, rupees in case.expected_libr_bank_x.items():
+        if account != "total":
+            assert x.tainted(account, VICTIM) == paise(rupees), account
+    assert x.tainted("ACC_G", VICTIM) == 0                                   # Bank X never sees B's hop to G
 
 
 def test_fifo_equals_libr_on_demo_case():

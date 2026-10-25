@@ -2,7 +2,7 @@
 The SQL (070_actions.sql, 075_check.sql) is compared with the same oracle in tests/test_db_agent.py."""
 import pytest
 
-from pipeline.cases import DEMO_CASE, EXTRA_CASES, load_case, paise
+from pipeline.cases import DEMO_CASE, EXTRA_CASES, bank_view, load_case, paise
 from pipeline.load_cases import CASE_FILES, rows_for
 from pipeline.steps import default_as_of
 from tests.rules_oracle import RULES, actions, check, facts, trace
@@ -22,9 +22,16 @@ def demo_actions(rows):
 
 
 def test_trace_at_2_16_sees_four_hops_one_bank_y_one_exit():
-    edges = trace(demo, demo.complaints[0], demo.tool_as_of)
+    edges = trace(bank_view(demo, "BANK_X"), demo.complaints[0], demo.tool_as_of, own_bank="BANK_X")
     got = {t.to_account: hop for t, hop in edges.values()}
     assert got == {"ACC_A": 1, "ACC_B": 2, "ACC_C": 2, "ACC_D": 3, "EXIT:ATM:BX-ATM-0042": 3}
+
+
+def test_bank_x_never_follows_the_money_inside_bank_y():
+    world = trace(demo, demo.complaints[0], demo.tool_as_of)
+    assert "T_DEMO_08" in world                              # the narrator sees B's hop to G at Bank Z
+    x = trace(bank_view(demo, "BANK_X"), demo.complaints[0], demo.tool_as_of, own_bank="BANK_X")
+    assert "T_DEMO_08" not in x                              # Bank X does not: it files the onward entry instead
 
 
 def test_cash_outs_after_the_ticket_are_not_on_the_trail_yet():
@@ -46,16 +53,18 @@ def test_murugan_gets_a_narrowing_proposal_not_a_freeze(demo_actions):
     assert [(a["action_code"], a["amount"]) for a in d] == [("PROPOSE_NARROW", paise(500))]
 
 
-def test_mule_accounts_get_freeze_proposals_never_automatic_freezes(demo_actions):
+def test_no_freeze_at_the_first_pass_one_ticket_is_not_repeated_credits(demo_actions):
+    # A and C look like pass-through accounts, but one ticket is not the repeated pattern courts accept: a freeze
+    # on C comes later, from the watch, when C tries to cash out (tests/test_db_night.py)
     _, acts = demo_actions
-    freezes = {a["account_id"]: a["mode"] for a in acts if a["action_code"] == "PROPOSE_FULL_FREEZE"}
-    assert freezes == {"ACC_A": "OFFICER", "ACC_C": "OFFICER"}
+    assert not [a for a in acts if a["action_code"] == "PROPOSE_FULL_FREEZE"]
     assert not any(a["mode"] == "AUTOMATIC" and "FREEZE" in a["action_code"] for a in acts)
 
 
-def test_three_decisions_wait_for_the_officer(demo_actions):
+def test_one_decision_waits_at_the_first_pass(demo_actions):
     _, acts = demo_actions
-    assert sum(a["mode"] == "OFFICER" for a in acts) == 3
+    assert [(a["account_id"], a["action_code"]) for a in acts if a["mode"] == "OFFICER"] == [
+        ("ACC_D", "PROPOSE_NARROW")]
 
 
 def test_every_check_passes_on_the_demo(demo_actions):
@@ -77,7 +86,7 @@ def test_checker_catches_an_automatic_freeze(demo_actions):
 
 def test_checker_catches_lost_money(demo_actions):
     f, acts = demo_actions
-    broken = {k: dict(v, victim=v["victim"] - 1) if k == "ACC_A" else v for k, v in f.items()}
+    broken = {k: dict(v, victim_everywhere=v["victim_everywhere"] - 1) for k, v in f.items()}
     assert check(demo, broken, acts)["conservation"] is False
 
 
@@ -89,7 +98,8 @@ def test_rules_never_hold_another_banks_account(demo_actions):
 def test_extra_cases_pass_the_checker(rows):
     extra = load_case(EXTRA_CASES)
     for c in extra.complaints:
-        f = facts(extra, rows, "BANK_X", c, default_as_of(c["reported_at"]), evidence=False)
+        bank = extra.bank_of(c["beneficiary_account"])
+        f = facts(extra, rows, bank, c, default_as_of(c["reported_at"]), evidence=False)
         acts = actions(f)
         assert all(check(extra, f, acts, c).values()), c["case_id"]
         assert any(a["action_code"] == "MANDATORY_HOLD" for a in acts) or all(
@@ -97,6 +107,21 @@ def test_extra_cases_pass_the_checker(rows):
 
 
 def test_rules_config_names_every_action():
-    assert set(RULES["automatic"]) == {"MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY", "KYC_PACKET"}
-    assert set(RULES["officer"]) == {"PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "CONFIRM_HOLD"}
+    assert set(RULES["automatic"]) == {"MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY", "KYC_PACKET",
+                                       "SEND_BACK", "LINK_DUPLICATE", "RECORD_SPLIT", "WATCH_HOLD", "WATCH_ADD"}
+    assert set(RULES["officer"]) == {"PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE"}
+
+
+def test_holds_never_exceed_the_reported_amount(demo_actions):
+    f, acts = demo_actions
+    assert all(a["amount"] <= f[a["account_id"]]["reported"] for a in acts if a["action_code"] == "MANDATORY_HOLD")
+
+
+def test_a_second_victim_on_account_a_gets_its_own_hold_from_the_money_already_there(rows):
+    v2 = demo.complaint("CASE_DEMO_V2")
+    f = facts(demo, rows, "BANK_X", v2, default_as_of(v2["reported_at"]), evidence=False)
+    acts = actions(f)
+    assert [(a["account_id"], a["action_code"], a["amount"]) for a in acts if a["mode"] == "AUTOMATIC"] == [
+        ("ACC_A", "MANDATORY_HOLD", paise(40000))]
+    assert f["ACC_A"]["victim"] == paise(40000)
     assert not any("FREEZE" in k for k in RULES["automatic"])

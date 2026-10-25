@@ -6,6 +6,8 @@ Checks, in order (stop reading at the first FAIL; later checks depend on it):
   3. .env exists and has EXA_DSN / EXA_USER / EXA_PASSWORD
   4. pyexasol connects and reports the database version
   5. a Python 3 UDF actually runs, and which packages the SLC has (pandas? numpy?)
+  6. `make db` has run: the bank schemas (PH_X, PH_Y, PH_Z) and the portal (PH_PORTAL) exist
+  7. PH_ROLE_PASSWORD is set, and the maker, checker and portal users can log in
   --full also runs `exasol diag local`.
 """
 from __future__ import annotations
@@ -92,7 +94,24 @@ def main(argv: list[str] | None = None) -> int:
         check("Python 3 UDF runs", True, out)
     except Exception as exc:
         check("Python 3 UDF runs", False, str(exc)[:200], "exasol slc install python3, then retry")
+    schemas = {s for (s,) in conn.execute("SELECT SCHEMA_NAME FROM EXA_SCHEMAS").fetchall()}
     conn.close()
+    from pipeline.db import BANKS, PORTAL_SCHEMA, schema_for, settings
+
+    want = [schema_for(b) for b in BANKS] + [PORTAL_SCHEMA]
+    built = check("bank and portal schemas", all(s in schemas for s in want),
+                  ", ".join(f"{s} {'ok' if s in schemas else 'missing'}" for s in want), "make db")
+    if not check("PH_ROLE_PASSWORD set", bool(settings()["role_password"]), "",
+                 "add PH_ROLE_PASSWORD=<a password of your choice> to .env, then `make db`"):
+        return summary()
+    if built:
+        for role, bank in [("maker", "BANK_X"), ("checker", "BANK_X"), ("portal", None)]:
+            try:
+                c = connect(role, bank)
+                c.close()
+                check(f"log in as the {role}" + (f" ({bank})" if bank else ""), True, "")
+            except (SystemExit, Exception) as exc:      # noqa: BLE001 - report and carry on
+                check(f"log in as the {role}", False, str(exc)[:160], "make db (creates the users and grants)")
     return summary()
 
 

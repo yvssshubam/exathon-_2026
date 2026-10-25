@@ -28,7 +28,9 @@ def signals(rows: dict, case: Case, account: str, as_of: str) -> dict[str, float
     now = datetime.strptime(as_of, FMT)
     txns = _txns(rows)
     acct = {r[0]: r for r in rows["ACCOUNT"]}[account]
-    roots = {r[5] for r in rows["COMPLAINT"]}
+    # reported payments: tickets that had reached the bank by as_of (an IO notice repeats an earlier ticket)
+    roots = {c["utr"] for c in rows["COMPLAINTS"]
+             if str(c["reported_at"]) <= as_of and c.get("ticket_kind", "POLICE") != "IO_NOTICE"}
     credits = [x for x in txns if x["t"] == account and now - timedelta(days=90) < x["ts"] <= now]
     debits = [x for x in txns if x["f"] == account and x["ts"] <= now]
     v: dict[str, float | None] = {}

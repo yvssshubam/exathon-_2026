@@ -2,7 +2,7 @@
 -- The Python lives in sql/udf/attribute_case.py so CI can test it without Exasol (DECISIONS D-10);
 -- pipeline/run_sql.py pastes it in at the --@include line. Called once per tracing rule by sql/steps/050_attribute.sql.
 
-CREATE OR REPLACE PYTHON3 SET SCRIPT PH.ATTRIBUTE_CASE(
+CREATE OR REPLACE PYTHON3 SET SCRIPT ATTRIBUTE_CASE(
     trace_rule   VARCHAR(10),
     row_kind     VARCHAR(5),
     ts           TIMESTAMP,
@@ -21,4 +21,4 @@ CREATE OR REPLACE PYTHON3 SET SCRIPT PH.ATTRIBUTE_CASE(
 --@include sql/udf/attribute_case.py
 /
 
-COMMENT ON SCRIPT PH.ATTRIBUTE_CASE IS 'Replays a case''s transactions under LIBR, FIFO or PRO_RATA and returns how much of each victim''s money is in each account, which exit it left by, and which transaction carried it. Integer paise; conserves money exactly.';
+COMMENT ON SCRIPT ATTRIBUTE_CASE IS 'Replays a case''s transactions under LIBR, FIFO or PRO_RATA and returns how much of each victim''s money is in each account, which exit it left by, and which transaction carried it. Integer paise; conserves money exactly.';

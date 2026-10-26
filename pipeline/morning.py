@@ -54,76 +54,147 @@ def facts(conn, bank: str, period_from: str, period_to: str) -> dict:
     failed = conn.execute(f"SELECT DISTINCT case_id FROM AGENT_RUN WHERE run_status IN ('CHECK_FAILED', 'FAILED') "
                           f"AND sim_started_at {window} ORDER BY case_id", p).fetchall()
     waiting = conn.execute("SELECT proposal_id, case_id, account_id, action_code, amount_inr FROM PROPOSAL "
-                           "WHERE proposal_status = 'WAITING' ORDER BY proposal_id").fetchall()
+                           "WHERE proposal_status = 'WAITING' "
+                           "AND proposed_at <= TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS') ORDER BY proposal_id",
+                           p).fetchall()
     from pipeline.explain import ticket_labels
 
+    # one story per complaint: what reached the bank, what was held where, what had already left
+    stories = []
+    for case, received, status in tickets:
+        c = conn.execute("SELECT amount_inr, victim_tag FROM COMPLAINT WHERE case_id = {c}", {"c": case}).fetchone()
+        run = conn.execute("SELECT r.sim_holds_at, r.run_status FROM AGENT_RUN r JOIN TICKET t ON t.run_id = r.run_id "
+                           "WHERE t.case_id = {c}", {"c": case}).fetchone()
+        held = conn.execute("SELECT account_id, SUM(amount_inr), MIN(action_code) FROM HOLD_LEDGER WHERE case_id = {c} "
+                            "AND hold_kind = 'LIEN' AND hold_status <> 'REPLACED' GROUP BY account_id "
+                            "ORDER BY MIN(placed_at), account_id", {"c": case}).fetchall()
+        gone = conn.execute("SELECT entry_kind, SUM(victim_amount_inr), MIN(bank_id), MIN(moved_at), MIN(filed_at) "
+                            "FROM PORTAL_ENTRY WHERE case_id = {c} AND entry_kind IN ('ONWARD', 'EXIT', 'SEND_BACK') "
+                            "GROUP BY entry_kind", {"c": case}).fetchall()
+        caught = conn.execute("SELECT MIN(h.placed_at), MIN(h.account_id) FROM HOLD_LEDGER h WHERE h.hold_tag = "
+                              "'NOT_LINKED' AND h.replaced_by IN (SELECT hold_id FROM HOLD_LEDGER WHERE case_id = {c})",
+                              {"c": case}).fetchone()
+        stories.append({"case_id": case, "received_at": str(received)[:19], "status": status,
+                        "amount": c[0] if c else None, "victim_tag": c[1] if c else None,
+                        "holds_at": str(run[0])[:19] if run and run[0] else None,
+                        "held": [(a, amt, code) for a, amt, code in held],
+                        "gone": {k: (amt, b, str(m)[:19] if m else None, str(fl)[:19] if fl else None)
+                                 for k, amt, b, m, fl in gone},
+                        "caught": (str(caught[0])[:19], caught[1]) if caught and caught[0] else None})
+    attempts = conn.execute(f"SELECT event_at, account_id, event_kind, amount_inr, counterparty FROM WATCH_EVENT "
+                            f"WHERE event_at {window} AND event_kind IN ('CASHOUT_BLOCKED', 'TRANSFER_BLOCKED', "
+                            "'RECIPIENT_WATCHED') ORDER BY event_at, event_id", p).fetchall()
+
     return {"names": names, "labels": ticket_labels(conn), "tickets": tickets, "holds": holds, "filings": filings,
+            "stories": stories, "attempts": attempts,
             "watch": watch,
             "splits": splits, "refused": refused, "failed": failed, "waiting": waiting}
 
 
-def template(f: dict, bank_name: str, period_to: str) -> str:
-    """The log as short sections: a line starting "## " is a heading, "- " a point. Plain text, so the console, the
-    terminal and the model all read the same thing."""
-    n, label = f["names"], f.get("labels", {})
+def victim_name(tag: str | None) -> str:
+    """V_LAKSHMI -> Lakshmi; generated cases (V_X03) -> Victim X03."""
+    t = (tag or "").removeprefix("V_")
+    return f"Victim {t}" if any(ch.isdigit() for ch in t) else t.capitalize() or "the victim"
 
-    def t(case):
-        return label.get(case, case)
+
+def rupees(v) -> str:
+    """Whole rupees for the note ("Rs 30,788"), the exact figure stays in the hold record."""
+    return inr(_d(v).quantize(Decimal(1)))
+
+
+def _names(accounts: list[str], n: dict) -> str:
+    names = [n.get(a, a) for a in accounts]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def template(f: dict, bank_name: str, period_to: str) -> str:
+    """The handover note for the morning desk, in names (no account IDs, no internal codes). A line starting "## "
+    is a heading, "- " a point; the first line is the summary. Plain text, so the console, the terminal and the
+    model all read the same thing."""
+    n = f["names"]
 
     def at(ts):
         return str(ts)[11:16]
 
-    lines = [f"Overnight at {bank_name}, up to {period_to[11:16]} on {period_to[:10]}."]
-    if f["tickets"]:
-        lines.append(f"## Tickets received ({len(f['tickets'])}), each worked the minute it landed")
-        lines += [f"- {at(when)} {t(c)}" for c, when, _ in f["tickets"]]
-    done = []
-    for case, acc, kind, amount, tag, when, code, _stmt in f["holds"]:
+    stories = f.get("stories", [])
+    reported = sum((_d(st["amount"]) for st in stories), Decimal(0))
+    minutes = []
+    for st in stories:
+        if st["holds_at"]:
+            a, b = st["received_at"], st["holds_at"]
+            minutes.append(max(0, (int(b[11:13]) * 60 + int(b[14:16])) - (int(a[11:13]) * 60 + int(a[14:16]))))
+    count = len(stories) or len(f["tickets"])
+    head = f"{count} complaint{'s' if count != 1 else ''} overnight at {bank_name}, {rupees(reported)} reported."
+    if minutes:
+        head += f" Each was worked within {max(minutes)} minute{'s' if max(minutes) != 1 else ''}."
+    lines = [head]
+    for st in stories:
+        who = f"{victim_name(st['victim_tag'])}, {at(st['received_at'])}, {rupees(st['amount'])}."
+        parts = []
+        if "SEND_BACK" in st["gone"]:
+            back = at(st["gone"]["SEND_BACK"][3])
+            parts.append(f"The police notice does not match a payment here. Sent back at {back}. "
+                         "Nothing held.")
+        held = [(a, _d(amt)) for a, amt, _ in st["held"]]
+        if st["caught"]:
+            parts.append(f"Already held: it landed in {n.get(st['caught'][1], st['caught'][1])} at "
+                         f"{at(st['caught'][0])}, while that account was watched.")
+        elif held:
+            total = sum((amt for _, amt in held), Decimal(0))
+            parts.append(f"{rupees(total)} held here in {_names([a for a, _ in held], n)}.")
+        if "ONWARD" in st["gone"] and _d(st["gone"]["ONWARD"][0]) > 0:
+            amt, bank, _moved, filed = st["gone"]["ONWARD"]
+            from pipeline.db import BANKS
+
+            other = BANKS.get(bank, {}).get("name", bank)
+            parts.append(f"{rupees(amt)} had gone to {other}; the onward entry was filed "
+                         f"at {at(filed)}.")
+        if "EXIT" in st["gone"] and _d(st["gone"]["EXIT"][0]) > 0:
+            amt, _bank, moved, _filed = st["gone"]["EXIT"]
+            parts.append(f"{rupees(amt)} left as cash at {at(moved)}, before the complaint.")
+        lines.append(f"- {who} " + " ".join(parts) if parts else f"- {who}")
+    for (case,) in f["failed"]:
+        lines.append(f"- {f.get('labels', {}).get(case, case)}: the checks failed, so nothing was held automatically. "
+                     "Please look at it.")
+    stopped = [a for a in f.get("attempts", []) if a[2] != "RECIPIENT_WATCHED"]
+    if stopped:
+        lines.append(f"## The holds stopped {rupees(sum((_d(a) for *_, a, _ in stopped), Decimal(0)))} leaving")
+    for w, acc, kind, amt, to in f.get("attempts", []):
         who = n.get(acc, acc)
-        if kind == "MARKER":
-            done.append(f"- {at(when)} {who}: marked to catch later credits ({t(case)})")
-        elif tag == "NOT_LINKED":
-            done.append(f"- {at(when)} {who}: {inr(amount)} of new money held, not linked to a reported victim yet")
-        elif code == "LINKED_HOLD":
-            done.append(f"- {at(when)} {who}: {inr(amount)} already held, now linked to the victim of {t(case)}")
+        if kind == "CASHOUT_BLOCKED":
+            lines.append(f"- {who} tried to take {rupees(amt)} from an ATM at {at(w)}. Refused.")
+        elif kind == "TRANSFER_BLOCKED":
+            dest = n.get(to, to) if to else "another account"
+            lines.append(f"- {who} tried to send {rupees(amt)} to {dest} at {at(w)}. "
+                         "Refused.")
         else:
-            done.append(f"- {at(when)} {who}: {inr(amount)} held, amount only ({t(case)})")
-    if done:
-        lines.append("## Held automatically")
-        lines += done
-    if f["filings"]:
-        words = {"ONWARD": ("onward entry to another bank", "onward entries to other banks"),
-                 "EXIT": ("cash or crypto exit reported", "cash or crypto exits reported"),
-                 "KYC": ("KYC packet", "KYC packets"), "SEND_BACK": ("ticket sent back to the police",
-                                                                     "tickets sent back to the police")}
-        lines.append("## Filed on the portal (done, not left as drafts)")
-        for k, cnt, _, _ in f["filings"]:
-            one, many = words.get(k, (k.lower(), k.lower()))
-            lines.append(f"- {int(cnt)} {one if int(cnt) == 1 else many}")
-    if f["watch"]:
-        lines.append("## Since the first pass")
-        for when, sentence, _stmt in f["watch"]:
-            text = sentence[7:] if sentence[:2].isdigit() and sentence[2:3] == ":" else sentence
-            lines.append(f"- {at(when)} {text}")
-    if f["splits"]:
-        lines.append("## Split between victims (a record for the refund stage; moves no money)")
-    for acc, version, victims, held, _stmt in f["splits"]:
-        lines.append(f"- {n.get(acc, acc)}: the split between {int(victims)} victims was recorded again (version "
-                     f"{int(version)}); the total held, {inr(held)}, is unchanged.")
-    problems = [f"- The checker refused {code} on {n.get(acc, acc)} ({t(case)}): {note}"
-                for case, code, acc, note in f["refused"]]
-    problems += [f"- {t(case)}: the checks failed, so nothing was held automatically. Please look at it."
-                 for (case,) in f["failed"]]
-    if problems:
+            dest = n.get(to, to) if to else "The account it tried to pay"
+            lines.append(f"- {dest} is now watched, after {who} tried "
+                         f"to pay it at {at(w)}.")
+    # a refused duplicate (the same proposal already waiting) is the checker doing its job, not news for the desk
+    refused = list(dict.fromkeys((acc, note) for _case, _code, acc, note in f["refused"]
+                                 if "already waiting" not in (note or "")))
+    if refused:
         lines.append("## Needs a look")
-        lines += problems
+        lines += [f"- The checker refused a step on {n.get(acc, acc)}: {note}" for acc, note in refused]
     if f["waiting"]:
-        lines.append(f"## Waiting for you ({len(f['waiting'])})")
+        lines.append("## Waiting for the morning desk")
         for _pid, case, acc, code, amount in f["waiting"]:
-            extra = f" to {inr(amount)}" if code == "PROPOSE_NARROW" else ""
-            lines.append(f"- {DECISION_WORDS.get(code, code).capitalize()}{extra}: {n.get(acc, acc)} ({t(case)})")
+            who = n.get(acc, acc)
+            story = next((st for st in stories if st["case_id"] == case), None)
+            vic = victim_name(story["victim_tag"]) if story else "the victim"
+            if code == "UNMATCHED_NOTICE":
+                lines.append(f"- Near match: {vic}'s notice. Hold {rupees(amount)} in {who}, or wait for the police?")
+            elif code == "PROPOSE_NARROW":
+                lines.append(f"- Smaller hold: reduce {who}'s hold to {rupees(amount)}.")
+            elif code == "PROPOSE_FULL_FREEZE":
+                tries = sum(1 for _w, a, k, *_ in f.get("attempts", []) if a == acc and k != "RECIPIENT_WATCHED")
+                lines.append(f"- Freeze: {who}" + (f", after {tries} tr{'y' if tries == 1 else 'ies'} to move held "
+                                                   "money." if tries else "."))
+            else:
+                lines.append(f"- Release: the hold on {who}, no police direction in 75 days.")
     else:
-        lines.append("## Nothing is waiting for you")
+        lines.append("## Nothing is waiting for the morning desk")
     return "\n".join(lines)
 
 
@@ -152,9 +223,11 @@ def write(conn, bank: str, period_from: str, period_to: str, llm=None) -> dict:
 
 
 def latest(conn, bank: str) -> dict | None:
+    """The handover note: the latest log written at the morning desk's start (09:00), else the latest log."""
     row = conn.execute("SELECT log_id, period_from, period_to, log_text, written_by, facts_text, stmt_id "
-                       "FROM MORNING_LOG "
-                       "WHERE viewing_bank_id = {b} ORDER BY log_id DESC LIMIT 1", {"b": bank}).fetchone()
+                       "FROM MORNING_LOG WHERE viewing_bank_id = {b} "
+                       "ORDER BY CASE WHEN TO_CHAR(period_to, 'HH24:MI') = '09:00' THEN 0 ELSE 1 END, log_id DESC "
+                       "LIMIT 1", {"b": bank}).fetchone()
     if not row:
         return None
     keys = ("log_id", "period_from", "period_to", "text", "written_by", "facts", "stmt_id")

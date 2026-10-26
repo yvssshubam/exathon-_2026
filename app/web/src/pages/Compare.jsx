@@ -1,277 +1,162 @@
-import { useState } from "react";
 import { api } from "../api.js";
 import { Failed, Loading } from "../components/bits.jsx";
-import { clock, duration, hoursRange, inr, inrR, plural } from "../format.js";
+import { clock, duration, inrR, joinAnd, plural, shortName, victim as victimName } from "../format.js";
 import { useLoad } from "../hooks.js";
 
-const GREY = "#4F5966", VIOLET = "#5B3FA0", GREEN = "#2F7A5A";
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const short = (name) => String(name || "").replace(/\s*\(.*\)$/, "");
-const joinAnd = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
-const ms = (ts) => new Date(String(ts).replace(" ", "T")).getTime();
-const dayOf = (ts) => `${Number(String(ts).slice(8, 10))} ${MONTHS[Number(String(ts).slice(5, 7)) - 1]}`;
-const isNight = (ts) => { const h = Number(String(ts).slice(11, 13)); return h < 10 || h >= 18; };
+// Demo view "Manual vs system" (design board "Demo: manual process vs the system"): the same complaint handled by
+// today's manual desk and by the system, hour by hour on one table, then the whole day at Bank X.
+const n = (v) => Number(v || 0);
+const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const minutesBetween = (a, b) => Math.round((new Date(String(b).replace(" ", "T")) - new Date(String(a).replace(" ", "T"))) / 60000);
+const night = (ts) => { const h = Number(String(ts).slice(11, 13)); return h < 10 || h >= 18; };
+const possessive = (s) => (s.endsWith("s") ? `${s}'` : `${s}'s`);
 
-// Today's manual process vs the agent, on the same ticket and the same transactions, computed in Exasol.
 export default function Compare({ caseId }) {
-  const [tab, setTab] = useState("ticket");
-  const cmp = useLoad(() => api.compare(caseId, true), [caseId]);
-  const acts = useLoad(() => api.actions(caseId), [caseId]);
-  const day = useLoad(() => (tab === "day" ? api.day() : Promise.resolve(null)), [tab]);
   const queue = useLoad(() => api.queue(), []);
-  const handled = (queue.data || []).filter((t) => !["QUEUED", "WORKING"].includes(t.ticket_status)).length;
-
-  if (queue.data && handled === 0) {
-    return <main id="main" className="wrap page"><h1>Manual process vs the system</h1><p className="empty">No complaints received today. Replay the night from the Review page.</p></main>;
-  }
-  if (cmp.loading && !cmp.data) return <div className="wrap page"><Loading what="Replaying the manual process in Exasol" /></div>;
-  if (cmp.error) return <div className="wrap page"><Failed error={cmp.error} retry={cmp.reload} /></div>;
-  const d = cmp.data;
-  const worked = !!d.tool.first_hold_at || d.tool.holds_overnight.length > 0;
-
-  return (
-    <main id="main" className="wrap page">
-      <div className="pagehead">
-        <div>
-          <h1>{tab === "day" ? "The whole day: manual process vs the system" : `The ${clock(d.received_at)} complaint: manual process vs the system`}</h1>
-          <p className="lede">
-            {tab === "day"
-              ? "Every complaint the system has handled, replayed through the manual process on the same transactions."
-              : `Same fraud, handled two ways. In the manual process, staff start at 10:00 and freeze whole accounts. With the system, money is held${d.tool.first_hold_at ? ` at ${clock(d.tool.first_hold_at)}` : ""} and only the victim's share is held.`}
-          </p>
-        </div>
-        {handled > 1 && (
-          <div className="tabs" role="tablist" aria-label="Scope">
-            <button role="tab" aria-selected={tab === "ticket"} onClick={() => setTab("ticket")}>This complaint</button>
-            <button role="tab" aria-selected={tab === "day"} onClick={() => setTab("day")}>Whole day, {plural(handled, "complaint")}</button>
-          </div>
-        )}
-      </div>
-
-      {tab === "ticket" && (
-        !worked
-          ? <p className="empty">The system has not handled this complaint yet. <a href={`#/case/${caseId}`}>Open the complaint</a>.</p>
-          : <Ticket d={d} actions={acts.data || []} />
-      )}
-      {tab === "day" && <Day day={day} />}
-
-      <p className="note">"Manual process" shows what happens today on the same {tab === "day" ? "complaints" : "complaint"}: staff start at 10:00, take about {d.desk.first_lookup_minutes} minutes to trace the first account and {d.desk.per_account_minutes} for each next one, and freeze whole accounts.{tab === "ticket" && d.today.accounts.length ? ` The victim reported at ${clock(d.received_at)} in both versions.` : ""}</p>
-    </main>
-  );
+  const pick = caseId || (queue.data || []).find((t) => t.after_hours && n(t.held_inr))?.case_id || (queue.data || []).find((t) => n(t.held_inr))?.case_id;
+  if (queue.loading && !queue.data) return <div className="wrap"><Loading what="Loading" /></div>;
+  if (!pick) return <main id="main" className="wrap page"><h1 style={{ fontSize: 30 }}>Manual desk vs the system</h1><p className="empty">No complaint has been worked yet. Replay the night from the Review page.</p></main>;
+  return <One key={pick} caseId={pick} queue={queue.data || []} />;
 }
 
-function Pair({ label, today, todayNote, agent, agentNote }) {
-  const same = today === agent;
-  return (
-    <div className={`card pair${same ? " same" : ""}`}>
-      <div className="label">{label}</div>
-      <div className="two">
-        <div><div className="side-h">Manual process</div><div className="v today">{today}</div><div className="n">{todayNote}</div></div>
-        <div><div className="side-h agent">With the system</div><div className="v">{agent}</div><div className="n">{same ? "Same in both" : agentNote}</div></div>
-      </div>
-    </div>
-  );
-}
+function One({ caseId, queue }) {
+  const cmp = useLoad(() => api.compare(caseId, true), [caseId]);
+  const detail = useLoad(() => api.caseDetail(caseId), [caseId]);
+  const trail = useLoad(() => api.trail(caseId).catch(() => null), [caseId]);
+  const day = useLoad(() => api.day().catch(() => null), []);
+  const tag = detail.data?.victim_tag;
+  const nar = useLoad(() => (tag ? api.narrator(tag).catch(() => null) : Promise.resolve(null)), [tag]);
+  if ((cmp.loading && !cmp.data) || (detail.loading && !detail.data)) return <div className="wrap"><Loading what="Replaying the manual desk in Exasol" /></div>;
+  if (cmp.error) return <div className="wrap"><Failed error={cmp.error} retry={cmp.reload} /></div>;
+  const d = cmp.data, c = detail.data;
+  const v = victimName(c.victim_tag) || "the victim";
+  const her = v === "the victim" ? "The victim's" : "Her";
+  const received = d.received_at;
+  const dayName = DAYS[new Date(String(received).slice(0, 10)).getDay()];
 
-function Ticket({ d, actions }) {
-  const narrow = actions.filter((a) => a.action_code === "PROPOSE_NARROW");
-  const pending = narrow.filter((a) => ["PROPOSED", "WAITING"].includes(a.action_status));
-  const release = pending.reduce((s, a) => s + (a.current_hold_inr - a.amount_inr), 0);
-  const frozenWhole = d.today.accounts.filter((a) => a.action === "WHOLE_FREEZE" && a.honest_locked_inr > 0);
-  const emptied = [...new Set(d.walked_out_after_ticket.map((w) => short(w.name)))].sort();
-  const lastWalk = d.walked_out_after_ticket.at(-1)?.at;
-  const pct = d.victim_paid_inr ? Math.round((d.tool.victim_held_inr / d.victim_paid_inr) * 100) : 0;
-  let honestNote = d.tool.honest_locked_overnight_inr ? "Only the customer's own money that came with the victim's" : "Nothing but the victim's money";
-  if (pending.length) honestNote = `Becomes ${inrR(Math.max(0, d.tool.honest_locked_overnight_inr - release))} after you reduce ${joinAnd(pending.map((a) => `${short(a.name)}'s`))} hold`;
-  else if (d.tool.honest_locked_now_inr < d.tool.honest_locked_overnight_inr) honestNote = `${inrR(d.tool.honest_locked_now_inr)} now: you reduced the hold`;
+  // the system side across every bank that runs it, from the narrator's view
+  const banks = nar.data?.trail?.banks || [];
+  const sysBanks = banks.filter((b) => b.works_tickets === "agent" && b.victim_held_inr > 0);
+  const sysHeld = sysBanks.length ? sysBanks.reduce((t, b) => t + n(b.victim_held_inr), 0) : n(d.tool.victim_held_inr);
+  const otherHeld = sysBanks.filter((b) => b.bank_id !== "BANK_X");
+  const edges = trail.data?.edges || [];
+  const exitsBefore = edges.filter((e) => e.is_exit && e.ts < received);
+  const otherCash = (nar.data?.timeline || []).filter((e) => e.kind === "cash_out" && e.bank !== "BANK_X" && banks.some((b) => b.moves?.some((m) => m.from === e.account || m.to === e.account)));
+  const cashNotes = [...exitsBefore.map((e) => [e.ts, n(e.victim_inr || e.amount_inr)]), ...otherCash.map((e) => [e.at, n(e.amount)])].sort();
 
-  return (
-    <>
-      <div className="pairs">
-        <Pair label="Victim's money secured" today={inrR(d.today.victim_held_inr)}
-          todayNote={emptied.length ? `${joinAnd(emptied)} emptied by ${clock(lastWalk)}` : d.today.first_hold_at ? `Held at ${clock(d.today.first_hold_at)}` : "Nothing held"}
-          agent={inrR(d.tool.victim_held_inr)} agentNote={`${pct}% of the ${inr(d.victim_paid_inr)} reported`} />
-        <Pair label="Genuine customers' money blocked" today={inrR(d.today.honest_locked_inr)}
-          todayNote={frozenWhole.length ? `${joinAnd(frozenWhole.map((a) => short(a.name)))}'s full account${frozenWhole.length > 1 ? "s" : ""} frozen` : "No genuine customer in the trail"}
-          agent={inrR(d.tool.honest_locked_overnight_inr)} agentNote={honestNote} />
-        <Pair label="First hold or freeze" today={d.today.first_hold_at ? clock(d.today.first_hold_at) : "–"}
-          todayNote={d.today.minutes_to_first_hold != null ? `${duration(d.today.minutes_to_first_hold)} after the complaint` : ""}
-          agent={d.tool.first_hold_at ? clock(d.tool.first_hold_at) : "–"}
-          agentNote={d.tool.minutes_to_first_hold != null ? `${duration(d.tool.minutes_to_first_hold)} after the complaint` : ""} />
-      </div>
-      {d.today.victim_held_inr === 0 && d.tool.victim_held_inr === 0 && (
-        <p className="status" role="status">The money had left before the complaint came in. Neither method could stop it. The cash withdrawal is still reported to the police.</p>
-      )}
-      <Timeline d={d} pending={pending} narrow={narrow} actions={actions} />
-    </>
-  );
-}
+  // the genuine customer in this complaint
+  const genuine = d.today.accounts.find((a) => a.action === "WHOLE_FREEZE" && n(a.honest_locked_inr) > 0);
+  const narrow = (c.proposals || []).find((p) => p.action_code === "PROPOSE_NARROW" && (!genuine || shortName(p.name) === shortName(genuine.name))) || (c.proposals || []).find((p) => p.action_code === "PROPOSE_NARROW");
+  const gname = shortName(genuine?.name || narrow?.name || "");
+  const sysOwn = narrow ? Math.max(0, n(narrow.current_hold_inr) - n(narrow.amount_inr)) : n(d.tool.honest_locked_now_inr);
+  const inflow = edges.find((e) => trail.data?.nodes?.find((x) => x.id === e.to_account && shortName(x.label) === gname));
 
-// Two lanes of numbered events on one time axis: today's manual process and the agent.
-function Timeline({ d, pending, narrow, actions }) {
-  const heldOn = {};
-  for (const h of d.tool.holds_overnight) if (h.kind !== "MARKER") heldOn[h.account_id] = Math.max(heldOn[h.account_id] || 0, h.amount_inr);
-  const bankNames = [...new Set(actions.filter((a) => a.action_code === "ONWARD_ENTRY").map((a) => a.bank_name).filter(Boolean))];
-  const banks = bankNames.length ? joinAnd(bankNames) : "the other bank";
-
-  const without = [];
-  for (const w of d.walked_out_after_ticket) {
-    const crypto = /crypto/i.test(w.where);
-    const transfer = /^an account at /.test(w.where);
-    without.push({ at: w.at, text: crypto ? `${short(w.name)} sends ${inr(w.amount_inr)} to a crypto exchange`
-      : transfer ? `${short(w.name)} sends ${inr(w.amount_inr)} to ${w.where}`
-        : `${short(w.name)} withdraws ${inr(w.amount_inr)} at ${w.where.replace(/^ATM\s+\S+,\s*/, "ATM ")}` });
-  }
-  for (const a of d.today.accounts) {
-    const text = a.action === "WHOLE_FREEZE"
-      ? `${short(a.name)}'s full account frozen: ${inr(a.balance_then_inr)}, of which only ${inr(a.victim_held_inr)} is the victim's`
-      : a.action === "NOTHING_LEFT" ? `Staff check ${short(a.name)} and find it empty` : `Staff hold ${inr(a.victim_held_inr)} on ${short(a.name)}`;
-    without.push({ at: a.action_at, text });
-  }
-  if (d.today.onward_filed_at) without.push({ at: d.today.onward_filed_at, text: `Onward entry typed: ${banks} informed` });
-
-  const agent = [];
-  const holds = Object.entries(heldOn).map(([acc, amt]) => `${inr(amt)} on ${short(d.tool.holds_overnight.find((h) => h.account_id === acc).name)}`);
-  if (d.tool.first_hold_at) {
-    agent.push({ at: d.tool.first_hold_at, text: `${holds.length ? `Money held: ${joinAnd(holds)}.` : "Nothing left to hold; reports filed."}${d.tool.onward_filed_at ? ` ${banks} informed.` : ""}` });
-  }
-  for (const w of d.walked_out_after_ticket) {
-    const held = heldOn[w.account_id] || 0;
-    const kind = /crypto/i.test(w.where) ? "crypto transfer" : /^an account at /.test(w.where) ? "transfer" : "ATM withdrawal";
-    const tries = kind === "crypto transfer" ? "to send money to a crypto exchange" : kind === "transfer" ? `to send money to ${w.where}` : "to withdraw cash at an ATM";
-    agent.push({ at: w.at, text: held >= w.amount_inr ? `${short(w.name)} tries ${tries}. Blocked, because the money is held.` : held > 0 ? `${short(w.name)}'s ${kind} stopped at ${inr(w.amount_inr - held)}: ${inr(held)} is held` : `${short(w.name)}'s ${kind} goes through: nothing of the victim's was left there` });
-  }
+  // hour by hour
+  const rows = [];
+  const add = (ts, man, sys, both) => rows.push({ ts, man, sys, both });
+  const node = (id) => shortName(trail.data?.nodes?.find((x) => x.id === id)?.label || id);
+  const first = edges.find((e) => e.hop === 1);
+  if (first) add(first.ts, null, null, `${v} pays ${inrR(first.amount_inr)} to ${node(first.to_account)}${c.paid_channel ? ` by ${c.paid_channel}` : ""}.`);
+  for (const e of exitsBefore) add(e.ts, null, null, `${inrR(e.amount_inr)} taken as cash from ${node(e.from_account)} at ${e.exit_identifier || "an ATM"}. Gone either way.`);
+  add(received, night(received) ? "Complaint arrives. Desk closed. It waits." : "Complaint arrives. The desk picks it up.", "Complaint arrives. The system starts.");
+  const sysHolds = d.tool.holds_overnight.map((h) => shortName(h.name));
+  add(d.tool.first_hold_at, d.today.first_hold_at <= d.tool.first_hold_at ? null : "Nothing.",
+    <><span className="good">Holds {joinAnd(sysHolds)}.</span>{otherHeld.length ? ` Tells ${joinAnd(otherHeld.map((b) => b.name))}, which ${otherHeld.length === 1 ? "holds" : "hold"} ${joinAnd(otherHeld.map((b) => inrR(b.victim_held_inr)))}.` : ""}</>);
+  for (const e of otherCash) add(e.at, null, null, `${inrR(e.amount)} taken as cash at ${banks.find((b) => b.bank_id === e.bank)?.name}, from the money sent on. Gone either way.`);
+  for (const w of d.walked_out_after_ticket) add(w.at, <><span className="bad">{shortName(w.name)} {/cash|ATM/i.test(w.where || "") ? "withdraws" : "sends"} {inrR(w.amount_inr)}</span> {/cash|ATM/i.test(w.where || "") ? "at" : "to"} {w.where}.</>, <><span className="good">Refused.</span> {inrR(w.amount_inr)} stays in {shortName(w.name)}.</>);
   const opens = d.desk.desk_opens;
-  if (narrow.length && isNight(d.received_at)) {
-    const n = narrow[0], who = short(n.name);
-    const now = d.tool.holds_now.find((h) => h.account_id === n.account_id && h.kind === "LIEN");
-    let text;
-    if (pending.length) text = `Office opens. You reduce ${who}'s hold to ${inr(n.amount_inr)}. ${who} can use ${inr(Math.max(0, n.balance_now_inr - n.amount_inr))}`;
-    else if (n.action_status === "REJECTED") text = `Office opens. You keep ${who}'s hold at ${inr(n.current_hold_inr)}`;
-    else text = `Office opens. You reduce ${who}'s hold to ${inr(now ? now.amount_inr : n.amount_inr)}. ${who} can use ${inr(Math.max(0, n.balance_now_inr - (now ? now.amount_inr : n.amount_inr)))}`;
-    agent.push({ at: opens, desk: true, text });
-  }
+  const queued = queue.filter((t) => t.after_hours && t.received_at <= opens && t.received_at.slice(0, 10) === String(opens).slice(0, 10)).length;
+  if (night(received) && opens > received) add(opens, `Desk opens. ${plural(queued || 1, "complaint")} in the queue.`, `Officer opens Review. ${plural((c.proposals || []).filter((p) => !p.proposed_at || p.proposed_at <= opens).length, "decision")} for this complaint.`);
+  const byTime = {};
+  for (const a of d.today.accounts) (byTime[a.action_at] ||= []).push(a);
+  const late = d.today.onward_filed_at && d.tool.onward_filed_at ? minutesBetween(d.tool.onward_filed_at, d.today.onward_filed_at) : null;
+  Object.entries(byTime).sort().forEach(([at, accs], i) => {
+    const empty = accs.filter((a) => a.action === "NOTHING_LEFT").map((a) => shortName(a.name));
+    const frozen = accs.filter((a) => a.action === "WHOLE_FREEZE");
+    const liens = accs.filter((a) => a.action === "LIEN");
+    const man = <>{empty.length > 0 && `Finds ${joinAnd(empty)} nearly empty. `}
+      {frozen.map((a) => <span key={a.name} className={n(a.honest_locked_inr) > 0 ? "bad" : ""}>Freezes {possessive(shortName(a.name))} whole {inrR(a.balance_then_inr)}. </span>)}
+      {liens.map((a) => `Holds ${inrR(a.locked_inr || a.victim_held_inr)} on ${shortName(a.name)}. `)}
+      {i === 0 && late != null && late > 0 && d.today.onward_filed_at <= at.replace(/\d\d$/, "59") && otherHeld.length ? `Tells ${joinAnd(otherHeld.map((b) => b.name))}, ${duration(late).replace(" min", " min")} late.` : ""}</>;
+    const sys = narrow && i === 0 ? <>Smaller hold on {shortName(narrow.name)}: {inrR(narrow.amount_inr)}. {narrow.proposal_status === "WAITING" ? <span className="pill p-wait">Waiting for your decision</span> : <span className="pill p-done">{narrow.proposal_status === "REJECTED" ? "Kept" : `Decided by ${narrow.decided_by}`}</span>}</> : <span className="note">Nothing more to do.</span>;
+    add(at, man, sys);
+  });
+  rows.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
 
-  const all = [d.paid_at, d.received_at, ...without.map((e) => e.at), ...agent.map((e) => e.at)].filter(Boolean);
-  // The scale fits this complaint: from 1 hour before the payment to 30 minutes after the last event
-  const t0 = new Date(Math.min(...all.map(ms)) - 60 * 60000);
-  t0.setMinutes(t0.getMinutes() < 30 ? 0 : 30, 0, 0);
-  const t1 = new Date(Math.max(...all.map(ms)) + 30 * 60000);
-  t1.setMinutes(t1.getMinutes() === 0 ? 0 : t1.getMinutes() <= 30 ? 30 : 60, 0, 0);
-  const span = t1 - t0;
-  const x = (ts) => `${(((ms(ts) - t0) / span) * 100).toFixed(2)}%`;
-  const pad = (n) => String(n).padStart(2, "0");
-  const hhmm = (dt) => `${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
-
-  // Desk-closed stretches (before 10:00, from 18:00) inside the window, as a background gradient.
-  const stops = [];
-  for (let t = t0.getTime(); t < t1.getTime(); t += 30 * 60000) {
-    const h = new Date(t).getHours();
-    stops.push([t, h < 10 || h >= 18]);
-  }
-  const anyClosed = stops.some(([, closed]) => closed);
-  const grad = stops.map(([t, closed], i) => {
-    const a = ((t - t0) / span) * 100, b = (((stops[i + 1]?.[0] ?? t1.getTime()) - t0) / span) * 100;
-    return `${closed ? "#E3E8F5" : "#F7F9FA"} ${a.toFixed(2)}% ${b.toFixed(2)}%`;
-  }).join(", ");
-
-  const hours = span / 3600000;
-  const step = Math.max(1, Math.ceil(hours / 7));
-  const ticks = [];
-  for (let t = new Date(t0); t <= t1; t = new Date(t.getTime() + step * 3600000)) ticks.push(t);
-  if (ticks.at(-1).getTime() !== t1.getTime() && (t1 - ticks.at(-1)) > 0.4 * step * 3600000) ticks.push(t1);
-
-  // Events in the same minute share one numbered marker, so markers never sit on top of each other.
-  const sorted = (list, color) => {
-    const merged = [];
-    for (const e of list.sort((a, b) => ms(a.at) - ms(b.at))) {
-      const last = merged.at(-1);
-      if (last && last.at === e.at && !e.desk && !last.desk) last.text = `${last.text}. ${e.text}`;
-      else merged.push({ ...e });
-    }
-    return merged.map((e, i) => ({ ...e, n: i + 1, bg: e.desk ? GREEN : color }));
-  };
-  const lanes = [{ name: "Manual process", marks: sorted(without, GREY) }, { name: "With the system", marks: sorted(agent, VIOLET) }];
-  const sameDay = t0.getDate() === t1.getDate();
-
+  const dd = day.data;
+  const pct = (a, b) => (n(b) ? Math.round((n(a) / n(b)) * 100) : 0);
+  const frozenNames = (dd?.today?.frozen_names || []).map((x) => possessive(shortName(x)));
+  const nightMins = dd?.today?.night_minutes || [];
+  const sentBack = queue.filter((t) => t.match_status === "NEAR_MATCH" || t.match_status === "NO_MATCH");
   return (
-    <section className="card night" aria-labelledby="tl-h">
-      <h2 id="tl-h">{isNight(d.received_at) ? "The night of " : ""}{dayOf(d.received_at)}, {hhmm(t0)} to {hhmm(t1)}{sameDay ? "" : " next day"}</h2>
-      <div className="ticks" aria-hidden="true">
-        {ticks.map((t) => <span key={t.getTime()} style={{ left: `${(((t - t0) / span) * 100).toFixed(2)}%` }}>{hhmm(t)}</span>)}
-      </div>
-      {lanes.map((l) => (
-        <div className="lane" key={l.name}>
-          <div className="lane-name">{l.name}</div>
-          <div className="lane-track" style={{ background: anyClosed ? `linear-gradient(90deg, ${grad})` : "#F7F9FA" }}>
-            {l.marks.map((m) => <span key={m.n} className="mark" title={`${clock(m.at)}: ${m.text}`} style={{ left: x(m.at), background: m.bg }}>{m.n}</span>)}
+    <main id="main" className="wrap" style={{ paddingTop: 24, paddingBottom: 40 }}>
+      <p className="note"><a href={`#/case/${encodeURIComponent(caseId)}`}>{v === "the victim" ? "The complaint" : `${v}'s complaint`}</a> · {inrR(c.amount_inr)} · reported {clock(received)}, {dayName}</p>
+      <h1 style={{ fontSize: 30, lineHeight: 1.2, marginTop: 4, maxWidth: 980 }}>The same complaint, handled by the manual desk and by the system</h1>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, marginTop: 22 }}>
+        <section className="card" style={{ padding: "18px 20px" }}>
+          <h2 style={{ fontSize: 15 }}>{her} money held</h2>
+          <div className="vs">
+            <div><p className="note">Manual</p><p className="big bad">{inrR(d.today.victim_held_inr)}</p><p className="note">at Bank X.{otherHeld.length && d.today.onward_filed_at ? ` ${joinAnd(otherHeld.map((b) => b.name))} told at ${clock(d.today.onward_filed_at)}.` : ""}</p></div>
+            <div><p className="note">System</p><p className="big good">{inrR(sysHeld)}</p><p className="note">{pct(sysHeld, d.victim_paid_inr)}%{sysBanks.length > 1 ? ", across both banks" : ""}</p></div>
           </div>
-        </div>
-      ))}
-      {anyClosed && (
-        <div className="legend">
-          <span><span className="swatch" style={{ background: "#E3E8F5" }} />Office closed</span>
-          <span><span className="swatch" style={{ background: "#F7F9FA", border: "1px solid #D9DFE5" }} />Office open from 10:00</span>
-        </div>
-      )}
-      <div className="lists">
-        {lanes.map((l) => (
-          <div key={l.name}>
-            <h3>{l.name}</h3>
-            <ol>
-              {l.marks.map((m) => (
-                <li key={m.n}><span className="dot" style={{ background: m.bg }}>{m.n}</span><b>{clock(m.at)}</b><span>{m.text}</span></li>
-              ))}
-            </ol>
+          {sysBanks.length > 0 && (
+            <div className="bar" role="img" aria-label={`System: ${sysBanks.map((b) => `${inrR(b.victim_held_inr)} at ${b.name}`).join(" and ")}, of ${inrR(d.victim_paid_inr)}`} style={{ marginTop: 6, background: "#e8ecf0" }}>
+              {sysBanks.map((b, i) => <div key={b.bank_id} style={{ flex: `0 0 ${(n(b.victim_held_inr) / n(d.victim_paid_inr)) * 100}%`, background: i ? "#3b6ea5" : "#5b3fa0" }}>{b.name} {inrR(b.victim_held_inr)}</div>)}
+            </div>
+          )}
+          {cashNotes.length > 0 && <p className="note" style={{ marginTop: 6 }}>The rest left as cash before anyone could act: {joinAnd(cashNotes.map(([t, a]) => `${inrR(a)} at ${clock(t)}`))}.</p>}
+        </section>
+        <section className="card" style={{ padding: "18px 20px" }}>
+          <h2 style={{ fontSize: 15 }}>{gname ? `${possessive(gname)} own money blocked` : "Genuine customers' own money blocked"}</h2>
+          <div className="vs">
+            <div><p className="note">Manual</p><p className="big bad">{inrR(genuine ? genuine.honest_locked_inr : d.today.honest_locked_inr)}</p><p className="note">{genuine ? "whole account frozen" : "whole accounts frozen"}</p></div>
+            <div><p className="note">System</p><p className="big good">{inrR(sysOwn)}</p><p className="note">{narrow?.proposal_status === "WAITING" ? "₹0 if you approve" : "after the officer's decision"}</p></div>
           </div>
-        ))}
+          {gname && inflow && <p className="note" style={{ marginTop: 6 }}>{gname} received {inrR(inflow.amount_inr)} from {node(inflow.from_account)}. {inrR(narrow?.amount_inr ?? inflow.victim_inr)} of it was {v === "the victim" ? "the victim's" : "hers"}.</p>}
+        </section>
+        <section className="card" style={{ padding: "18px 20px" }}>
+          <h2 style={{ fontSize: 15 }}>First hold</h2>
+          <div className="vs">
+            <div><p className="note">Manual</p><p className="big bad">{clock(d.today.first_hold_at)}</p><p className="note">{duration(d.today.minutes_to_first_hold)} later</p></div>
+            <div><p className="note">System</p><p className="big good">{clock(d.tool.first_hold_at)}</p><p className="note">{duration(d.tool.minutes_to_first_hold)} later</p></div>
+          </div>
+          <p className="note" style={{ marginTop: 6 }}>The desk is closed from 18:00 to 10:00. Most fraud money moves in that window.</p>
+        </section>
       </div>
-    </section>
-  );
-}
 
-function Day({ day }) {
-  if (day.loading && !day.data) return <Loading what="Replaying every complaint through the manual process" />;
-  if (day.error) return <Failed error={day.error} retry={day.reload} />;
-  const d = day.data;
-  if (!d || !d.worked) return <p className="empty">The system hasn't handled any complaints yet. Use Replay the night on the Review page.</p>;
-  const todayMinutes = d.tickets.map((t) => t.today_minutes).filter((m) => m != null);
-  const pct = d.victim_paid_inr ? Math.round((d.tool.victim_held_inr / d.victim_paid_inr) * 100) : 0;
-  return (
-    <>
-      <div className="pairs">
-        <Pair label="Victims' money secured" today={inrR(d.today.victim_held_inr)} todayNote={`of ${inr(d.victim_paid_inr)} reported`}
-          agent={inrR(d.tool.victim_held_inr)} agentNote={`${pct}% of the money reported`} />
-        <Pair label="Genuine customers' money blocked" today={inrR(d.today.honest_locked_inr)}
-          todayNote={d.today.accounts_frozen_whole ? `${plural(d.today.accounts_frozen_whole, "full account")} frozen` : "No full-account freezes"}
-          agent={inrR(d.tool.honest_locked_now_inr)}
-          agentNote={d.tool.honest_locked_overnight_inr > d.tool.honest_locked_now_inr ? `${inrR(d.tool.honest_locked_overnight_inr)} before you reduced the holds` : d.tool.honest_locked_now_inr ? "Becomes ₹0 after you reduce the holds waiting for you" : "No genuine customer's money blocked"} />
-        <Pair label="Time to first hold" today={hoursRange(todayMinutes)} todayNote={`over ${plural(d.worked, "complaint")}`}
-          agent={d.tool.max_minutes != null ? `${d.tool.max_minutes} min` : "–"} agentNote="at most, on every complaint" />
-      </div>
-      <div className="table-wrap" style={{ marginBottom: 24 }}>
-        <table className="table wide">
-          <thead>
-            <tr>
-              <th>Complaint</th><th className="num">Reported</th>
-              <th className="num">Victim's money secured<br /><span className="note">manual / system</span></th>
-              <th className="num">Genuine customers' money blocked<br /><span className="note">manual / system</span></th>
-              <th className="num">First hold after<br /><span className="note">manual / system</span></th>
-            </tr>
-          </thead>
+      <section className="card" style={{ marginTop: 22, overflow: "hidden" }} aria-labelledby="tl-h">
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "8px 16px", padding: "16px 18px 12px" }}>
+          <h2 id="tl-h" style={{ fontSize: 18 }}>Hour by hour</h2>
+          <p className="note" style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ width: 28, height: 14, borderRadius: 3, background: "repeating-linear-gradient(135deg,#1d2a44 0 6px,#2a3a5c 6px 12px)" }} />Desk closed</p>
+        </div>
+        <table className="tl">
+          <thead><tr><th scope="col">Time</th><th scope="col">Manual desk</th><th scope="col">The system</th></tr></thead>
           <tbody>
-            {d.tickets.map((t) => (
-              <tr key={t.case_id}>
-                <td><a href={`#/compare/${t.case_id}`}>{clock(t.received_at)} complaint</a>{t.after_hours ? <span className="note"> · after office hours</span> : ""}</td>
-                <td className="num">{inr(t.victim_paid_inr)}</td>
-                <td className="num">{inrR(t.today_victim_held_inr)} / <b>{inrR(t.tool_victim_held_inr)}</b></td>
-                <td className="num">{inrR(t.today_honest_locked_inr)} / <b>{inrR(t.tool_honest_locked_now_inr)}</b></td>
-                <td className="num">{duration(t.today_minutes)} / <b>{duration(t.tool_minutes)}</b></td>
+            {rows.map((r, i) => (
+              <tr key={i} className={night(r.ts) ? "night" : ""}>
+                <td className="time">{clock(r.ts)}</td>
+                {r.both ? <td className="man" colSpan={2}>{r.both}</td> : <><td className={`man${r.man === "Nothing." ? " note" : ""}`}>{r.man}</td><td>{r.sys}</td></>}
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
-    </>
+      </section>
+
+      {dd?.worked > 0 && (
+        <section className="card" style={{ padding: "18px 20px", marginTop: 22 }} aria-labelledby="day-h">
+          <h2 id="day-h" style={{ fontSize: 18, marginBottom: 10 }}>Across all {plural(queue.length, "complaint")} today, at Bank X</h2>
+          <table className="tl" style={{ border: "1px solid #e8ecf0" }}>
+            <thead><tr><th scope="col" /><th scope="col">Manual desk</th><th scope="col">The system</th></tr></thead>
+            <tbody>
+              <tr><td>Victims' money held, of {inrR(dd.victim_paid_inr)}</td><td>{inrR(dd.today.victim_held_inr)} ({pct(dd.today.victim_held_inr, dd.victim_paid_inr)}%)</td><td className="good">{inrR(dd.tool.victim_held_inr)} ({pct(dd.tool.victim_held_inr, dd.victim_paid_inr)}%)</td></tr>
+              <tr><td>Genuine customers' money blocked</td><td className="bad">{inrR(dd.today.honest_locked_inr)}{frozenNames.length ? `, including ${joinAnd(frozenNames)} whole account${frozenNames.length === 1 ? "" : "s"}` : ""}</td>
+                <td className="good">{inrR(dd.tool.honest_locked_now_inr)}{n(dd.tool.honest_locked_now_inr) ? `, ₹0 after ${plural(queue.reduce((t, x) => t + (x.waiting_code === "PROPOSE_NARROW" ? 1 : 0), 0) || 1, "approval")}` : ""}</td></tr>
+              <tr><td>First hold, after-hours complaints</td><td>{nightMins.length ? (Math.min(...nightMins) === Math.max(...nightMins) ? duration(nightMins[0]) : `${duration(Math.min(...nightMins))} to ${duration(Math.max(...nightMins))}`) : "–"}</td><td className="good">{dd.tool.night_minutes?.length ? duration(Math.max(...dd.tool.night_minutes)) : duration(dd.tool.max_minutes)}</td></tr>
+            </tbody>
+          </table>
+          <p className="note" style={{ marginTop: 8 }}>Manual desk modelled as: open {d.desk.desk_opens?.length > 5 ? clock(d.desk.desk_opens) : "10:00"} to 18:00, about {d.desk.first_lookup_minutes} min for the first account and {d.desk.per_account_minutes} min for each next, freezes whole accounts.{sentBack.length ? ` ${joinAnd(sentBack.map((t) => `${possessive(victimName(t.victim_tag))} ${clock(t.received_at)}`))} complaint${sentBack.length === 1 ? " is" : "s are"} left out of both columns because ${sentBack.length === 1 ? "its notice does" : "their notices do"} not match the payment.` : ""}</p>
+        </section>
+      )}
+    </main>
   );
 }

@@ -132,11 +132,26 @@ class Night:
         if not self.clock():
             self.set_clock(NIGHT_START)
         steps = 0
+        logs = {}
+        # the handover note for the morning desk is written as the clock passes 09:00, so it is the night as it
+        # stood then, even when the run goes on through the day
+        handover = start < MORNING <= until
+
+        def write_logs(frm: str, to: str) -> None:
+            from pipeline.morning import write
+
+            for bank in self.banks:
+                if not is_desk(bank):
+                    logs[bank] = write(self.makers[bank], bank, frm, to, self.llm)
+
         while True:
             cand = self.candidates(until)
             if not cand:
                 break
             t, _, kind, obj = min(cand, key=lambda c: (c[0], c[1]))
+            if handover and t > MORNING:
+                write_logs(start, MORNING)
+                handover = False
             steps += 1
             if steps > 5000:
                 raise RuntimeError("the night did not settle (more than 5000 events)")
@@ -156,12 +171,10 @@ class Night:
                 for line in Watch(self.makers[bank], self.checkers[bank], bank).tick(until):
                     self.say(until, bank, line)
         self.set_clock(max(until, self.clock() or until))
-        logs = {}
-        for bank in self.banks:
-            if not is_desk(bank):
-                from pipeline.morning import write
-
-                logs[bank] = write(self.makers[bank], bank, start, until, self.llm)
+        if handover:
+            write_logs(start, MORNING)
+        if until > MORNING or start >= MORNING:
+            write_logs(max(start, MORNING) if start < MORNING else start, until)
         return {"from": start, "until": until, "events": steps, "lines": self.lines, "morning": logs}
 
     # ------------------------------------------------------------ handlers

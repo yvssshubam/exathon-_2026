@@ -45,10 +45,10 @@ def generate(seed: int = SEED) -> dict:
     second = [f"ACC_M{i:02d}" for i in range(9, 15)]
     merchants = [f"ACC_MER{i:02d}" for i in range(1, 5)]
     for aid in first:
-        acct(aid, "BANK_X", f"Mule {aid[-2:]}", "savings", "individual", rng.randint(5, 60), "low",
+        acct(aid, "BANK_X", f"Account M{aid[-2:]}", "savings", "individual", rng.randint(5, 60), "low",
              float(rng.randint(0, 20) * 100), "fast_pass_through")
     for aid in second:
-        acct(aid, rng.choice(["BANK_X", "BANK_Y"]), f"Mule {aid[-2:]}", "savings", "individual",
+        acct(aid, rng.choice(["BANK_X", "BANK_Y"]), f"Account M{aid[-2:]}", "savings", "individual",
              rng.randint(5, 80), "low", 0.0, "fast_pass_through")
     for i, aid in enumerate(merchants):
         acct(aid, ["BANK_X", "BANK_Z", "BANK_X", "BANK_Z"][i], f"Merchant {i + 1}", "current", "merchant",

@@ -20,7 +20,7 @@ from pipeline.checker import Checker, DecisionError
 
 DECISIONS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE")
 
-__all__ = ["DECISIONS", "DecisionError", "approve", "reject", "waiting"]
+__all__ = ["DECISIONS", "DecisionError", "approve", "reject", "undo", "waiting"]
 
 
 def now_of(conn) -> str:
@@ -44,6 +44,11 @@ def approve(conn, bank: str, proposal_id: int, officer: str, comment: str | None
 
 def reject(conn, bank: str, proposal_id: int, officer: str, reason: str | None, now: str | None = None) -> int:
     return Checker(conn, bank).apply_decision(proposal_id, "REJECTED", officer, now or now_of(conn), reason)
+
+
+def undo(conn, bank: str, decision_id: int, officer: str, reason: str, now: str | None = None) -> int:
+    """Hold again after a smaller hold, unfreeze after a freeze, release after an accepted near match."""
+    return Checker(conn, bank).undo_decision(decision_id, officer, reason, now or now_of(conn))
 
 
 def waiting(conn) -> list[tuple]:

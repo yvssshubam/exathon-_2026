@@ -267,8 +267,31 @@ def queue(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     """This bank's CFCFRMS inbox: every ticket that has reached it, when it landed and what happened to it."""
     out = rows(conn, """
         SELECT t.case_id, t.received_at, t.ticket_status, t.run_id, t.origin, c.amount_inr, c.utr,
-               c.complaint_source, c.ticket_kind, c.victim_tag, k.match_status, k.mismatched, k.problems, k.related,
-               k.related_case_id, r.run_status, r.run_mode, r.wall_seconds, r.sim_holds_at, r.summary_text
+               c.complaint_source, c.ticket_kind, c.victim_tag, c.from_bank_id, k.match_status, k.mismatched,
+               k.problems, k.related, k.related_case_id, k.near_amount_inr, r.run_status, r.run_mode, r.wall_seconds,
+               r.sim_holds_at, r.summary_text,
+               (SELECT SUM(h.amount_inr) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.hold_kind = 'LIEN'
+                  AND h.hold_status = 'ACTIVE') AS held_inr,
+               (SELECT COUNT(DISTINCT h.account_id) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id
+                  AND h.hold_kind = 'LIEN' AND h.hold_status = 'ACTIVE') AS held_accounts,
+               (SELECT MIN(h.placed_at) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.hold_kind = 'LIEN')
+                  AS first_hold_at,
+               (SELECT MIN(h.placed_at) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.hold_kind = 'MARKER')
+                  AS marker_at,
+               (SELECT MIN(w.event_at) FROM WATCH_EVENT w WHERE w.case_id = t.case_id
+                  AND w.event_kind = 'LINKED_TO_VICTIM') AS linked_at,
+               (SELECT SUM(p.victim_amount_inr) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id
+                  AND p.entry_kind = 'ONWARD') AS onward_inr,
+               (SELECT MIN(p.bank_id) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id
+                  AND p.entry_kind = 'ONWARD') AS onward_bank_id,
+               (SELECT SUM(p.victim_amount_inr) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id
+                  AND p.entry_kind = 'EXIT') AS exits_inr,
+               (SELECT MIN(p.filed_at) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id
+                  AND p.entry_kind = 'SEND_BACK') AS sent_back_at,
+               (SELECT COUNT(*) FROM PROPOSAL p WHERE p.case_id = t.case_id
+                  AND p.proposal_status = 'WAITING') AS waiting,
+               (SELECT MIN(p.action_code) FROM PROPOSAL p WHERE p.case_id = t.case_id
+                  AND p.proposal_status = 'WAITING') AS waiting_code
         FROM TICKET t
         JOIN COMPLAINT c ON c.case_id = t.case_id
         LEFT JOIN INTAKE_CHECK k ON k.case_id = t.case_id
@@ -278,6 +301,8 @@ def queue(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     for t in out:
         t["after_hours"] = after_hours(t["received_at"])
         t["label"] = labels.get(t["case_id"], t["case_id"])
+        t["onward_bank"] = bank_name(t.get("onward_bank_id"))
+        t["from_bank"] = bank_name(t.get("from_bank_id"))
     return out
 
 
@@ -317,10 +342,16 @@ def proposal_rows(conn, where: str, params: dict) -> list[dict]:
                   AND h.hold_status = 'ACTIVE' AND h.hold_kind = 'LIEN') AS current_hold_inr,
                (SELECT MIN(h.placed_at) FROM HOLD_LEDGER h WHERE h.account_id = p.account_id AND h.case_id = p.case_id
                   AND h.hold_status = 'ACTIVE' AND h.hold_kind = 'LIEN') AS held_since,
-               acc.bank_id AS account_bank_id, d.decided_by, d.decided_at, d.decision_outcome,
-               d.amount_inr AS decided_amount_inr, co.amount_inr AS complaint_amount_inr
+               acc.bank_id AS account_bank_id, d.decision_id, d.decided_by, d.decided_at, d.decision_outcome,
+               d.amount_inr AS decided_amount_inr, d.reason_text AS decided_reason, d.signed_text AS signed_text,
+               co.amount_inr AS complaint_amount_inr, co.victim_tag, co.utr AS notice_utr, co.txn_at AS notice_at,
+               co.beneficiary_account AS notice_account, k.near_utr, k.near_at, k.near_amount_inr, k.near_txn_id,
+               u.action_code AS undo_code, u.decided_by AS undone_by, u.decided_at AS undone_at,
+               u.reason_text AS undo_reason, u.amount_inr AS undo_amount_inr
         FROM PROPOSAL p
-        LEFT JOIN DECISION d ON d.proposal_id = p.proposal_id
+        LEFT JOIN DECISION d ON d.proposal_id = p.proposal_id AND d.action_code = p.action_code
+        LEFT JOIN DECISION u ON u.proposal_id = p.proposal_id AND u.action_code IN ('HOLD_AGAIN', 'UNFREEZE', 'RELEASE')
+        LEFT JOIN INTAKE_CHECK k ON k.case_id = p.case_id
         LEFT JOIN COMPLAINT co ON co.case_id = p.case_id
         LEFT JOIN TICKET t ON t.case_id = p.case_id
         LEFT JOIN ACCOUNT acc ON acc.account_id = p.account_id
@@ -340,6 +371,14 @@ def proposal_rows(conn, where: str, params: dict) -> list[dict]:
         p["record"] = f"/api/accounts/{p['account_id']}/record"
         p["label"] = labels.get(p["case_id"], p["case_id"])
         p["bank_name"] = bank_name(p.get("account_bank_id"))
+    now = clock_now() if any(p["proposal_status"] == "WAITING" for p in out) else None
+    if now:
+        from pipeline.checker import Checker
+
+        for p in out:
+            if p["proposal_status"] == "WAITING" and p.get("account_bank_id") in BANKS:
+                # the balance now: when it differs from the balance the proposal was made on, the card says so
+                p["balance_today_inr"] = float(Checker(conn, p["account_bank_id"]).balance_at(p["account_id"], now))
     return out
 
 
@@ -371,7 +410,8 @@ def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
 
     waiting = proposal_rows(conn, "p.proposal_status = 'WAITING'", {})
     done = rows(conn, """
-        SELECT t.case_id, t.received_at, t.ticket_status, c.amount_inr, c.ticket_kind, r.run_id, r.run_status,
+        SELECT t.case_id, t.received_at, t.ticket_status, c.amount_inr, c.ticket_kind, c.victim_tag, c.utr,
+               c.ordering_authority, r.run_id, r.run_status,
                r.run_mode, r.sim_holds_at, r.wall_seconds, r.summary_text,
                (SELECT COUNT(*) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.placed_by = 'agent'
                   AND h.hold_kind = 'LIEN') AS holds,
@@ -381,6 +421,22 @@ def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
                (SELECT COUNT(*) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.entry_kind = 'EXIT') AS exits,
                (SELECT COUNT(*) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.entry_kind = 'ONWARD') AS onward,
                (SELECT COUNT(*) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.entry_kind = 'KYC') AS kyc,
+               (SELECT MAX(p.filed_at) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id AND p.entry_kind = 'KYC')
+                  AS kyc_filed_at,
+               (SELECT SUM(p.victim_amount_inr) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id
+                  AND p.entry_kind = 'ONWARD') AS onward_inr,
+               (SELECT SUM(p.victim_amount_inr) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id
+                  AND p.entry_kind = 'EXIT') AS exits_inr,
+               (SELECT MIN(p.bank_id) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id
+                  AND p.entry_kind = 'ONWARD') AS onward_bank_id,
+               (SELECT MIN(p.moved_at) FROM PORTAL_ENTRY p WHERE p.case_id = t.case_id
+                  AND p.entry_kind = 'EXIT') AS exit_at,
+               (SELECT COUNT(DISTINCT h.account_id) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id
+                  AND h.placed_by = 'agent' AND h.hold_kind = 'LIEN' AND h.hold_status <> 'REPLACED') AS held_accounts,
+               (SELECT MIN(w.event_at) FROM WATCH_EVENT w WHERE w.case_id = t.case_id
+                  AND w.event_kind = 'LINKED_TO_VICTIM') AS linked_at,
+               (SELECT MIN(h.placed_at) FROM HOLD_LEDGER h WHERE h.case_id = t.case_id AND h.hold_kind = 'MARKER')
+                  AS marker_at,
                (SELECT COUNT(*) FROM PROPOSAL p WHERE p.case_id = t.case_id
                   AND p.proposal_status = 'WAITING') AS waiting,
                (SELECT MAX(d.decided_at) FROM DECISION d WHERE d.case_id = t.case_id) AS decided_at,
@@ -395,6 +451,7 @@ def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     labels = ticket_labels(conn)
     for d in done:
         d["after_hours"] = after_hours(d["received_at"])
+        d["onward_bank"] = bank_name(d.get("onward_bank_id"))
         d["label"] = labels.get(d["case_id"], d["case_id"])
         d["problem"] = plain_error(d.pop("error_text", None)) if d["run_status"] in ("FAILED", "CHECK_FAILED") else None
     watch = watch_rows(conn, bank)
@@ -463,15 +520,39 @@ def reject(proposal_id: int, body: Decide, bank: str = Query("BANK_X"), checker=
         raise HTTPException(400, str(exc)) from exc
 
 
+class Undo(BaseModel):
+    officer: str = Field(..., description="Officer undoing; required")
+    reason: str = Field(..., description="Why; required, it goes into the audit log and the hold record")
+
+
+@app.post("/api/decisions/{decision_id}/undo")
+def undo(decision_id: int, body: Undo, bank: str = Query("BANK_X"), checker=Depends(get_checker)):
+    """Hold again after a smaller hold, unfreeze after a freeze, release after an accepted near match."""
+    from pipeline import officer
+
+    try:
+        return {"decision_id": officer.undo(checker, bank, decision_id, body.officer, body.reason, now=clock_now())}
+    except DecisionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/accounts/{account_id}/record")
 def record(account_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     """The hold record: the notice, the path, the LIBR steps, the rule, who decided, every change, statement IDs."""
     from pipeline.record import hold_record, to_json
 
     try:
-        return json.loads(to_json(hold_record(conn, bank, account_id)))
+        r = json.loads(to_json(hold_record(conn, bank, account_id)))
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    now = clock_now()
+    if now:
+        from pipeline.checker import Checker
+
+        r["balance_now_inr"] = float(Checker(conn, bank).balance_at(account_id, now))
+    r["proposals_now"] = proposal_rows(conn, "p.account_id = {a} AND p.proposal_status IN ('WAITING', 'APPROVED', "
+                                             "'EDITED', 'REJECTED')", {"a": account_id})
+    return r
 
 
 @app.get("/api/accounts/{account_id}/record.txt", response_class=PlainTextResponse)
@@ -658,8 +739,11 @@ def paperwork(case_id: str, conn=Depends(get_conn)):
     check_case(conn, case_id)
     out = rows(conn, "SELECT * FROM PORTAL_ENTRY WHERE case_id = {c} ORDER BY entry_kind DESC, entry_id",
                {"c": case_id})
+    names = holder_names(conn)
     for e in out:
         e["bank_name"] = bank_name(e.get("bank_id"))
+        e["from_account_name"] = names.get(e.get("from_account"), e.get("from_account"))
+        e["account_name"] = names.get(e.get("account_id"), e.get("account_id"))
     return out
 
 
@@ -701,6 +785,140 @@ def holds(conn=Depends(get_conn)):
 @app.get("/api/decisions")
 def decisions(conn=Depends(get_conn)):
     return rows(conn, "SELECT * FROM DECISION ORDER BY decision_id DESC")
+
+
+def _num(pattern: str, text: str) -> int | None:
+    import re
+
+    m = re.search(pattern, text or "")
+    return int(m.group(1)) if m else None
+
+
+def plain_step(tool: str, text: str | None, case: str, paid: dict, checks: dict, held: dict, names: dict) -> str:
+    """One step of a run as the audit log says it: a plain sentence with names, no account or transaction IDs."""
+    import re
+
+    from pipeline.explain import inr
+
+    t = text or ""
+    if tool == "read_ticket":
+        return "Read the police notice. Every field present." if not re.search(r"missing|odd|problem", t, re.I) \
+            else f"Read the police notice: {t}"
+    if tool == "check_notice":
+        if "exact" in t.lower() and case in paid:
+            amt, ts, ch = paid[case]
+            return f"Matched the payment: {inr(amt)} at {str(ts)[11:16]}{f' by {ch}' if ch else ''}."
+        if "near" in t.lower():
+            return "The notice does not match a payment here. A payment that fits the rest of it did arrive."
+        if "accepted" in t.lower() and case in paid:
+            return f"Worked the near match the officer accepted: {inr(paid[case][0])}."
+    if tool == "find_related_cases":
+        if "duplicate" in t.lower():
+            return "Same payment as an earlier complaint: linked to it."
+        if "victim" in t.lower() and "new" in t.lower() and "transaction" not in t.lower():
+            return "A new victim on an account another complaint already reached."
+        return "Looked for earlier complaints: none for this payment."
+    if tool == "trace_money":
+        hops, other, exits = _num(r"(\d+) hops? into", t), _num(r"(\d+) to other bank", t), _num(r"(\d+) exits?", t)
+        parts = [f"{hops} account{'s' if hops != 1 else ''} here" if hops else None,
+                 f"{other} at other banks" if other else None,
+                 f"{exits} cash or crypto withdrawal{'s' if exits != 1 else ''}" if exits else None]
+        parts = [x for x in parts if x]
+        return f"Traced the money: {', '.join(parts)}." if parts else "Traced the money."
+    if tool == "attribute_victim_share":
+        return "Worked out the victim's share in each account, own money first."
+    if tool == "get_account_evidence":
+        n = len([x for x in t.split(";") if x.strip()]) if ":" in t else None
+        return (f"Read 90 days of history for {n} account{'s' if n != 1 else ''}." if n
+                else "Read the accounts' history.")
+    if tool == "allowed_actions":
+        auto, officer = _num(r"(\d+) automatic", t), _num(r"(\d+) decisions?", t)
+        if auto is not None:
+            return (f"Checked the rules: {auto} automatic action{'s' if auto != 1 else ''}, "
+                    f"{officer or 0} for the officer.")
+    if tool == "word_reasons":
+        return "Wrote the reasons the officer will read."
+    if tool == "propose_action":
+        auto, officer = _num(r"(\d+) automatic", t), _num(r"(\d+) for the officer", t)
+        if auto is not None:
+            return f"Proposed {auto} automatic action{'s' if auto != 1 else ''} and {officer or 0} for the officer."
+    if tool == "checker":
+        ok, total = checks.get(case, (None, None))
+        head = f"Checker passed {ok} of {total}." if total else "Checker ran."
+        return head + (f" Held {', '.join(held[case])}." if held.get(case) and (ok == total) else "")
+    if tool == "write_case_summary":
+        return "Wrote the summary for the handover."
+    if tool == "error":
+        return "Stopped: " + plain_error(t)
+    for acc, name in sorted(names.items(), key=lambda kv: -len(kv[0])):   # otherwise: the tool's line, in names
+        t = t.replace(acc, name)
+    t = re.sub(r"EXIT:(ATM|CRYPTO):", lambda m: "ATM " if m.group(1) == "ATM" else "crypto wallet ", t)
+    return t[:1].upper() + t[1:]
+
+
+DECIDED_WORDS = {"PROPOSE_NARROW": "Reduced the hold on {name} to {amt}", "PROPOSE_FULL_FREEZE": "Froze {name}, {amt}",
+                 "UNMATCHED_NOTICE": "Accepted the near match on {name}",
+                 "PROPOSE_RELEASE": "Released the hold on {name}",
+                 "HOLD_AGAIN": "Held {name} again, {amt}", "UNFREEZE": "Unfroze {name}",
+                 "RELEASE": "Released the near-match hold on {name}"}
+
+
+@app.get("/api/story")
+def story(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
+    """The audit log in plain words: every system step, every event after a hold, every officer decision and the
+    handover note, in time order, each with its reference (step, watch event, decision or note number)."""
+    from pipeline.explain import inr
+    from pipeline.morning import victim_name
+
+    labels, names = ticket_labels(conn), holder_names(conn)
+    victims = dict(conn.execute("SELECT case_id, victim_tag FROM COMPLAINT").fetchall())
+    out = []
+
+    def add(t, kind, who, what, case, ref):
+        out.append({"t": str(t)[:19] if t else None, "kind": kind, "who": who, "what": what, "case_id": case,
+                    "label": labels.get(case or "", case), "victim": victim_name(victims.get(case)) if case else None,
+                    "ref": ref})
+
+    paid = {c: (amt, ts, ch) for c, amt, ts, ch in conn.execute(
+        "SELECT k.case_id, t.amount_inr, t.ts, t.channel FROM INTAKE_CHECK k JOIN TXN t ON t.txn_id = k.matched_txn_id"
+    ).fetchall()}
+    checks = {c: (int(ok or 0), int(total or 0)) for c, ok, total in conn.execute(
+        "SELECT case_id, SUM(CASE WHEN check_passed THEN 1 ELSE 0 END), COUNT(*) FROM CHECK_RESULT "
+        "WHERE viewing_bank_id = {b} GROUP BY case_id", {"b": bank}).fetchall()}
+    held = {}
+    for c, acc, amt in conn.execute("SELECT case_id, account_id, SUM(amount_inr) FROM HOLD_LEDGER WHERE placed_by = "
+                                    "'agent' AND hold_kind = 'LIEN' GROUP BY case_id, account_id "
+                                    "ORDER BY case_id, MIN(hold_id)").fetchall():
+        held.setdefault(c, []).append(f"{inr(amt)} in {names.get(acc, acc)}")
+
+    for run, case, started, holds_at, n, tool, text, ids in conn.execute(
+            "SELECT r.run_id, r.case_id, r.sim_started_at, r.sim_holds_at, s.step_no, s.tool_name, s.result_text, "
+            "s.stmt_ids FROM AGENT_STEP s JOIN AGENT_RUN r ON r.run_id = s.run_id "
+            "ORDER BY r.run_id, s.step_no").fetchall():
+        when = holds_at if tool in ("checker", "write_case_summary") and holds_at else started
+        add(when, "system", "The system", plain_step(tool, text, case, paid, checks, held, names), case,
+            f"step {int(run)}.{int(n)}" + (f" · stmt {ids}" if ids else ""))
+    for w in watch_rows(conn, bank):
+        text = w["sentence"] or ""
+        text = text[7:] if text[:2].isdigit() and text[2:3] == ":" else text
+        add(w["event_at"], "watch", "After the hold", text[:1].upper() + text[1:], w.get("case_id"),
+            f"watch {int(w['event_id'])}")
+    for d in rows(conn, "SELECT decision_id, case_id, account_id, action_code, decision_outcome, amount_inr, "
+                        "decided_by, decided_at, reason_text FROM DECISION ORDER BY decision_id"):
+        name = names.get(d["account_id"], d["account_id"])
+        if d["decision_outcome"] == "REJECTED":
+            what = f"Kept the hold on {name} as it was"
+        else:
+            what = DECIDED_WORDS.get(d["action_code"], d["action_code"]).format(
+                name=name, amt=inr(d["amount_inr"]) if d["amount_inr"] else "")
+        add(d["decided_at"], "officer", d["decided_by"], what + (f'. Reasons signed: {d["reason_text"]}'
+                                                                if d["reason_text"] else "."), d["case_id"],
+            f"decision D-{int(d['decision_id']):02d}")
+    for log_id, to in conn.execute("SELECT log_id, period_to FROM MORNING_LOG WHERE viewing_bank_id = {b}",
+                                   {"b": bank}).fetchall():
+        add(to, "note", "The system", "Filed the handover note for the morning desk.", None, f"note {int(log_id)}")
+    out.sort(key=lambda e: (e["t"] or "", e["ref"]))
+    return out
 
 
 @app.get("/api/audit")

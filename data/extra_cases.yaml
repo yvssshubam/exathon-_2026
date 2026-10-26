@@ -276,7 +276,7 @@ complaints:
 accounts:
 - account_id: ACC_M01
   bank_id: BANK_X
-  holder: Mule 01
+  holder: Account M01
   account_type: savings
   holder_type: individual
   opened_on: '2026-09-03'
@@ -285,7 +285,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M02
   bank_id: BANK_X
-  holder: Mule 02
+  holder: Account M02
   account_type: savings
   holder_type: individual
   opened_on: '2026-10-12'
@@ -294,7 +294,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M03
   bank_id: BANK_X
-  holder: Mule 03
+  holder: Account M03
   account_type: savings
   holder_type: individual
   opened_on: '2026-09-28'
@@ -303,7 +303,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M04
   bank_id: BANK_X
-  holder: Mule 04
+  holder: Account M04
   account_type: savings
   holder_type: individual
   opened_on: '2026-10-05'
@@ -312,7 +312,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M05
   bank_id: BANK_X
-  holder: Mule 05
+  holder: Account M05
   account_type: savings
   holder_type: individual
   opened_on: '2026-08-31'
@@ -321,7 +321,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M06
   bank_id: BANK_X
-  holder: Mule 06
+  holder: Account M06
   account_type: savings
   holder_type: individual
   opened_on: '2026-10-08'
@@ -330,7 +330,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M07
   bank_id: BANK_X
-  holder: Mule 07
+  holder: Account M07
   account_type: savings
   holder_type: individual
   opened_on: '2026-09-16'
@@ -339,7 +339,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M08
   bank_id: BANK_X
-  holder: Mule 08
+  holder: Account M08
   account_type: savings
   holder_type: individual
   opened_on: '2026-10-12'
@@ -348,7 +348,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M09
   bank_id: BANK_X
-  holder: Mule 09
+  holder: Account M09
   account_type: savings
   holder_type: individual
   opened_on: '2026-09-14'
@@ -357,7 +357,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M10
   bank_id: BANK_X
-  holder: Mule 10
+  holder: Account M10
   account_type: savings
   holder_type: individual
   opened_on: '2026-08-03'
@@ -366,7 +366,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M11
   bank_id: BANK_X
-  holder: Mule 11
+  holder: Account M11
   account_type: savings
   holder_type: individual
   opened_on: '2026-08-05'
@@ -375,7 +375,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M12
   bank_id: BANK_Y
-  holder: Mule 12
+  holder: Account M12
   account_type: savings
   holder_type: individual
   opened_on: '2026-09-15'
@@ -384,7 +384,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M13
   bank_id: BANK_Y
-  holder: Mule 13
+  holder: Account M13
   account_type: savings
   holder_type: individual
   opened_on: '2026-07-30'
@@ -393,7 +393,7 @@ accounts:
   history: fast_pass_through
 - account_id: ACC_M14
   bank_id: BANK_Y
-  holder: Mule 14
+  holder: Account M14
   account_type: savings
   holder_type: individual
   opened_on: '2026-10-13'

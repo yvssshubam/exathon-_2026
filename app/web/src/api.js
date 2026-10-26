@@ -2,7 +2,15 @@
 // and carries out the officer's four decisions. The console is Bank X's nodal desk; the narrator page is the demo's.
 const BANK = "BANK_X";
 
+// A saved copy (python -m app.snapshot) carries every answer inside the page and has no API behind it.
+export const SNAPSHOT = typeof window !== "undefined" ? window.__PH_SNAPSHOT__ || null : null;
+
 async function call(method, path, body) {
+  if (SNAPSHOT) {
+    if (method !== "GET") throw new Error("This is a saved copy of the console, so nothing can be changed here. Decisions and the demo controls work in the live console.");
+    if (path in SNAPSHOT.data) return structuredClone(SNAPSHOT.data[path]);
+    throw Object.assign(new Error("This page was not part of the saved copy."), { status: 404 });
+  }
   const sep = path.includes("?") ? "&" : "?";
   const res = await fetch(`/api${path}${sep}bank=${BANK}`, {
     method,
@@ -31,8 +39,12 @@ export const api = {
   watch: () => call("GET", "/watch"),
   approve: (proposalId, body) => call("POST", `/proposals/${proposalId}/approve`, body),
   reject: (proposalId, body) => call("POST", `/proposals/${proposalId}/reject`, body),
+  undo: (decisionId, body) => call("POST", `/decisions/${decisionId}/undo`, body),
+  story: () => call("GET", "/story"),
   record: (acc) => call("GET", `/accounts/${enc(acc)}/record`),
-  recordTextUrl: (acc) => `/api/accounts/${enc(acc)}/record.txt?bank=${BANK}`,
+  recordTextUrl: (acc) => SNAPSHOT
+    ? `data:text/plain;charset=utf-8,${enc(SNAPSHOT.text[`/accounts/${enc(acc)}/record.txt`] || "")}`
+    : `/api/accounts/${enc(acc)}/record.txt?bank=${BANK}`,
   // tickets and cases
   queue: () => call("GET", "/queue"),
   workOne: (caseId, mode = "pipeline") => call("POST", `/tickets/${enc(caseId)}/work?mode=${mode}`),

@@ -95,7 +95,9 @@ def test_the_holder_is_told_the_authority_the_notice_and_the_amount_only():
          "ordering_authority": "Cyber Crime Police Station, Vellore (simulated)",
          "notice_legal_basis": "S.168 r/w S.94 BNSS"}
     text = holder_message(c, "ACC_D", "500.00")
-    assert "Rs 500" in text and "VLR/CCPS/2026/1018-01" in text and "Vellore" in text and "XXXXCC_D" in text
+    assert "Rs 500" in text and "VLR/CCPS/2026/1018-01" in text and "Vellore" in text and "ending CC_D" in text
+    assert "from 02:16 on 18 Oct 2026" in holder_message(c, "ACC_D", "500.00", at="2026-10-18 02:16:00")
+    assert "contest" in text
     for evidence in ("mule", "pass", "complaint", "victim", "score", "ticket", "fraud"):
         assert evidence not in text.lower()
     assert "frozen" in holder_message(c, "ACC_C", "29500.00", "ACCOUNT_FREEZE")

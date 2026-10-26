@@ -1,494 +1,493 @@
-import { useState } from "react";
-import { api } from "../api.js";
-import Decide from "../components/Decide.jsx";
-import { SinceHold, byAccount } from "../components/Watch.jsx";
+import { useMemo, useState } from "react";
+import { api, SNAPSHOT } from "../api.js";
+import DecisionCard, { attemptsOf, balanceChanged, clearCase, figures, matchCount, Undo } from "../components/DecisionCard.jsx";
 import { Failed, Loading } from "../components/bits.jsx";
-import { evidenceBullets, evidenceLine } from "../evidence.js";
-import { age, clock, hoursRange, inr, inrR, plural, when } from "../format.js";
+import { ageWords, clock, duration, inrR, joinAnd, plural, rs, shortName, victim } from "../format.js";
 import { useLoad } from "../hooks.js";
 
-// The officer's Review screen (follows the console design review). Two columns: what needs the officer's approval
-// (only ever the four decisions: reduce a hold, freeze a whole account, a complaint that does not match a payment,
-// a release after 75 days) and what the system completed by itself. Complaints are named by the time they arrived.
-const MORNING = "2026-10-18 09:00:00";
-const DESK_OPENS = "2026-10-18 10:30:00";
-const DAY_END = "2026-10-18 23:59:00";
+// Review, the officer's home (design board "Review (home)" and "Decisions at volume"). The dark band answers
+// "how did the day go"; the decisions for the officer come first, ordered by urgency (nothing held yet, then
+// genuine customers locked out of their own money, then freezes, where the money is already held); today's
+// complaints, what happened since the holds and the KYC packets sit on the right.
+
+const GROUPS = [
+  { id: "unmatched", code: "UNMATCHED_NOTICE", title: "No matching payment", jump: "No matching payment", tile: "Complaint with no matching payment",
+    pill: ["Act first: nothing is held", "p-urgent"], badge: { background: "#f9e1df", color: "#7a211b" } },
+  { id: "narrow", code: "PROPOSE_NARROW", title: "Reduce a genuine customer's hold", jump: "Reduce the hold", tile: "Reduce a genuine customer's hold",
+    pill: ["Customers locked out of their own money", "p-wait"], badge: { background: "#fbf0dc", color: "#3d2600" },
+    desc: "These accounts got fraud money in a payment that looks like an ordinary sale. The rules made the system hold the whole payment; only part of it is the victim's." },
+  { id: "freeze", code: "PROPOSE_FULL_FREEZE", title: "Freeze a full account", jump: "Freeze the account", tile: "Freeze a full account",
+    pill: ["The victim's money is already held", "p-plain"], badge: { background: "#e8ecf0", color: "#44505e" },
+    desc: "A freeze adds one thing to the hold: it blocks money that comes in later, until the police decide. Use it when an account keeps receiving fraud money." },
+  { id: "release", code: "PROPOSE_RELEASE", title: "Release a hold", jump: "Release", tile: "Release a hold", pill: ["No police direction in 75 days", "p-plain"],
+    badge: { background: "#e8ecf0", color: "#44505e" }, desc: "A hold with no police direction for 75 days must be lifted or confirmed." },
+];
+const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const dayLabel = (ts) => (ts ? `${Number(String(ts).slice(8, 10))} ${MONTHS[Number(String(ts).slice(5, 7)) - 1]} ${String(ts).slice(0, 4)}` : "");
-const rs = (s) => String(s || "").replace(/Rs (?=\d)/g, "₹");
-const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
-const joinAnd = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
+const n = (v) => Number(v || 0);
+const minutesBetween = (a, b) => Math.round((new Date(String(b).replace(" ", "T")) - new Date(String(a).replace(" ", "T"))) / 60000);
+const possessive = (s) => (s.endsWith("s") ? `${s}'` : `${s}'s`);
 
-// one group per account and decision, as the officer decides them
-function groups(waiting) {
-  const by = {};
-  for (const w of waiting) (by[`${w.action_code}|${w.account_id}`] ||= []).push(w);
-  const list = Object.values(by);
-  const of = (code) => list.filter((g) => g[0].action_code === code);
-  return {
-    narrow: of("PROPOSE_NARROW"),
-    freeze: of("PROPOSE_FULL_FREEZE").sort((a, b) => b.length - a.length || Number(b[0].amount_inr) - Number(a[0].amount_inr)),
-    unmatched: of("UNMATCHED_NOTICE"),
-    release: of("PROPOSE_RELEASE"),
-    count: list.length,
-  };
-}
-
-export default function Review({ officer }) {
+export default function Review({ officer, onChange }) {
   const inbox = useLoad(() => api.inbox(), []);
   const day = useLoad(() => api.day(), []);
   const clockNow = useLoad(() => api.clock(), []);
-  const [busy, setBusy] = useState(null);
-  const [note, setNote] = useState(null);
-  const reload = () => { inbox.reload(); day.reload(); clockNow.reload(); };
+  const [justDone, setJustDone] = useState([]);       // decided this visit: rows stay in place as one grey line
 
-  async function run(label, fn, say) {
-    setBusy(label);
-    setNote(null);
-    try {
-      const r = await fn();
-      setNote(say(r));
-      reload();
-    } catch (e) {
-      setNote(e.message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  if (inbox.loading && !inbox.data) return <div className="wrap"><Loading what="Loading the review" /></div>;
+  if (inbox.loading && !inbox.data) return <div className="wrap"><Loading what="Loading the morning" /></div>;
   if (inbox.error) return <div className="wrap"><Failed error={inbox.error} retry={inbox.reload} /></div>;
-  const data = inbox.data;
-  const g = groups(data.waiting);
-  const done = [...data.done].sort((a, b) => String(b.received_at).localeCompare(String(a.received_at)));
-  const failed = done.filter((d) => ["FAILED", "CHECK_FAILED"].includes(d.run_status));
-  const night = done.filter((d) => d.after_hours);
-  const office = done.filter((d) => !d.after_hours);
-  const watched = byAccount(data.watch);
-  const now = clockNow.data?.clock;
-  const decided = [...(data.decided || [])].sort((a, b) => String(b.decided_at).localeCompare(String(a.decided_at)));
-  const narrowed = decided.filter((p) => p.action_code === "PROPOSE_NARROW");
-  const frozen = decided.filter((p) => p.action_code === "PROPOSE_FULL_FREEZE");
-  const otherDone = decided.filter((p) => !["PROPOSE_NARROW", "PROPOSE_FULL_FREEZE"].includes(p.action_code));
+  const d = inbox.data;
+  const decidedById = Object.fromEntries((d.decided || []).map((p) => [p.proposal_id, p]));
+  const onDone = (p) => { setJustDone((j) => [...j, p]); inbox.reload(); day.reload(); onChange?.(); };
+  const reload = () => { inbox.reload(); day.reload(); onChange?.(); };
+  // waiting items, plus the ones decided this visit (kept where they were, from the snapshot taken before deciding)
+  const items = [...d.waiting, ...justDone.filter((p) => !d.waiting.some((w) => w.proposal_id === p.proposal_id))];
+  const groups = GROUPS.map((g) => ({ ...g, items: items.filter((p) => p.action_code === g.code), waiting: d.waiting.filter((p) => p.action_code === g.code) }));
+  const decided = (d.decided || []).filter((p) => !justDone.some((j) => j.proposal_id === p.proposal_id));
+  const total = d.waiting.length;
 
   return (
     <>
-      <Band data={data} day={day} groups={g} done={done} night={night} failed={failed} now={now} />
-      <main id="main" className="wrap review">
-        {note && <p className="status" role="status" style={{ flex: "1 1 100%" }}>{note}</p>}
-
-        <section className="decisions" aria-labelledby="dec-h">
-          <h2 id="dec-h">Needs your approval <span className="count">{g.count + failed.length}</span></h2>
-          {g.count + failed.length === 0 && (
-            <p className="empty">{done.length ? `Nothing is waiting for you. ${done.length === 1 ? "The complaint is" : `All ${done.length} complaints are`} completed.` : "No complaints have been handled yet. Use Replay the night below."}</p>
-          )}
-
-          {failed.length > 0 && (
-            <div className="group">
-              <div className="group-h"><h3>Not completed by the system</h3><span className="count">{failed.length}</span></div>
-              {failed.map((d) => <ProblemCard key={d.case_id} d={d} onDone={reload} />)}
-            </div>
-          )}
-
-          {(g.narrow.length > 0 || narrowed.length > 0) && (
-            <div className="group">
-              <div className="group-h"><h3>{g.narrow.length > 1 ? "Genuine customers: reduce the hold" : "Genuine customer: reduce the hold"}</h3><span className="count">{g.narrow.length}</span></div>
-              {g.narrow.length > 0 && <p className="group-p">The system held the full amount {g.narrow.length === 1 ? "this account" : "these accounts"} received from the fraud. Only part of it is the victim's money.</p>}
-              {[...g.narrow].sort((x, y) => (Number(y[0].current_hold_inr) - Number(y[0].amount_inr)) - (Number(x[0].current_hold_inr) - Number(x[0].amount_inr)))
-                .map((ps) => <GenuineCard key={ps[0].account_id} ps={ps} officer={officer} onDone={reload} watch={watched[ps[0].account_id]} />)}
-              <DecidedLines list={narrowed} />
-            </div>
-          )}
-
-          {(g.freeze.length > 0 || frozen.length > 0) && <MuleTable groups={g.freeze} frozen={frozen} officer={officer} onDone={reload} watched={watched} />}
-
-          {g.unmatched.length > 0 && (
-            <div className="group">
-              <div className="group-h"><h3>{g.unmatched.length === 1 ? "Complaint that does not match a payment" : "Complaints that do not match a payment"}</h3><span className="count">{g.unmatched.length}</span></div>
-              <p className="group-p">Nothing was held and the complaint went back to the police. A payment that looks like the one described did reach the account. If you agree it is the same payment, the system handles the complaint now.</p>
-              {g.unmatched.map((ps) => <UnmatchedCard key={ps[0].proposal_id} p={ps[0]} officer={officer} onDone={reload} />)}
-            </div>
-          )}
-
-          {otherDone.length > 0 && <DecidedLines list={otherDone} />}
-
-          {g.release.length > 0 && (
-            <div className="group">
-              <div className="group-h"><h3>Release after 75 days on the watch</h3><span className="count">{g.release.length}</span></div>
-              <p className="group-p">No police direction has confirmed these holds in 75 days.</p>
-              {g.release.map((ps) => (
-                <article key={ps[0].proposal_id} className="card decision">
-                  <div className="decision-head"><div><h4>{ps[0].name}</h4><div className="muted">{inr(ps[0].current_hold_inr)} held · <a href={`#/case/${ps[0].case_id}`}>{ps[0].label}</a></div></div></div>
-                  <Reasons p={ps[0]} />
-                  <Decide p={ps[0]} officer={officer} onDone={reload} />
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <aside className="done" aria-labelledby="done-h">
-          <h2 id="done-h">Completed by the system <span className="count">{done.length}</span></h2>
-          <h3>After office hours · {night.length}</h3>
-          {night.length ? <DoneList list={night} /> : <p className="empty">No complaints came in after office hours.</p>}
-          {office.length > 0 && <OfficeHours list={office} />}
-          {data.watch?.length > 0 && <Watched events={data.watch} />}
-          <h3>KYC documents for police</h3>
-          <div className="card pad">
-            <p>{data.kyc_filed ? `${plural(data.kyc_filed, "KYC packet")} filed with the portal, in the same run as the holds. The rules allow 7 days; nothing is left to send.` : "No KYC packets were needed."}</p>
+      <Band d={d} day={day.data} now={clockNow.data?.clock} groups={groups} total={total} />
+      <main id="main" className="wrap" style={{ display: "flex", flexWrap: "wrap", gap: 28, alignItems: "flex-start", paddingTop: 24, paddingBottom: 40 }}>
+        <section style={{ flex: "999 1 640px", minWidth: 0 }} aria-labelledby="dec-h">
+          <div style={{ position: "sticky", top: 0, zIndex: 2, background: "#f3f5f7", padding: "4px 0 12px" }}>
+            <h2 id="dec-h" style={{ fontSize: 20, marginBottom: 10 }}>Decisions for you <span style={{ color: "#5b6675", fontWeight: 400 }}>{total}</span></h2>
+            <nav className="jump" aria-label="Jump to a group" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {groups.filter((g) => g.waiting.length).map((g) => {
+                const clear = g.id === "narrow" && g.waiting.length >= 4 ? g.waiting.filter((p) => clearCase(p)[0] && !balanceChanged(p)).length : 0;
+                return <a key={g.id} href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); document.getElementById(`g-${g.id}`)?.scrollIntoView({ behavior: "smooth" }); }}>
+                  {g.jump} <b style={g.badge}>{g.waiting.length}{clear ? ` · ${clear} clear` : ""}</b></a>;
+              })}
+              {decided.length > 0 && <a href="#g-decided" onClick={(e) => { e.preventDefault(); document.getElementById("g-decided")?.scrollIntoView({ behavior: "smooth" }); }}>Decided today <b style={{ background: "#e8ecf0", color: "#44505e" }}>{decided.length}</b></a>}
+            </nav>
           </div>
-          {data.morning_log?.text && (
-            <details className="logbox">
-              <summary>Morning log, as filed</summary>
-              <LogText text={data.morning_log.text} />
-            </details>
-          )}
+          {total === 0 && justDone.length === 0 && <p className="card" style={{ padding: "14px 18px", marginTop: 12 }}>Nothing is waiting for you.{d.done.length ? ` All ${plural(d.done.length, "complaint")} today are handled.` : " No complaints have come in yet."}</p>}
+          {groups.filter((g) => g.items.length).map((g) => (
+            <Group key={g.id} g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById} />
+          ))}
+          {decided.length > 0 && <DecidedToday list={decided} officer={officer} onDone={reload} />}
+        </section>
+        <aside style={{ flex: "1 1 360px", minWidth: 0 }} aria-labelledby="today-h">
+          <TodayList d={d} groups={groups} />
+          <SinceHolds watch={d.watch} />
+          <Kyc d={d} />
         </aside>
-
-        <div className="democtl">
-          <b>Demo controls</b><span>Synthetic data. Not part of the officer's screen. Simulated clock: {now ? when(now) : "not started"}.</span>
-          <button className="btn btn-sm" disabled={!!busy} onClick={() => run("night", () => api.night(MORNING, true),
-            (r) => `The night ran from ${clock(r.from)} to ${clock(r.until)}: ${plural(r.events, "event")} across the three banks, in ${r.seconds} s.`)}>
-            {busy === "night" ? "Running the night…" : "Replay the night to 09:00"}
-          </button>
-          <button className="btn btn-sm" disabled={!!busy || !now || now >= DESK_OPENS} onClick={() => run("desk", () => api.night(DESK_OPENS, false),
-            (r) => `Continued to ${clock(r.until)}: Bank Z's staff started at 10:00 and handled their complaint. See The whole night.`)}>
-            {busy === "desk" ? "Running…" : "Continue to 10:30 (Bank Z opens)"}
-          </button>
-          <button className="btn btn-sm" disabled={!!busy || !now || now >= DAY_END} onClick={() => run("day", () => api.night(DAY_END, false),
-            (r) => `Ran on to ${clock(r.until)}: every complaint of 18 Oct arrived and was handled (${plural(r.events, "event")}, ${r.seconds} s).`)}>
-            {busy === "day" ? "Running the rest of the day (a few minutes)…" : "Run the rest of the day"}
-          </button>
-          <button className="btn btn-sm" disabled={!!busy} onClick={() => run("reset", () => api.reset(), () => "Reset: every complaint waits on the portal again.")}>
-            {busy === "reset" ? "Resetting…" : "Reset"}
-          </button>
-        </div>
       </main>
     </>
   );
 }
 
-function Band({ data, day, groups: g, done, night, failed, now }) {
-  const d = day.data;
-  const n = done.length;
-  const waitingCount = g.count + failed.length;
-  let headline, sub;
-  if (!n) {
-    headline = "No fraud complaints handled yet.";
-    sub = "New complaints are handled within 3 minutes of arriving.";
-  } else if (failed.length) {
-    headline = `The system completed ${n - failed.length} of ${plural(n, "complaint")}. ${plural(failed.length, "complaint")} could not be completed automatically.`;
-    sub = "Please open them and finish the missing steps. They are at the top of \"Needs your approval\".";
-  } else {
-    const within = d?.tool?.max_minutes != null ? ` within ${plural(d.tool.max_minutes, "minute")} ${n === 1 ? "" : "each"}`.trimEnd() : "";
-    headline = n === 1 ? `The system handled 1 complaint${within}.` : `The system handled all ${n} complaints${within}.`;
-    headline += night.length === 0 ? " None came in after office hours." : night.length === n ? (n === 1 ? " It came in after office hours." : " All of them came in after office hours.") : ` ${night.length} came in after office hours.`;
-    sub = "Money is held and reports are filed. Only the items below need your approval.";
-  }
-  const narrow = data.waiting.filter((w) => w.action_code === "PROPOSE_NARROW");
-  const release = narrow.reduce((s, w) => s + (Number(w.current_hold_inr || 0) - Number(w.amount_inr || 0)), 0);
-  const names = narrow.map((w) => String(w.name).replace(/\s*\(.*\)$/, ""));
-  const nightTimes = night.map((x) => clock(x.received_at)).reverse();
+// ---------------------------------------------------------------- the band
+function Band({ d, day, now, groups, total }) {
+  const done = d.done || [];
+  const failed = done.filter((t) => ["FAILED", "CHECK_FAILED"].includes(t.run_status));
+  const night = done.filter((t) => t.after_hours);
+  const worked = done.filter((t) => t.sim_holds_at);
+  const mins = worked.map((t) => minutesBetween(t.received_at, t.sim_holds_at)).filter((m) => m >= 0);
+  const max = mins.length ? Math.max(...mins) : null;
+  const ts = now || done.at(-1)?.received_at;
+  const date = ts ? new Date(String(ts).slice(0, 10)) : null;
+  const top = date ? `Review · ${DAYS[date.getDay()]} ${date.getDate()} ${MONTHS[date.getMonth()]} ${date.getFullYear()}${now ? ` · clock ${clock(now)}` : ""}` : "Review";
+  let headline;
+  if (!done.length) headline = "No complaints yet today.";
+  else if (failed.length) headline = `${plural(done.length, "complaint")} today. ${failed.length} could not be completed by the system and ${failed.length === 1 ? "needs" : "need"} you.`;
+  else headline = `${plural(done.length, "complaint")} today. ${done.length === 1 ? "It was" : "Every one was"} worked within ${max ?? 0} minute${max === 1 ? "" : "s"}${night.length ? `, ${night.length === done.length ? "all" : night.length} of them after office hours` : ""}.`;
+  const onward = done.reduce((t, x) => t + n(x.onward), 0), exits = done.reduce((t, x) => t + n(x.exits), 0), kyc = n(d.kyc_filed);
+  const filed = [onward && plural(onward, "onward entry", "onward entries"), exits && plural(exits, "cash withdrawal"), kyc && plural(kyc, "KYC packet")].filter(Boolean);
+  const narrowWaiting = groups.find((g) => g.id === "narrow").waiting.length;
+  const tool = day?.tool, today = day?.today;
+  const pct = (a, b) => (n(b) ? Math.round((n(a) / n(b)) * 100) : 0);
+  const nightHeld = night.filter((t) => t.sim_holds_at);
+  const nightMins = today?.night_minutes || [];
+  const frozen = (today?.frozen_names || []).map((x) => possessive(shortName(x)));
+  const w = d.watch || [];
+  const refused = w.filter((e) => ["CASHOUT_BLOCKED", "TRANSFER_BLOCKED"].includes(e.event_kind));
+  const caught = w.filter((e) => e.event_kind === "NEW_MONEY_HELD");
+  const linkedVictims = new Set(w.filter((e) => e.event_kind === "LINKED_TO_VICTIM").map((e) => e.case_id));
+  const watched = w.filter((e) => e.event_kind === "RECIPIENT_WATCHED");
   return (
-    <section className="band" aria-labelledby="band-h">
-      <div className="wrap">
-        <p className="eyebrow">Review · {dayLabel(now || done[0]?.received_at) || "today"}</p>
-        <h1 id="band-h">{headline}</h1>
-        <p className="lede">{sub}</p>
-        {n > 0 && (
-          <div className="bandstats">
-            <div className="bandstat">
-              <div className="label">Genuine customers' money blocked</div>
-              <div className="big">{d ? inrR(d.tool.honest_locked_now_inr) : "…"}</div>
-              {d && <div className="sub">Manual process: <b>{inrR(d.today.honest_locked_inr)}</b>{d.today.accounts_frozen_whole ? `, because ${plural(d.today.accounts_frozen_whole, "full account")} ${d.today.accounts_frozen_whole === 1 ? "is" : "are"} frozen` : ""}</div>}
-              {d && release > 0 && <div className="foot good">Becomes {inrR(Math.max(0, d.tool.honest_locked_now_inr - release))} after you reduce {joinAnd(names)}'s hold</div>}
-            </div>
-            <div className="bandstat">
-              <div className="label">Victims' money secured</div>
-              <div className="big">{d ? inrR(d.tool.victim_held_inr) : "…"}</div>
-              {d && <div className="sub">Manual process: <b>{inrR(d.today.victim_held_inr)}</b> of {inrR(d.victim_paid_inr)} reported</div>}
-            </div>
-            <div className="bandstat">
-              <div className="label">{night.length ? "Time to first hold, after-hours complaints" : "Time to first hold, all complaints"}</div>
-              <div className="big">{d?.tool?.max_minutes != null ? `${d.tool.max_minutes} min` : "…"}</div>
-              {d && <div className="sub">Manual process: <b>{hoursRange(night.length ? d.today.night_minutes : d.tickets.map((t) => t.today_minutes).filter((m) => m != null))}</b></div>}
-              {nightTimes.length > 0 && <div className="foot">Complaints at {joinAnd(nightTimes)}</div>}
-            </div>
-            <div className={`bandstat decisions${waitingCount === 0 ? " clear" : ""}${failed.length ? " problem" : ""}`}>
-              <div className="label">Needs your approval</div>
-              <div className="big">{waitingCount}</div>
-              <div className="sub">{waitingCount === 0 ? "Nothing waiting for you" : failed.length ? `includes ${plural(failed.length, "complaint")} the system could not complete` : `${plural(data.waiting.length, "suggestion")}, grouped by account`}</div>
+    <section style={{ background: "#1c2742", color: "#e4e9f5" }} aria-labelledby="band-h">
+      <div className="wrap" style={{ paddingTop: 26, paddingBottom: 26 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-start", gap: "12px 24px", marginBottom: 18 }}>
+          <div style={{ maxWidth: 860 }}>
+            <p style={{ fontSize: 13, letterSpacing: "0.05em", textTransform: "uppercase", color: "#a9b6d6", marginBottom: 6 }}>{top}</p>
+            <h1 id="band-h" style={{ fontSize: 28, lineHeight: 1.25, color: "#fff", marginBottom: 8 }}>{headline}</h1>
+            {done.length > 0 && <p style={{ color: "#c4cde3", fontSize: 15 }}>Money is held.{filed.length ? ` ${joinAnd(filed)} ${filed.length === 1 && (onward + exits + kyc) === 1 ? "is" : "are"} filed with the portal.` : ""} {total ? `Only ${plural(total, "decision")} ${total === 1 ? "needs" : "need"} you.` : "Nothing needs you."}</p>}
+          </div>
+          {d.morning_log && <a className="btn" href="#/audit" style={{ background: "transparent", color: "#fff", borderColor: "#5b6a93" }}>Handover note, {clock(d.morning_log.period_to)}</a>}
+        </div>
+        {done.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+            <Tile title="Victims' money secured" big={tool ? inrR(tool.victim_held_inr) : "…"} sub={day ? `${pct(tool.victim_held_inr, day.victim_paid_inr)}% of ${inrR(day.victim_paid_inr)} reported` : ""}
+              manual={today && <>Manual process: <b style={{ color: "#fff" }}>{inrR(today.victim_held_inr)}</b> ({pct(today.victim_held_inr, day.victim_paid_inr)}%)</>} />
+            <Tile title="Genuine customers' money blocked" big={tool ? inrR(tool.honest_locked_now_inr) : "…"} green
+              sub={narrowWaiting && n(tool?.honest_locked_now_inr) ? `₹0 once you approve ${plural(narrowWaiting, "smaller hold")}` : n(tool?.honest_locked_now_inr) ? "" : "None of their own money is held"}
+              manual={today && <>Manual process: <b style={{ color: "#fff" }}>{inrR(today.honest_locked_inr)}</b>{frozen.length ? `, ${joinAnd(frozen)} full account${frozen.length === 1 ? "" : "s"} frozen` : ""}</>} />
+            <Tile title="First hold, after-hours complaints" big={nightHeld.length ? duration(Math.max(...nightHeld.map((t) => minutesBetween(t.received_at, t.sim_holds_at)))) : "–"}
+              sub={nightHeld.length ? `at ${joinAnd(nightHeld.map((t) => clock(t.received_at)))}` : "No after-hours complaint needed a hold"}
+              manual={nightMins.length > 0 && <>Manual process: <b style={{ color: "#fff" }}>{Math.min(...nightMins) === Math.max(...nightMins) ? duration(Math.min(...nightMins)) : `${duration(Math.min(...nightMins))} to ${duration(Math.max(...nightMins))}`}</b></>} />
+            <div style={{ background: "#fbf0dc", borderRadius: 10, padding: "16px 18px", color: "#3d2600" }}>
+              <p style={{ fontSize: 14, color: "#6b4200" }}>Decisions for you</p>
+              <p style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.2, marginBottom: 6 }}>{total}</p>
+              {groups.filter((g) => g.waiting.length).map((g) => (
+                <a key={g.id} className="tile-link" href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); document.getElementById(`g-${g.id}`)?.scrollIntoView({ behavior: "smooth" }); }}><span>{g.tile}</span><b>{g.waiting.length}</b></a>
+              ))}
+              {failed.length > 0 && <a className="tile-link" href={`#/case/${encodeURIComponent(failed[0].case_id)}`}><span>Complaint the system could not complete</span><b>{failed.length}</b></a>}
             </div>
           </div>
         )}
-        {n > 0 && day.error && <p className="footnote">The manual-process numbers could not be worked out: {day.error.message}</p>}
-        {n > 0 && <p className="footnote">"Manual process" shows what happens today on the same complaints: staff start at 10:00, take about 20 minutes to trace the first account and 15 minutes for each next account, and freeze whole accounts.</p>}
+        {w.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "6px 14px", marginTop: 14, fontSize: 14, color: "#c4cde3" }}>
+            <b style={{ color: "#fff" }}>Since the holds:</b>
+            {[refused.length && `${plural(refused.length, "cash-out")} refused, ${inrR(refused.reduce((t, e) => t + n(e.amount_inr), 0))} kept`,
+              caught.length && `${inrR(caught.reduce((t, e) => t + n(e.amount_inr), 0))} of new money caught${linkedVictims.size ? `, linked to ${plural(linkedVictims.size, "victim")}` : ""}`,
+              watched.length && `${plural(watched.length, "new account")} watched`].filter(Boolean).flatMap((x, i) => (i ? [<span key={`s${i}`} aria-hidden="true">·</span>, <span key={i}>{x}</span>] : [<span key={i}>{x}</span>]))}
+            <a href="#/audit" style={{ color: "#fff" }}>All {plural(w.length, "event")}</a>
+          </div>
+        )}
+        {done.length > 0 && <p style={{ marginTop: 10, fontSize: 12, color: "#a9b6d6" }}>"Manual process" replays today's practice on the same transactions: the desk opens at 10:00 and closes at 18:00, takes about 20 minutes for the first account and 15 for each next one, and freezes whole accounts.{done.some((t) => t.run_status === "SENT_BACK") ? ` The ${joinAnd(done.filter((t) => t.run_status === "SENT_BACK").map((t) => clock(t.received_at)))} complaint is left out of both: nothing matched it.` : ""}</p>}
       </div>
     </section>
   );
 }
 
-function Reasons({ p, title = "Why" }) {
+function Tile({ title, big, sub, manual, green }) {
   return (
-    <>
-      {p.reasons_for?.length > 0 && (<><h5 className="why-h">{title}</h5><ul className="why">{p.reasons_for.map((s) => <li key={s}>{rs(s)}</li>)}</ul></>)}
-      {p.case_against?.length > 0 && (<><h5 className="why-h against">The case against</h5><ul className="why against">{p.case_against.map((s) => <li key={s}>{rs(s)}</li>)}</ul></>)}
-    </>
-  );
-}
-
-function GenuineCard({ ps, officer, onDone, watch }) {
-  const p = ps[0];
-  const panel = useLoad(() => api.account(p.case_id, p.account_id), [p.case_id, p.account_id]);
-  const held = Number(p.current_hold_inr || 0);
-  const victim = Number(p.amount_inr || 0);
-  const own = Math.max(0, held - victim);
-  const bal = Number(p.balance_now_inr || 0);
-  const bullets = panel.data ? evidenceBullets(panel.data.signals, panel.data.inflows) : [];
-  const part = (v) => `${(Math.max(v, 0) / held) * 100}%`;
-  return (
-    <article className="card decision">
-      <div className="decision-head">
-        <div>
-          <h4>{p.name}</h4>
-          <div className="muted">
-            {p.bank_name} {p.account_type} account{p.opened_on ? `, open ${age(p.opened_on, p.proposed_at)}` : ""} · <a href={`#/case/${p.case_id}/${encodeURIComponent(p.account_id)}`}>{p.label}{p.complaint_amount_inr != null ? `, ${inr(p.complaint_amount_inr)}` : ""}</a>
-          </div>
-        </div>
-        <span className="pill pill-honest pill-lg">Likely genuine customer</span>
-      </div>
-      <div className="figures">
-        <div><div className="label">Balance</div><div className="val">{inr(bal)}</div></div>
-        <div><div className="label">Held{p.held_since ? ` since ${clock(p.held_since)}` : ""}</div><div className="val">{inr(held)}</div></div>
-        <div><div className="label">Victim's share</div><div className="val victim">{inr(victim)}</div></div>
-      </div>
-      {held > 0 && (
-        <div className="splitbar" role="img" aria-label={`Of the ${inr(held)} held, ${inr(victim)} is the victim's and ${inr(own)} is the customer's own`}>
-          {victim > 0 && <div className="victim" style={{ flex: `0 0 ${part(victim)}` }}>Victim's {inr(victim)}</div>}
-          {own > 0 && <div className="own" style={{ flex: `0 0 ${part(own)}` }}>Customer's own {inr(own)}</div>}
-        </div>
-      )}
-      <p className="split-cap">{victim > 0 ? `Of the ${inr(held)} held, ${inr(victim)} is traced to the victim.` : `None of the ${inr(held)} held is traced to the victim.`} The remaining {inr(Math.max(0, bal - held))} was never blocked.</p>
-      {bullets.length > 0 && (<><h5 className="why-h">Why this looks like a genuine business</h5><ul className="why three">{bullets.map((b) => <li key={b}>{b}</li>)}</ul></>)}
-      {p.citation && <p className="basis">Legal basis: {p.citation}</p>}
-      <p className="note recordlink"><a href={`#/record/${encodeURIComponent(p.account_id)}`}>Open the hold record</a></p>
-      <Decide p={p} officer={officer} onDone={onDone} />
-      {(p.case_against?.length > 0 || watch?.length > 0) && (
-        <details className="cardmore">
-          <summary>The case against{watch?.length ? ", and what happened since the hold" : ""}</summary>
-          {p.case_against?.length > 0 && <ul className="why against">{p.case_against.map((x) => <li key={x}>{rs(x)}</li>)}</ul>}
-          <SinceHold events={watch} />
-        </details>
-      )}
-    </article>
-  );
-}
-
-function MuleTable({ groups: gs, frozen = [], officer, onDone, watched = {} }) {
-  const [open, setOpen] = useState(null);
-  const [more, setMore] = useState(false);
-  const one = gs.length + frozen.length === 1;
-  const shown = more ? gs : gs.slice(0, 10);
-  return (
-    <div className="group">
-      <div className="group-h"><h3>{one ? "Mule account: freeze the full account?" : "Mule accounts: freeze the full account?"}</h3><span className="count">{gs.length}</span></div>
-      <p className="group-p">Money passes through {one ? "this account" : "these accounts"} quickly. Open {one ? "it" : "an account"} to check the evidence before approving. One approval applies to every complaint that names the account.</p>
-      <div className="table-wrap">
-        <table className="table wide">
-          <thead><tr><th>Account</th><th className="num">Complaints</th><th className="num">Balance to be frozen</th><th>Evidence</th><th><span className="sr-only">Action</span></th></tr></thead>
-          <tbody>
-            {shown.map((ps) => {
-              const p = ps[0];
-              const key = p.account_id;
-              const bal = Number(p.amount_inr || 0);
-              const tried = (watched[key] || []).some((e) => e.event_kind === "CASHOUT_BLOCKED");
-              return [
-                <tr key={key} className={open === key ? "open" : ""}>
-                  <td className="name">{p.name}</td>
-                  <td className="num">{ps.length}</td>
-                  <td className="num">{inr(bal)}</td>
-                  <td className="ev">{evidenceLine(p, p.proposed_at)}{tried && <div className="watchtag">Tried to withdraw held money after the hold</div>}</td>
-                  <td className="act"><button className="btn btn-sm" aria-expanded={open === key} onClick={() => setOpen(open === key ? null : key)}>{open === key ? "Close" : bal === 0 ? "Hold money that comes in later" : "Review"}</button></td>
-                </tr>,
-                open === key && (
-                  <tr key={key + "-panel"} className="open">
-                    <td colSpan="5" className="rowpanel">
-                      <Reasons p={p} title="Why a full freeze is proposed" />
-                      <p className="note" style={{ margin: "8px 0" }}>Named in: {ps.map((x, i) => <span key={x.proposal_id}>{i ? ", " : ""}<a href={`#/case/${x.case_id}/${encodeURIComponent(x.account_id)}`}>{x.label}</a></span>)}. Held now, amount only: {inr(p.current_hold_inr)}.</p>
-                      <SinceHold events={watched[key]} />
-                      {p.citation && <p className="basis">Legal basis: {p.citation}</p>}
-                      <p className="note recordlink"><a href={`#/record/${encodeURIComponent(key)}`}>Open the hold record</a></p>
-                      <Decide p={p} officer={officer} onDone={() => { setOpen(null); onDone(); }} compact />
-                    </td>
-                  </tr>
-                ),
-              ];
-            })}
-            {frozen.map((p) => (
-              <tr key={`f${p.proposal_id}`} className="donerow">
-                <td className="name">{p.name}</td><td className="num">1</td><td className="num">{inr(p.amount_inr)}</td>
-                <td className="ev">{evidenceLine(p, p.proposed_at)}</td>
-                <td className="act">{p.proposal_status === "REJECTED" ? `Kept as it was, ${p.decided_by}, ${clock(p.decided_at)}` : `Frozen by ${p.decided_by}, ${clock(p.decided_at)}`}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {gs.length > 10 && !more && <button className="btn btn-sm" style={{ marginTop: 8 }} onClick={() => setMore(true)}>Show {gs.length - 10} more</button>}
+    <div style={{ background: "#26335a", borderRadius: 10, padding: "16px 18px" }}>
+      <p style={{ fontSize: 14, color: "#c4cde3" }}>{title}</p>
+      <p style={{ fontSize: 32, fontWeight: 700, color: "#fff", lineHeight: 1.2 }}>{big}</p>
+      {sub && <p style={{ fontSize: 14, color: green ? "#b9dcc9" : "#c4cde3", marginTop: 4 }}>{sub}</p>}
+      {manual && <p style={{ fontSize: 13, color: "#a9b6d6", marginTop: 8, paddingTop: 8, borderTop: "1px solid #34437a" }}>{manual}</p>}
     </div>
   );
 }
 
-// After the officer acts: one line per decision, at the bottom of its group.
-function DecidedLines({ list }) {
-  if (!list.length) return null;
-  const words = (p) => p.proposal_status === "REJECTED" ? "kept as it was"
-    : p.action_code === "PROPOSE_NARROW" ? `hold reduced to ${inr(p.decided_amount_inr ?? p.amount_inr)}`
-      : p.action_code === "UNMATCHED_NOTICE" ? "near match accepted, complaint handled" : p.action_code === "PROPOSE_RELEASE" ? "hold released" : "approved";
+// ---------------------------------------------------------------- a decision group: cards up to 3, a list from 4
+function Group({ g, d, officer, onDone, reload, decidedById }) {
+  const list = g.items.length >= 4;
+  const one = g.items.length === 1 && g.id === "unmatched";
+  const desc = g.id === "unmatched"
+    ? one ? `The UTR on the notice is not a payment into this account, so nothing was held and the notice went back to the police at ${clock(g.items[0].proposed_at)}. A payment that fits everything else did arrive, and it is still in the account.`
+      : "The UTRs on these notices are not payments into the accounts they name, so nothing was held and the notices went back to the police. Payments that fit everything else did arrive."
+    : g.desc;
   return (
-    <ul className="decidedlines">
-      {list.map((p) => <li key={p.proposal_id}><b>{p.name.replace(/\s*\(.*\)$/, "")}</b>: {words(p)} by {p.decided_by} at {clock(p.decided_at)}</li>)}
-    </ul>
+    <div id={`g-${g.id}`} style={{ marginTop: g.id === "unmatched" ? 12 : 26, scrollMarginTop: 110 }}>
+      {!list && (
+        <>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px 10px", marginBottom: 4 }}>
+            <h3 style={{ fontSize: 17 }}>{g.title}</h3><span className={`pill ${g.pill[1]}`}>{g.pill[0]}</span>
+          </div>
+          <p style={{ fontSize: 14, color: "#44505e", marginBottom: 12, maxWidth: 760 }}>{desc}</p>
+          {(g.id === "narrow" ? [...g.items].sort((a, b) => figures(b).release - figures(a).release) : g.items).map((p) => {
+            const done = decidedById[p.proposal_id];
+            return done ? <DoneLine key={p.proposal_id} p={done} officer={officer} onDone={reload} card /> :
+              <DecisionCard key={p.proposal_id} p={p} officer={officer} onDone={onDone} watch={d.watch} />;
+          })}
+        </>
+      )}
+      {list && <ListGroup g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById} />}
+    </div>
   );
 }
 
-function ProblemCard({ d, onDone }) {
+// one grey line for a row decided this visit: who decided and when, and the undo for that kind
+function DoneLine({ p, officer, onDone, card, cols }) {
+  const outcome = p.decision_outcome || p.proposal_status;
+  const word = outcome === "REJECTED" ? (p.action_code === "UNMATCHED_NOTICE" ? "Left with the police" : `Kept at ${inrR(p.current_hold_inr || p.amount_inr)}`)
+    : { PROPOSE_NARROW: `Reduced to ${inrR(p.decided_amount_inr ?? p.amount_inr)}`, PROPOSE_FULL_FREEZE: "Frozen", UNMATCHED_NOTICE: `Accepted, ${inrR(p.amount_inr)} held`, PROPOSE_RELEASE: "Released" }[p.action_code];
+  const body = <><span style={{ color: "#5b6675" }}>{word} by {p.decided_by}, {clock(p.decided_at)}</span><Undo p={p} officer={officer} onDone={onDone} compact /></>;
+  if (cols) return <tr className="done"><td colSpan={cols - 1}><b style={{ color: "#5b6675" }}>{shortName(p.name)}</b> <span style={{ marginLeft: 16 }}>{word} by {p.decided_by}, {clock(p.decided_at)}</span></td><td className="r"><Undo p={p} officer={officer} onDone={onDone} compact /></td></tr>;
+  return <div className={card ? "card" : ""} style={{ padding: "14px 18px", marginBottom: 14, display: "flex", flexWrap: "wrap", gap: "8px 16px", alignItems: "center", background: "#fafbfc" }}>
+    <b style={{ color: "#5b6675" }}>{shortName(p.name)}</b>{body}</div>;
+}
+
+function ListGroup({ g, d, officer, onDone, reload, decidedById }) {
+  const [filter, setFilter] = useState("all");
+  const [complaint, setComplaint] = useState("all");
+  const [openId, setOpenId] = useState(null);
+  const [more, setMore] = useState(false);
+  const [picked, setPicked] = useState([]);
+  const [signing, setSigning] = useState(false);
+  const rows = useMemo(() => {
+    let r = [...g.items];
+    if (g.id === "narrow") r.sort((a, b) => figures(b).release - figures(a).release);
+    if (g.id === "freeze") r.sort((a, b) => attemptsOf(b, d.watch).length - attemptsOf(a, d.watch).length || n(b.complaint_links) - n(a.complaint_links) || n(b.current_hold_inr) - n(a.current_hold_inr));
+    if (g.id === "unmatched") r.sort((a, b) => n(b.balance_today_inr) - n(a.balance_today_inr));
+    return r;
+  }, [g.items, g.id, d.watch]);
+  const isClear = (p) => clearCase(p)[0] && !balanceChanged(p);
+  let shown = rows.filter((p) => complaint === "all" || p.case_id === complaint);
+  if (g.id === "narrow" && filter !== "all") shown = shown.filter((p) => (filter === "clear") === isClear(p));
+  const limited = more ? shown : shown.slice(0, 10);
+  const complaints = [...new Map(rows.map((p) => [p.case_id, p.label])).entries()];
+  const firstLook = rows.find((p) => !decidedById[p.proposal_id] && !isClear(p));
+  const open = openId ?? firstLook?.proposal_id ?? null;
+  const waitingRows = rows.filter((p) => !decidedById[p.proposal_id]);
+  const own = waitingRows.reduce((t, p) => t + figures(p).release, 0);
+  const sel = picked.map((id) => rows.find((p) => p.proposal_id === id)).filter((p) => p && !decidedById[p.proposal_id] && isClear(p));
+  const nextAfter = (p) => rows.find((x) => x.proposal_id !== p.proposal_id && !decidedById[x.proposal_id] && !isClear(x))?.proposal_id ?? null;
+  const decide = (p) => { setOpenId(nextAfter(p)); onDone(p); };
+
+  const title = { narrow: "Reduce a genuine customer's hold", freeze: "Freeze the whole account?", unmatched: "Notice does not fully match", release: "Release a hold" }[g.id];
+  const cols = g.id === "narrow" ? 8 : g.id === "freeze" ? 5 : 4;
+  return (
+    <section className="card" style={{ padding: "18px 20px", ...(g.id === "unmatched" ? { borderColor: "#e7b3ae" } : {}) }} aria-labelledby={`lg-${g.id}`}>
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "10px 16px", marginBottom: 12 }}>
+        <div>
+          <h3 id={`lg-${g.id}`} style={{ fontSize: 20 }}>{title} · {waitingRows.length}</h3>
+          {g.id === "narrow" && <p className="note" style={{ fontSize: 14 }}>{inrR(own)} of their own money is blocked. The victims' share stays held whatever you decide.</p>}
+          {g.id === "unmatched" && <p style={{ color: "#7a211b", fontWeight: 600 }}>Nothing is held on any of these yet</p>}
+        </div>
+        {g.id === "narrow" && (
+          <div className="chips">
+            {[["all", "All", rows.length], ["clear", "Clear cases", rows.filter(isClear).length], ["look", "Need a look", rows.filter((p) => !isClear(p)).length]].map(([k, l, c]) => (
+              <button key={k} className={`chip${filter === k ? " on" : ""}`} type="button" onClick={() => setFilter(k)}>{l} <span>{c}</span></button>
+            ))}
+          </div>
+        )}
+        {rows.length > 10 && (
+          <label className="note" style={{ display: "flex", alignItems: "center", gap: 8 }}>Complaint
+            <select value={complaint} onChange={(e) => setComplaint(e.target.value)}><option value="all">All</option>{complaints.map(([id, l]) => <option key={id} value={id}>{l}</option>)}</select></label>
+        )}
+      </div>
+      {signing ? <SignStep list={sel} officer={officer} onBack={() => setSigning(false)} onSigned={() => { setSigning(false); setPicked([]); reload(); }} /> : (
+        <>
+          <div className="tw">
+            <table className="t">
+              <thead><tr>
+                {g.id === "narrow" && <><th scope="col"><span className="sr">Select</span></th><th scope="col">Customer</th><th scope="col" className="r">Held</th><th scope="col" className="r">Victim's share</th><th scope="col" className="r">Would release</th><th scope="col">Complaint</th><th scope="col">Case</th><th /></>}
+                {g.id === "freeze" && <><th scope="col">Account</th><th scope="col" className="r">Complaints</th><th scope="col" className="r">Held</th><th scope="col">Tried to move held money</th><th /></>}
+                {(g.id === "unmatched" || g.id === "release") && <><th scope="col">Complaint</th><th scope="col" className="r">Still in the account</th><th scope="col">Details that match</th><th /></>}
+              </tr></thead>
+              <tbody>
+                {limited.map((p, i) => {
+                  const done = decidedById[p.proposal_id];
+                  if (done) return <DoneLine key={p.proposal_id} p={done} officer={officer} onDone={reload} cols={cols} />;
+                  const isOpen = open === p.proposal_id;
+                  const f = figures(p);
+                  const [clear, why] = clearCase(p);
+                  const changed = balanceChanged(p);
+                  const btn = <button className="btn btn-s" type="button" onClick={() => setOpenId(isOpen ? -1 : p.proposal_id)}>{isOpen ? "Close" : "Open"}</button>;
+                  return [
+                    <tr key={p.proposal_id} className={isOpen ? "open" : ""}>
+                      {g.id === "narrow" && <>
+                        <td>{changed ? <span className="pill p-chg">New</span> : clear && officer && !SNAPSHOT ? <span className="cbw"><input className="cb" type="checkbox" aria-label={`Select ${p.name}`} checked={picked.includes(p.proposal_id)} onChange={(e) => setPicked((x) => e.target.checked ? [...x, p.proposal_id] : x.filter((y) => y !== p.proposal_id))} /></span> : null}</td>
+                        <td><b>{shortName(p.name)}</b><br /><span className="note">{p.account_type}, {ageWords(p.opened_on, p.held_since).replace(/ \d+ months?$/, "")}</span></td>
+                        <td className="r">{inrR(f.held)}</td><td className="r vic">{inrR(f.target)}</td><td className="r own" style={{ fontWeight: 700 }}>{inrR(f.release)}</td>
+                        <td className="mono">{clock(p.received_at)}</td>
+                        <td>{changed ? <><span className="pill p-chg">Changed at {clock(p.proposed_at)}</span><br /><span className="note">Balance moved. Open to review again.</span></>
+                          : clear ? <span className="pill p-clear">Clear case</span> : <><span className="pill p-look">Need a look</span><br /><span className="note">{why}</span></>}</td>
+                        <td className="r">{btn}</td></>}
+                      {g.id === "freeze" && <>
+                        <td><b>{shortName(p.name)}</b></td><td className="r">{Math.round(n(p.complaint_links)) || 1}</td><td className="r">{inrR(f.held)}</td>
+                        <td>{(() => { const t = attemptsOf(p, d.watch); return t.length ? <><b>{plural(t.length, "try", "tries")}</b>, {joinAnd(t.map((e) => clock(e.event_at)))}</> : "None"; })()}</td>
+                        <td className="r">{btn}</td></>}
+                      {(g.id === "unmatched" || g.id === "release") && <>
+                        <td><b>{clock(p.received_at)} · {inrR(p.complaint_amount_inr)}</b><br /><span className="note">{victim(p.victim_tag)}, to {shortName(p.name)}</span></td>
+                        <td className="r">{n(p.balance_today_inr) ? <b>{inrR(p.balance_today_inr)}</b> : <span className="note">₹0</span>}</td>
+                        <td>{(() => { const m = matchCount(p); return <>{m.same} of {m.total}<br /><span className="note">{joinAnd(m.differ)} differ{m.differ.length === 1 ? "s" : ""}</span></>; })()}</td>
+                        <td className="r">{btn}</td></>}
+                    </tr>,
+                    isOpen && <tr key={`${p.proposal_id}-o`} className="open"><td colSpan={cols} style={{ padding: "0 14px 14px" }}>
+                      <DecisionCard p={p} officer={officer} onDone={decide} watch={d.watch} variant={g.id === "narrow" ? "inlist" : "panel"}
+                        position={`${{ narrow: "Smaller hold", freeze: "Freeze", unmatched: "Near match", release: "Release" }[g.id]} · ${i + 1} of ${rows.length}`} />
+                    </td></tr>,
+                  ];
+                })}
+              </tbody>
+            </table>
+          </div>
+          {shown.length > 10 && !more && <button className="btn" type="button" style={{ marginTop: 10 }} onClick={() => setMore(true)}>Show {shown.length - 10} more</button>}
+          <p className="note" style={{ marginTop: 8 }}>{g.id === "narrow" ? "Sorted by money to release, largest first, so the customers hurt most come up first. A clear case is an account older than 1 year, with no cash out in 90 days, where the victim's share is under 5% of the balance. Other rows say why they need a look."
+            : g.id === "freeze" ? "Sorted by attempts to move held money, then by number of complaints, then by amount held. An account that tried to empty itself during a hold is the strongest case for a freeze, so it comes first. No checkboxes: a full freeze needs reasons for each account."
+              : "Sorted by money still in the account, because that is what can still be lost. A row with ₹0 left drops to the bottom. Its only remaining job is the police report."}</p>
+          {sel.length > 0 && (
+            <div className="selbar">
+              <span><b>{sel.length} selected</b> · would release {inrR(sel.reduce((t, p) => t + figures(p).release, 0))} of customers' own money · victims' {inrR(sel.reduce((t, p) => t + figures(p).target, 0))} stays held</span>
+              <span style={{ display: "flex", gap: 8 }}><button className="btn btn-q" type="button" onClick={() => setPicked([])}>Clear selection</button>
+                <button className="btn" type="button" onClick={() => setSigning(true)}>Review and sign {sel.length}</button></span>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+// several clear-case smaller holds at once: each account still gets its own signed reason and audit entry
+function SignStep({ list, officer, onBack, onSigned }) {
+  const [texts, setTexts] = useState(() => Object.fromEntries(list.map((p) => [p.proposal_id, p.draft_text || ""])));
+  const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  async function retry() {
-    setBusy(true); setError(null);
-    try { await api.workOne(d.case_id); onDone(); } catch (e) { setError(e.message); } finally { setBusy(false); }
+  async function sign() {
+    setBusy(true);
+    setError(null);
+    try {
+      for (const p of list) await api.approve(p.proposal_id, { officer, signed_text: texts[p.proposal_id] !== p.draft_text ? texts[p.proposal_id] : null });
+      onSigned();
+    } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   return (
-    <article className="card decision problem">
-      <h4>{cap(d.label)} · {inr(d.amount_inr)}</h4>
-      <p>{d.problem || "The system could not finish this complaint."}</p>
+    <div className="card signstep">
+      <h3 style={{ fontSize: 20 }}>Reduce {list.length} holds to the victim's share</h3>
+      <p style={{ color: "#44505e" }}>Each account gets its own decision and audit entry, signed as {officer}. The reasons are written from each account's evidence. Edit any you disagree with.</p>
+      {list.map((p) => (
+        <div key={p.proposal_id} className="item">
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}><b>{shortName(p.name)}</b><span>{inrR(p.current_hold_inr)} → <b>{inrR(p.amount_inr)}</b></span></div>
+          {editing === p.proposal_id ? <textarea rows={4} value={texts[p.proposal_id]} onChange={(e) => setTexts((t) => ({ ...t, [p.proposal_id]: e.target.value }))} />
+            : <p style={{ whiteSpace: "pre-wrap" }}>{rs(texts[p.proposal_id])}</p>}
+          <button className="linkbtn" type="button" style={{ justifySelf: "start", textDecoration: "none", fontWeight: 600, color: "#44505e" }} onClick={() => setEditing(editing === p.proposal_id ? null : p.proposal_id)}>{editing === p.proposal_id ? "Done editing" : "Edit reason"}</button>
+        </div>
+      ))}
+      <p className="note">Legal basis on all {list.length}: {rs(list[0]?.citation || "hold only the victim's amount (SOP 5(xii), 9.1(i)).")}</p>
+      <div className="decided">Released money can be spent at once. If you change your mind later, a new hold can only cover what is still in the account.</div>
       {error && <p className="error" role="alert">{error}</p>}
-      <div className="row">
-        <a className="btn btn-sm" href={`#/case/${d.case_id}`}>Open complaint</a>
-        <button className="btn btn-sm" disabled={busy} onClick={retry}>{busy ? "Trying again…" : "Try again"}</button>
-      </div>
-    </article>
+      <div className="acts"><button className="btn btn-p" type="button" disabled={busy} onClick={sign}>{busy ? "Signing…" : `Sign ${plural(list.length, "decision")} as ${officer}`}</button>
+        <button className="btn btn-q" type="button" onClick={onBack}>Back to the list</button></div>
+    </div>
   );
 }
 
-function UnmatchedCard({ p, officer, onDone }) {
-  const n = p.reasons?.numbers || {};
+// ---------------------------------------------------------------- decided today
+function DecidedToday({ list, officer, onDone }) {
+  const [show, setShow] = useState(list.length <= 3);
   return (
-    <article className="card decision">
-      <div className="decision-head">
-        <div>
-          <h4>{cap(p.label)}: {p.name}'s account</h4>
-          <div className="muted">Sent back to the police at {clock(p.proposed_at)} · <a href={`#/case/${p.case_id}`}>open the complaint</a></div>
-        </div>
-        <span className="pill pill-plain pill-lg">Nothing held</span>
-      </div>
-      <div className="figures">
-        <div><div className="label">Payment that looks the same</div><div className="val">{inr(n.near_amount ?? p.amount_inr)}</div></div>
-        <div><div className="label">Paid at</div><div className="val">{clock(n.near_at)}</div></div>
-        <div><div className="label">Held so far</div><div className="val muted-val">Nothing yet</div></div>
-      </div>
-      <Reasons p={p} title="What does not match" />
-      {p.citation && <p className="basis">Legal basis: {p.citation}</p>}
-      <p className="note recordlink">If you accept, the system handles the complaint at once and holds the victim's money that is still there.</p>
-      <Decide p={p} officer={officer} onDone={onDone} />
-    </article>
+    <div id="g-decided" style={{ marginTop: 26, scrollMarginTop: 110 }}>
+      <h3 style={{ fontSize: 17, marginBottom: 10 }}>Decided today <span style={{ color: "#5b6675", fontWeight: 400 }}>{list.length}</span>
+        {!show && <button className="linkbtn" type="button" style={{ marginLeft: 12, fontSize: 14 }} onClick={() => setShow(true)}>Show</button>}</h3>
+      {show && list.map((p) => {
+        const rej = p.decision_outcome === "REJECTED";
+        const word = p.undo_code ? { HOLD_AGAIN: "Held again", UNFREEZE: "Unfrozen", RELEASE: "Released" }[p.undo_code]
+          : rej ? "Kept" : { PROPOSE_NARROW: "Reduced", PROPOSE_FULL_FREEZE: "Frozen", UNMATCHED_NOTICE: "Accepted", PROPOSE_RELEASE: "Released" }[p.action_code];
+        const what = { PROPOSE_NARROW: rej ? `hold kept at ${inrR(p.current_hold_inr || p.amount_inr)}` : `hold reduced to ${inrR(p.decided_amount_inr ?? p.amount_inr)}`,
+          PROPOSE_FULL_FREEZE: rej ? "hold kept, not frozen" : `full account (${inrR(p.decided_amount_inr ?? p.amount_inr)})`,
+          UNMATCHED_NOTICE: rej ? "left with the police" : `near match accepted, ${inrR(p.amount_inr)}`, PROPOSE_RELEASE: "hold released" }[p.action_code];
+        return (
+          <div key={p.proposal_id} className="card" style={{ padding: "14px 18px", display: "flex", flexWrap: "wrap", gap: "8px 16px", alignItems: "baseline", marginBottom: 8 }}>
+            <span className="pill p-done">{word}</span>
+            <span><b>{shortName(p.name)}</b>, {what}, by {p.decided_by} at {clock(p.decided_at)}{p.decided_reason ? `: "${rs(p.decided_reason)}"` : "."}</span>
+            {p.action_code === "PROPOSE_FULL_FREEZE" && !rej && !n(p.victim_amount_inr) && <span className="note">Not counted as {victim(p.victim_tag)}'s money: {shortName(p.name)} received none of it.</span>}
+            {p.undo_code && <span className="note">{p.undone_by} at {clock(p.undone_at)}: "{p.undo_reason}"</span>}
+            <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}><Undo p={p} officer={officer} onDone={onDone} compact /><a href={`#/record/${encodeURIComponent(p.account_id)}`}>Hold record</a></span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-function doneText(d) {
-  if (d.run_status === "SENT_BACK") return "Did not match a payment at this bank. Sent back to the police at once; nothing held.";
-  if (d.run_status === "LINKED") return "The same payment as an earlier complaint: linked to it, nothing held twice.";
-  if (d.run_status === "CHECK_FAILED") return "The checks did not pass, so nothing was held automatically.";
-  if (d.run_status === "FAILED") return d.problem || "The system could not finish this complaint.";
-  const parts = [d.holds ? `${inr(d.held_inr || 0)} held on ${plural(d.holds, "account")} by ${clock(d.sim_holds_at)}.` : "The money had already left before the complaint. Nothing could be held."];
-  const extra = [d.exits && `${plural(Number(d.exits), "cash withdrawal")} reported`, d.onward && `${plural(Number(d.onward), "other bank")} informed`].filter(Boolean);
-  if (extra.length) parts.push(`${cap(joinAnd(extra))}.`);
-  return parts.join(" ");
+// ---------------------------------------------------------------- the right column
+export function complaintText(t) {
+  const v = victim(t.victim_tag);
+  if (["FAILED", "CHECK_FAILED"].includes(t.run_status)) return rs(t.problem || "The system could not complete it.");
+  if (t.run_status === "SENT_BACK") return `No payment with this UTR. Sent back to the police${t.sim_holds_at ? ` at ${clock(t.sim_holds_at)}` : ""}; nothing held yet.`;
+  const parts = [];
+  if (t.linked_at && n(t.held_inr)) parts.push(`${inrR(t.held_inr)} held. The watch had already caught it at ${clock(t.linked_at)}.`);
+  else if (n(t.held_inr)) parts.push(`${inrR(t.held_inr)} of ${possessive(v)} money held on ${plural(n(t.held_accounts) || n(t.holds), "account")} by ${clock(t.sim_holds_at)}.`);
+  const gone = [n(t.onward_inr) && `${inrR(t.onward_inr)} sent on to ${t.onward_bank || "another bank"}`, n(t.exits_inr) && `${inrR(t.exits_inr)} withdrawn as cash${t.exit_at ? ` at ${clock(t.exit_at)}` : ""}`].filter(Boolean);
+  if (!n(t.held_inr) && gone.length) parts.push(`Money left before the complaint: ${joinAnd(gone)}.${n(t.onward_inr) ? ` ${t.onward_bank || "The other bank"} informed;` : ""}${t.marker_at ? " the account is marked to catch new money." : ""}`);
+  else if (gone.length) parts.push(`${joinAnd(gone).replace(/^./, (c) => c.toUpperCase())}.`);
+  return parts.join(" ") || "Nothing to hold here.";
 }
 
-function DoneRow({ d }) {
-  return (
-    <li>
-      <div className="at">{clock(d.received_at)}</div>
-      <div>
-        <a href={`#/case/${d.case_id}`} style={{ fontWeight: 600 }}>{d.amount_inr != null ? `${inr(d.amount_inr)} reported` : cap(d.label)}</a>
-        {d.ticket_kind === "ONWARD" && <span className="muted"> · {d.label.replace(/^\d\d:\d\d /, "")}</span>}
-        <div className="facts">{doneText(d)}</div>
-        {d.problem ? <div className="wait">Needs your attention</div>
-          : d.waiting > 0 ? <div className="wait">{plural(Number(d.waiting), "item")} {Number(d.waiting) === 1 ? "needs" : "need"} your approval</div>
-          : d.decided_by ? <div className="nowait">Completed by {d.decided_by}, {clock(d.decided_at)}</div>
-            : <div className="nowait">Nothing waiting</div>}
-      </div>
-    </li>
-  );
-}
-
-function DoneList({ list }) {
-  const [all, setAll] = useState(false);
-  const shown = all ? list : list.slice(0, 5);
+function TodayList({ d, groups }) {
+  const done = d.done || [];
+  const jumpFor = (t) => groups.find((g) => g.waiting.some((p) => p.case_id === t.case_id))?.id;
   return (
     <>
-      <ol className="donelist card">{shown.map((d) => <DoneRow key={d.case_id} d={d} />)}</ol>
-      {list.length > 5 && !all && <button className="btn btn-sm" style={{ marginTop: 8 }} onClick={() => setAll(true)}>Show all {list.length}</button>}
-    </>
-  );
-}
-
-function OfficeHours({ list }) {
-  const [all, setAll] = useState(false);
-  const held = list.reduce((s, d) => s + Number(d.held_inr || 0), 0);
-  const accounts = list.reduce((s, d) => s + Number(d.holds || 0), 0);
-  return (
-    <>
-      <h3>During office hours · {list.length}</h3>
-      {all ? <ol className="donelist card">{list.map((d) => <DoneRow key={d.case_id} d={d} />)}</ol> : (
-        <div className="card pad">
-          <p>{inr(held)} held on {plural(accounts, "account")}, each within 3 minutes of the complaint.</p>
-          <button className="btn" onClick={() => setAll(true)}>Show all {plural(list.length, "complaint")}</button>
-        </div>
-      )}
-    </>
-  );
-}
-
-const WATCH_WORDS = {
-  CASHOUT_BLOCKED: "Withdrawal refused", TRANSFER_BLOCKED: "Transfer refused", NEW_MONEY_HELD: "New money held",
-  NEW_MONEY_HONEST: "Not held", LINKED_TO_VICTIM: "Linked to a victim", RECIPIENT_WATCHED: "Now watched",
-  RECIPIENT_OTHER_BANK: "Reported for the police", RECIPIENT_BUSINESS: "Business account", MOVED: "Moved, not held",
-  NEW_MONEY_ABOVE_NOTICE: "Above the notice", RELEASE_FLAGGED: "Release due",
-};
-
-function Watched({ events }) {
-  const [all, setAll] = useState(false);
-  const shown = all ? events : events.slice(0, 6);
-  return (
-    <>
-      <h3>Watched after the holds · {events.length}</h3>
-      <div className="card pad">
-        <ul className="watchlist">
-          {shown.map((e) => (
-            <li key={e.event_id}>
-              <span className="at">{clock(e.event_at)}</span>
-              <span>{rs(e.sentence).replace(/^\d{2}:\d{2}: /, "")} <span className="tags"><span className="pill pill-plain">{WATCH_WORDS[e.event_kind] || e.event_kind}</span></span></span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+        <h2 id="today-h" style={{ fontSize: 20 }}>Today's complaints <span style={{ color: "#5b6675", fontWeight: 400 }}>{done.length}</span></h2>
+        <a href="#/queue" style={{ fontSize: 14 }}>All</a>
+      </div>
+      <ol className="card" style={{ listStyle: "none", padding: 0, margin: "0 0 20px" }}>
+        {done.length === 0 && <li className="row-c"><span /><span className="note">No complaints yet.</span></li>}
+        {done.map((t) => {
+          const mine = d.waiting.filter((p) => p.case_id === t.case_id).length;
+          const failed = ["FAILED", "CHECK_FAILED"].includes(t.run_status);
+          const jump = jumpFor(t);
+          return (
+            <li key={t.case_id} className="row-c">
+              <span className="mono" style={{ fontSize: 16, fontWeight: 600 }}>{clock(t.received_at)}</span>
+              <div>
+                <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "4px 8px", alignItems: "center" }}>
+                  <a href={`#/case/${encodeURIComponent(t.case_id)}`} style={{ fontWeight: 600 }}>{inrR(t.amount_inr)} · {victim(t.victim_tag)}</a>
+                  {failed ? <a className="pill p-urgent" href={`#/case/${encodeURIComponent(t.case_id)}`} style={{ textDecoration: "none" }}>Not completed</a>
+                    : mine ? <a className="pill p-wait" href={`#g-${jump}`} style={{ textDecoration: "none" }} onClick={(e) => { e.preventDefault(); document.getElementById(`g-${jump}`)?.scrollIntoView({ behavior: "smooth" }); }}>{mine} for you</a>
+                      : <span className="pill p-done">{t.run_status === "SENT_BACK" ? "Sent back" : "Done"}</span>}
+                </div>
+                <p style={{ fontSize: 13, color: "#44505e", marginTop: 2 }}>{complaintText(t)}</p>
+                {t.after_hours && <p className="note" style={{ marginTop: 2 }}>After office hours</p>}
+              </div>
             </li>
-          ))}
+          );
+        })}
+      </ol>
+    </>
+  );
+}
+
+function SinceHolds({ watch }) {
+  const w = watch || [];
+  if (!w.length) return null;
+  const pick = (k) => w.filter((e) => k.includes(e.event_kind));
+  const refused = pick(["CASHOUT_BLOCKED", "TRANSFER_BLOCKED"]);
+  const caught = pick(["NEW_MONEY_HELD"]);
+  const linked = new Set(pick(["LINKED_TO_VICTIM"]).map((e) => e.account_id));
+  const watched = pick(["RECIPIENT_WATCHED"]);
+  const honest = pick(["NEW_MONEY_HONEST"]);
+  const who = (e) => shortName(e.name || e.account_id);
+  const sum = (xs) => inrR(xs.reduce((t, e) => t + n(e.amount_inr), 0));
+  const names = (xs) => joinAnd([...new Set(xs.map(who))]);
+  const largest = (xs) => xs.reduce((a, b) => (n(b.amount_inr) > n(a.amount_inr) ? b : a));
+  const what = (e) => (e.event_kind === "CASHOUT_BLOCKED" ? `${possessive(who(e))} ${/crypto|wallet/i.test(e.counterparty || "") ? "crypto" : "ATM"} withdrawal of ${inrR(e.amount_inr)} at ${clock(e.event_at)}` : `${possessive(who(e))} ${inrR(e.amount_inr)} transfer at ${clock(e.event_at)}`);
+  // up to two events are named; more than that is one counted line, so the card stays four short lines
+  return (
+    <>
+      <h3 style={{ fontSize: 15, color: "#44505e", marginBottom: 8 }}>Since the holds</h3>
+      <div className="card" style={{ padding: "14px 16px" }}>
+        <ul style={{ listStyle: "none", padding: 0, display: "grid", gap: 10, fontSize: 14 }}>
+          {refused.length > 0 && <li><b>Refused.</b> {refused.length <= 2 ? `${joinAnd(refused.map(what))}.`
+            : `${refused.length} attempts to move held money, ${sum(refused)} kept. The largest: ${what(largest(refused))}.`}</li>}
+          {caught.length > 0 && <li><b>Caught.</b> {caught.length <= 2 ? `${joinAnd(caught.map((e) => `${inrR(e.amount_inr)} into ${who(e)} at ${clock(e.event_at)}`))}${caught.every((e) => linked.has(e.account_id)) ? `, ${caught.length === 1 ? "linked" : "each linked"} to a new complaint.` : "."}`
+            : `${sum(caught)} of new money in ${caught.length} payments into ${names(caught)}${linked.size ? `; ${caught.filter((e) => linked.has(e.account_id)).length} linked to a new complaint` : ""}.`}</li>}
+          {watched.length > 0 && <li><b>Watched.</b> {watched.length <= 2 ? `${joinAnd(watched.map((e) => `${who(e)}, the account ${shortName(e.counterparty || "a held account")} tried to pay at ${clock(e.event_at)}`))}.`
+            : `${names(watched)}, after held accounts tried to pay them.`}</li>}
+          {honest.length > 0 && <li><b>Not held.</b> {honest.length <= 2 ? `${joinAnd(honest.map((e) => `${inrR(e.amount_inr)} a customer paid ${who(e)} at ${clock(e.event_at)}`))}.`
+            : `${honest.length} customer payments to ${names(honest)}, ${sum(honest)}, left free.`}</li>}
         </ul>
-        {events.length > 6 && !all && <button className="btn btn-sm" onClick={() => setAll(true)}>Show all {events.length}</button>}
+        <a href="#/audit" style={{ display: "inline-block", marginTop: 10, fontSize: 14 }}>All {plural(w.length, "event")} in the audit log</a>
       </div>
     </>
   );
 }
 
-// The stored morning log: "## " lines are headings, "- " lines are points.
-function LogText({ text }) {
-  const out = [];
-  let items = [];
-  const flush = () => { if (items.length) { out.push(<ul key={`u${out.length}`} className="loglist">{items}</ul>); items = []; } };
-  rs(text).split("\n").forEach((line, i) => {
-    if (line.startsWith("- ")) items.push(<li key={i}>{line.slice(2)}</li>);
-    else { flush(); out.push(line.startsWith("## ") ? <h5 key={i} className="why-h">{line.slice(3)}</h5> : <p key={i}>{line}</p>); }
-  });
-  flush();
-  return <div className="morninglog">{out}</div>;
+// KYC packets: neutral when everything is filed; blue while a run is filing (design board "KYC packets card")
+function Kyc({ d }) {
+  const done = (d.done || []).filter((t) => n(t.kyc));
+  const filed = n(d.kyc_filed);
+  const filing = n(d.queued) > 0;
+  const sentBack = (d.done || []).filter((t) => t.run_status === "SENT_BACK");
+  return (
+    <>
+      <div className="khead">
+        <h3 id="kyc-h">KYC packets for the police</h3>
+        {filing ? <span className="pill p-run">{d.queued} filing</span> : <span className="pill p-done">{filed} filed · 0 due</span>}
+      </div>
+      <section className="card" style={{ padding: "14px 16px" }} aria-labelledby="kyc-h">
+        {filing && <p style={{ fontSize: 14, marginBottom: 10 }}><b>Filing now</b> for {plural(n(d.queued), "complaint")}. It goes in with the holds, usually within 3 minutes.</p>}
+        {filed > 0 ? <p style={{ fontSize: 14, marginBottom: 10 }}>Every packet went to the portal in the same run as its holds. The rules allow 7 days, so <b>nothing is left to send.</b></p>
+          : <p style={{ fontSize: 14 }}>No KYC packets were needed yet.</p>}
+        {done.length > 0 && (
+          <table className="t" style={{ fontSize: 14 }}>
+            <thead><tr><th scope="col">Complaint</th><th scope="col" style={{ textAlign: "right" }}>Packets</th><th scope="col">Filed</th></tr></thead>
+            <tbody>{done.map((t) => <tr key={t.case_id}><td><span className="mono">{clock(t.received_at)}</span> {victim(t.victim_tag)}</td><td style={{ textAlign: "right" }}>{t.kyc}</td><td className="mono">{clock(t.kyc_filed_at || t.sim_holds_at)}</td></tr>)}</tbody>
+          </table>
+        )}
+        {sentBack.length > 0 && <p className="note" style={{ marginTop: 8 }}>None for {joinAnd(sentBack.map((t) => `${possessive(victim(t.victim_tag))} ${clock(t.received_at)}`))} complaint{sentBack.length === 1 ? "" : "s"}: {sentBack.length === 1 ? "its notice was" : "their notices were"} sent back, so no account was named.</p>}
+        <a href="#/audit" style={{ display: "inline-block", marginTop: 8, fontSize: 14 }}>Each packet in the audit log</a>
+      </section>
+    </>
+  );
 }

@@ -59,7 +59,8 @@ def libr_steps(conn, case_id: str, account_id: str, victim_tag: str, until: str)
         balance += _d(amount) if incoming else -_d(amount)
         moved = _d(flow)
         victim += moved if incoming else -moved
-        steps.append({"at": _ts(ts), "txn_id": txn_id, "what": f"{'in from' if incoming else 'out to'} "
+        steps.append({"at": _ts(ts), "txn_id": txn_id, "counterparty": frm if incoming else to,
+                      "incoming": incoming, "channel": channel, "what": f"{'in from' if incoming else 'out to'} "
                       f"{frm if incoming else to} ({channel})", "amount_inr": _d(amount),
                       "victim_in_inr": moved if incoming else -moved, "balance_inr": balance,
                       "victim_inr": victim, "stmt_id": stmt})
@@ -130,7 +131,43 @@ def hold_record(conn, bank: str, account_id: str) -> dict:
                            "ORDER BY message_id", {"a": account_id})
     audit = _rows(conn, "SELECT event_at, sim_at, actor, event_name, case_id, detail, stmt_id FROM AUDIT_LOG "
                         "WHERE account_id = {a} ORDER BY event_id", {"a": account_id})
+    # accounts the money came from or went to, and accounts a refused payment tried to reach
+    linked, seen = [], set()
+    for c in cases:
+        for e in _rows(conn, "SELECT from_account, to_account, amount_inr, ts, is_exit FROM TRACE_EDGE "
+                             "WHERE case_id = {c} AND (from_account = {a} OR to_account = {a}) ORDER BY ts",
+                       {"c": c["case_id"], "a": account_id}):
+            other = e["from_account"] if e["to_account"] == account_id else e["to_account"]
+            if other in seen or e["is_exit"]:
+                continue
+            seen.add(other)
+            linked.append({"account_id": other, "relation": "sent the money" if e["to_account"] == account_id
+                           else "received", "amount_inr": e["amount_inr"], "at": _ts(e["ts"])})
+    for w in watch:
+        if w["event_kind"] == "RECIPIENT_WATCHED":
+            other = conn.execute("SELECT counterparty FROM WATCH_EVENT WHERE account_id = {a} AND event_kind = "
+                                 "'TRANSFER_BLOCKED' ORDER BY event_at LIMIT 1", {"a": account_id}).fetchval()
+            if other and other not in seen:
+                seen.add(other)
+                linked.append({"account_id": other, "relation": "tried to pay", "amount_inr": w["amount_inr"],
+                               "at": _ts(w["event_at"])})
+    ids = {x["account_id"] for x in linked} | {st.get("counterparty") for c in cases for st in c["libr_steps"]}
+    ids.discard(None)
+    names = {}
+    if ids:
+        names = {a: n for a, n in conn.execute(
+            "SELECT account_id, holder_name FROM ACCOUNT WHERE account_id IN ({ids})".replace(
+                "{ids}", ", ".join("'" + i.replace("'", "''") + "'" for i in sorted(ids)))).fetchall()}
+        for x in linked:
+            x["name"] = names.get(x["account_id"]) or x["account_id"]
+            x["held_inr"] = _d(conn.execute(
+                "SELECT SUM(amount_inr) FROM HOLD_LEDGER WHERE account_id = {a} AND hold_status = 'ACTIVE' "
+                "AND hold_kind = 'LIEN'", {"a": x["account_id"]}).fetchval())
+            x["frozen_inr"] = _d(conn.execute(
+                "SELECT SUM(amount_inr) FROM HOLD_LEDGER WHERE account_id = {a} AND hold_status = 'ACTIVE' "
+                "AND hold_kind = 'ACCOUNT_FREEZE'", {"a": x["account_id"]}).fetchval())
     return {"account": acc[0], "bank": bank, "holds": holds, "cases": cases, "splits": splits, "watch_list": on_watch,
+            "linked": linked, "names": names,
             "watch_events": watch, "holder_messages": messages, "audit": audit,
             "held_now_inr": sum((_d(h["amount_inr"]) for h in holds
                                  if h["hold_status"] == "ACTIVE" and h["hold_kind"] == "LIEN"), Decimal(0))}

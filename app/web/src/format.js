@@ -90,8 +90,37 @@ export function victim(tag) {
   return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
 }
 
-// The demo's mule accounts are named by a single letter ("A"); show them as "Account A".
+// Account names as the officer reads them: never a "mule" label ("Mule 07" -> "Account M07").
 export function accountName(name, id) {
-  if (!name) return id || "";
-  return /^[A-Z]$/.test(name) ? `Account ${name}` : name;
+  if (!name) return (id || "").replace(/^ACC_/, "");
+  return String(name).replace(/^Mule (\d+)$/, "Account M$1");
 }
+
+// "Murugan (Sri Murugan Fuels)" -> "Murugan"; "Account M07" -> "M07"
+export function shortName(name) {
+  return accountName(name).replace(/ \(.*\)$/, "").replace(/^Account (?=M\d)/, "");
+}
+
+// Account age as the cards say it: "68 days", "3 years", "1 year 8 months"
+export function ageWords(openedOn, at) {
+  if (!openedOn) return "";
+  const a = new Date(String(openedOn).slice(0, 10)), b = new Date(String(at || "2026-10-18").slice(0, 10));
+  const days = Math.round((b - a) / 86400000);
+  if (days < 365) return `${days} day${days === 1 ? "" : "s"}`;
+  let months = (b.getFullYear() - a.getFullYear()) * 12 + b.getMonth() - a.getMonth() - (b.getDate() < a.getDate() ? 1 : 0);
+  const y = Math.floor(months / 12), m = months % 12;
+  return `${y} year${y === 1 ? "" : "s"}${m ? ` ${m} month${m === 1 ? "" : "s"}` : ""}`;
+}
+
+// Backend sentences say "Rs 2,00,000"; the console shows "₹2,00,000"
+export const rs = (s) => String(s ?? "").replace(/Rs\.? ?(?=[\d-])/g, "₹");
+
+// "₹1,92,900" whole rupees, "−₹70,000" for money out
+export function inrSigned(v) {
+  const n = Math.round(Number(v || 0));
+  return n < 0 ? `−${inrR(-n)}` : `+${inrR(n)}`;
+}
+
+export const joinAnd = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
+export const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+export const hhmm = clock;

@@ -101,3 +101,70 @@ def test_a_decided_proposal_cannot_be_decided_again(client):
         db.close()
     r = client.post(f"/api/proposals/{int(pid)}/approve", json={"officer": "officer.test"})
     assert r.status_code == 400
+
+
+def decision_of(proposal_id):
+    db = connect_or_skip()
+    try:
+        return int(db.execute("SELECT decision_id FROM PH_X.DECISION WHERE proposal_id = {p!d} "
+                              "ORDER BY decision_id", {"p": str(int(proposal_id))}).fetchval())
+    finally:
+        db.close()
+
+
+def active(case, account):
+    db = connect_or_skip()
+    try:
+        return db.execute("SELECT hold_kind, amount_inr, action_code FROM PH_X.HOLD_LEDGER WHERE case_id = {c} "
+                          "AND account_id = {a} AND hold_status = 'ACTIVE' ORDER BY hold_id",
+                          {"c": case, "a": account}).fetchall()
+    finally:
+        db.close()
+
+
+def test_a_smaller_hold_can_be_held_again_with_a_reason(client):
+    w = waiting(client)[("CASE_DEMO", "ACC_D", "PROPOSE_NARROW")]
+    r = client.post(f"/api/proposals/{w['proposal_id']}/approve", json={"officer": "officer.test"})
+    assert r.status_code == 200, r.text
+    assert [float(a) for _, a, _ in active("CASE_DEMO", "ACC_D")] == [500.0]
+    d = decision_of(w["proposal_id"])
+    assert client.post(f"/api/decisions/{d}/undo", json={"officer": "officer.test", "reason": ""}).status_code == 400
+    r = client.post(f"/api/decisions/{d}/undo",
+                    json={"officer": "officer.test", "reason": "the police asked to keep it"})
+    assert r.status_code == 200, r.text
+    rows = active("CASE_DEMO", "ACC_D")
+    assert len(rows) == 1 and rows[0][2] == "HOLD_AGAIN" and float(rows[0][1]) == 1000.0
+    again = client.post(f"/api/decisions/{d}/undo", json={"officer": "officer.test", "reason": "twice"})
+    assert again.status_code == 400                       # already undone
+
+
+def test_an_accepted_near_match_can_be_released(client):
+    pid = waiting_or_decided(client, "CASE_BADUTR", "UNMATCHED_NOTICE")
+    d = decision_of(pid)
+    r = client.post(f"/api/decisions/{d}/undo",
+                    json={"officer": "officer.test", "reason": "corrected notice names another payment"})
+    assert r.status_code == 200, r.text
+    assert active("CASE_BADUTR", "ACC_K") == []
+
+
+def waiting_or_decided(client, case, code):
+    db = connect_or_skip()
+    try:
+        return int(db.execute("SELECT proposal_id FROM PH_X.PROPOSAL WHERE case_id = {c} AND action_code = {k}",
+                              {"c": case, "k": code}).fetchval())
+    finally:
+        db.close()
+
+
+def test_the_audit_story_names_the_officer_and_the_system(client):
+    rows = client.get("/api/story", params={"bank": "BANK_X"}).json()
+    kinds = {r["kind"] for r in rows}
+    assert {"system", "officer"} <= kinds
+    assert any(r["who"] == "officer.test" for r in rows if r["kind"] == "officer")
+    assert all("CASE_" not in (r["what"] or "") for r in rows if r["kind"] == "officer")
+
+
+def test_the_narrator_lists_each_bank_s_moves_and_tickets(client):
+    banks = client.get("/api/narrator").json()["trail"]["banks"]
+    x = next(b for b in banks if b["bank_id"] == "BANK_X")
+    assert x["moves"] and x["tickets"] and any(m["hop"] == 1 for m in x["moves"])

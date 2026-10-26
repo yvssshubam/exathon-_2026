@@ -149,7 +149,7 @@ class Checker:
 
         if kind == "MARKER":
             return
-        text = holder_message(self.complaint(case_id), account, amount, kind)
+        text = holder_message(self.complaint(case_id), account, amount, kind, now)
         self._q("INSERT INTO HOLDER_MESSAGE (case_id, account_id, hold_id, message_text, written_at, stmt_id) "
                 "VALUES ({c}, {a}, {h}, {t}, TO_TIMESTAMP({n}, 'YYYY-MM-DD HH24:MI:SS'), CURRENT_STATEMENT)",
                 c=case_id, a=account, h=None if hold_id is None else str(int(hold_id)), t=text, n=now)
@@ -585,6 +585,73 @@ class Checker:
         self._audit(f"officer_{outcome.lower()}", case, f"{code} on {acc}, decision {decision}, amount {final}", now,
                     acc, actor=officer)
         return decision
+
+    # What "undo" means for each kind of decision, after the officer has decided (each needs a written reason and
+    # is its own DECISION row, so the audit shows the decision and its reversal side by side):
+    #   smaller hold  -> HOLD_AGAIN: released money may already be spent, so this places a new hold on what is
+    #                    still there, up to what was held before the reduction
+    #   full freeze   -> UNFREEZE:   nothing left the account while it was frozen, a true reversal
+    #   near match    -> RELEASE:    removes the holds the accepted match placed
+    UNDO = {"PROPOSE_NARROW": "HOLD_AGAIN", "PROPOSE_FULL_FREEZE": "UNFREEZE", "UNMATCHED_NOTICE": "RELEASE"}
+
+    def undo_decision(self, decision_id: int, officer: str, reason: str, now: str) -> int:
+        officer, reason = (officer or "").strip(), (reason or "").strip()
+        if not officer:
+            raise DecisionError("An officer name is required: nothing is decided anonymously.")
+        if not reason:
+            raise DecisionError("Write a reason: an undo goes into the audit log and the hold record.")
+        rows = self._q("SELECT decision_id, case_id, account_id, action_code, decision_outcome, proposal_id, "
+                       "amount_inr FROM DECISION WHERE decision_id = {d!d}", d=str(int(decision_id))).fetchall()
+        if not rows:
+            raise DecisionError(f"No decision {decision_id}.")
+        _, case, acc, code, outcome, proposal_id, _amount = rows[0]
+        if code not in self.UNDO or outcome not in ("APPROVED", "EDITED"):
+            raise DecisionError("Only an approved smaller hold, freeze or near match can be undone.")
+        undo = self.UNDO[code]
+        done = self._q("SELECT COUNT(*) FROM DECISION WHERE proposal_id = {p!d} AND action_code = {u}",
+                       p=str(int(proposal_id)), u=undo).fetchval()
+        if done:
+            raise DecisionError("This decision has already been undone.")
+        amount = None
+        if undo == "HOLD_AGAIN":
+            cur = self._q("SELECT hold_id, amount_inr FROM HOLD_LEDGER WHERE proposal_id = {p!d} AND account_id = {a} "
+                          "AND hold_kind = 'LIEN' AND hold_status = 'ACTIVE'", p=str(int(proposal_id)),
+                          a=acc).fetchall()
+            if not cur:
+                raise DecisionError("The reduced hold is no longer active, so there is nothing to hold again.")
+            hold_id, now_held = int(cur[0][0]), _d(cur[0][1])
+            before = _d(self._q("SELECT SUM(amount_inr) FROM HOLD_LEDGER WHERE replaced_by = {h!d}",
+                                h=str(hold_id)).fetchval())
+            others = self.held(acc) - now_held
+            amount = min(before, max(self.balance_at(acc, now) - others, now_held))
+            new_id = self._officer_hold(case, acc, "LIEN", amount, officer, undo, reason, now, int(proposal_id))
+            self._q("UPDATE HOLD_LEDGER SET hold_status = 'REPLACED', replaced_by = {n!d} WHERE hold_id = {h!d}",
+                    n=str(new_id), h=str(hold_id))
+            self._holder_message(case, acc, amount, "LIEN", new_id, now)
+        elif undo == "UNFREEZE":
+            n = self._q("UPDATE HOLD_LEDGER SET hold_status = 'RELEASED' WHERE proposal_id = {p!d} "
+                        "AND account_id = {a} "
+                        "AND hold_kind = 'ACCOUNT_FREEZE' AND hold_status = 'ACTIVE'", p=str(int(proposal_id)),
+                        a=acc).rowcount()
+            if not n:
+                raise DecisionError("The freeze is no longer active.")
+            self._holder_message(case, acc, 0, "UNFROZEN", None, now)
+        else:  # RELEASE: the holds the accepted near match placed
+            n = self._q("UPDATE HOLD_LEDGER SET hold_status = 'RELEASED' WHERE case_id = {c} AND hold_status = "
+                        "'ACTIVE'", c=case).rowcount()
+            if not n:
+                raise DecisionError("The accepted match holds nothing now.")
+            self._holder_message(case, acc, 0, "RELEASED", None, now)
+        self._q("INSERT INTO DECISION (case_id, viewing_bank_id, account_id, action_code, proposal_id, "
+                "decision_outcome, amount_inr, decided_by, decided_at, reason_text) VALUES ({c}, {b}, {a}, {k}, "
+                "{p!d}, 'APPROVED', {amt}, {by}, TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS'), {r})",
+                c=case, a=acc, k=undo, p=str(int(proposal_id)), amt=None if amount is None else str(amount), by=officer,
+                t=now, r=reason)
+        new = int(self._q("SELECT MAX(decision_id) FROM DECISION WHERE proposal_id = {p!d} AND action_code = {k}",
+                          p=str(int(proposal_id)), k=undo).fetchval())
+        self._audit(f"officer_{undo.lower()}", case, f"{undo} of decision {decision_id} on {acc}, decision {new}: "
+                                                    f"{reason}", now, acc, actor=officer)
+        return new
 
     def _decision(self, p: dict, outcome: str, amount, officer: str, comment: str | None, signed: str | None,
                   now: str) -> int:

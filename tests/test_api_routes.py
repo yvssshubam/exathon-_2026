@@ -33,7 +33,8 @@ def test_no_route_places_a_hold_or_freeze_by_itself():
     writes = {p for m, p in paths() if m == "POST"}
     assert not any(word in p.lower() for p in writes for word in ("freeze", "hold", "auto", "file"))
     assert writes == {"/api/night/run", "/api/demo/reset", "/api/tickets/{case_id}/work",
-                      "/api/proposals/{proposal_id}/approve", "/api/proposals/{proposal_id}/reject"}
+                      "/api/proposals/{proposal_id}/approve", "/api/proposals/{proposal_id}/reject",
+                      "/api/decisions/{decision_id}/undo"}   # undoing a decision the officer made, with a reason
 
 
 def test_config_without_database():

@@ -80,7 +80,7 @@ def mandatory_text(c: dict, utr: str, amount, action_code: str = "MANDATORY_HOLD
             f"{c.get('notice_legal_basis') or 'S.94 BNSS'}. The rules require this hold; the agent placed it.")
 
 
-def holder_message(c: dict, account_id: str, amount, kind: str = "LIEN") -> str:
+def holder_message(c: dict, account_id: str, amount, kind: str = "LIEN", at: str | None = None) -> str:
     """What the account holder is told: the authority, the notice and how much is held. Never the evidence
     (telling a mule why it is suspected warns it off)."""
     masked = "XXXX" + account_id[-4:] if len(account_id) > 4 else account_id
@@ -92,8 +92,15 @@ def holder_message(c: dict, account_id: str, amount, kind: str = "LIEN") -> str:
                 f"under {basis}. Money can still be paid into the account.")
     if kind == "RELEASED":
         return f"The hold on your account {masked} (notice {notice}, {authority}) has been lifted."
-    return (f"An amount of {inr(amount)} in your account {masked} is on hold (amount only) on the instruction of "
-            f"{authority}, notice {notice}, under {basis}. The rest of your balance can be used.")
+    if kind == "UNFROZEN":
+        return f"The freeze on your account {masked} (notice {notice}, {authority}) has been lifted."
+    since = ""
+    if at:
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        since = f" from {at[11:16]} on {int(at[8:10])} {months[int(at[5:7]) - 1]} {at[:4]}"
+    return (f"{inr(amount)} in your account ending {account_id[-4:]} is on hold{since}, on a notice from {authority} "
+            f"({notice}), under {basis}. The rest of your balance is free to use. To contest the hold, contact the "
+            f"police station on the notice or visit your branch with ID.")
 
 
 # ---------------------------------------------------------------- the structured reasons (rules engine output)

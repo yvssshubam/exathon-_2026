@@ -55,7 +55,12 @@ def plan(received_at: str, accounts: list[tuple[str, int]], s: dict) -> dict[str
     t = desk_opens_after(received_at, str(s["desk_opens"])) + timedelta(minutes=int(s["first_lookup_minutes"]))
     out = {}
     for i, (acc, _hop) in enumerate(sorted(accounts, key=lambda a: (a[1], a[0]))):
-        out[acc] = (t + timedelta(minutes=i * int(s["per_account_minutes"]))).strftime(FMT)
+        at = t + timedelta(minutes=i * int(s["per_account_minutes"]))
+        close = at.replace(hour=DESK_HOURS[1], minute=0, second=0)
+        if at >= close and len(str(s["desk_opens"])) <= 5:   # the desk closes at 18:00: the rest waits for 10:00
+            hh, mm = (int(x) for x in str(s["desk_opens"]).split(":"))
+            at = (close + timedelta(days=1)).replace(hour=hh, minute=mm) + (at - close)
+        out[acc] = at.strftime(FMT)
     return out
 
 
@@ -239,6 +244,10 @@ def day_summary(conn, bank: str) -> dict:
         "victim_paid_inr": s("victim_paid_inr"),
         "today": {"victim_held_inr": s("today_victim_held_inr"),
                   "honest_locked_inr": round(sum(frozen_today.values()), 2),
+                  "frozen_names": [n for (n,) in conn.execute(
+                      "SELECT COALESCE(holder_name, account_id) FROM ACCOUNT WHERE account_id IN ({ids}) "
+                      "ORDER BY holder_name".replace("{ids}", ", ".join(
+                          "'" + a.replace("'", "''") + "'" for a in frozen_today))).fetchall()] if frozen_today else [],
                   "accounts_frozen_whole": len(frozen_today),
                   "night_minutes": [t["today_minutes"] for t in night if t["today_minutes"] is not None]},
         "tool": {"victim_held_inr": s("tool_victim_held_inr"),

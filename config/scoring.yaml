@@ -1,5 +1,6 @@
 # Mule-or-honest scoring (requirements section 9, step 3). Weights are hand-set for the demo and NOT
-# validated on real data; say so in the README and the deck. An ML model may add one signal, never replace these.
+# validated on real data; say so in the README and the deck. An ML model may add one signal, never replace these
+# (learned_signal below).
 #
 # Each signal is computed in SQL (sql/steps/060_score.sql) over the 90 days before the hold time and turned into
 # a mule-likeness m in [0, 1] by straight-line interpolation between `honest_at` (m = 0) and `mule_at` (m = 1),
@@ -64,6 +65,18 @@ signals:
     mule_at: 5.0
     mule_sentence: "In the last 30 days it received {v1} times what its declared profile suggests."
     honest_sentence: "What it received matches its declared profile."
+
+# The one learned signal (DECISIONS D-51). Added only when config/learned_signal.yaml exists, which
+# `python -m pipeline.learned` writes after training on AMLworld's labels. It is a ninth signal next to the eight,
+# never a replacement: the smallest weight in the list, so the hand-set signals still decide the band. Its value is
+# the model's 0-100% rating (classes balanced: 50% is the midpoint between the two groups, not a probability).
+learned_signal:
+  name: learned_pattern
+  weight: 0.05
+  honest_at: 0.2
+  mule_at: 0.8
+  mule_sentence: "A model trained on flagged accounts in synthetic bank data rates its money pattern {pct}% like theirs."
+  honest_sentence: "A model trained on flagged accounts in synthetic bank data rates its money pattern only {pct}% like theirs."
 
 profile_band_expected_monthly_credit_inr:
   low: 50000

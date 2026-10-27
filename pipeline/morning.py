@@ -167,10 +167,9 @@ def template(f: dict, bank_name: str, period_to: str) -> str:
             dest = n.get(to, to) if to else "another account"
             lines.append(f"- {who} tried to send {rupees(amt)} to {dest} at {at(w)}. "
                          "Refused.")
-        else:
-            dest = n.get(to, to) if to else "The account it tried to pay"
-            lines.append(f"- {dest} is now watched, after {who} tried "
-                         f"to pay it at {at(w)}.")
+        else:                               # the watched account is the event's own; the payer is its counterparty
+            payer = n.get(to, to) if to else "a held account"
+            lines.append(f"- {who} is now watched, after {payer} tried to pay it at {at(w)}.")
     # a refused duplicate (the same proposal already waiting) is the checker doing its job, not news for the desk
     refused = list(dict.fromkeys((acc, note) for _case, _code, acc, note in f["refused"]
                                  if "already waiting" not in (note or "")))

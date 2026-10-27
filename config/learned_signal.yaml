@@ -1,0 +1,73 @@
+# Written by `python -m pipeline.learned` (DECISIONS D-51). Do not edit by hand: retrain instead.
+# Loaded into every bank's LEARNED_COEF by `make seed`; scored in Exasol by sql/steps/060_score.sql.
+data: Synthetic data (IBM AMLworld HI-Small); laundering labels, not cyber-fraud mule
+  labels.
+trained_at: '2026-10-27 20:22:53'
+features_as_of: '2026-10-17 16:19:00'
+method: 'logistic regression, classes balanced, L2 1e-3, standardised (log1p where
+  marked), clipped to +-5; held out: 1 account in 5 by a hash of its ID'
+intercept: -0.3686023
+features:
+- name: median_dwell_minutes
+  log: true
+  mean: 8.2224377
+  std: 1.80915332
+  coef: 0.4443908
+- name: pass_through_ratio
+  log: false
+  mean: 0.01823692
+  std: 0.0819477
+  coef: -0.01060596
+- name: large_payer_share
+  log: false
+  mean: 0.9923073
+  std: 0.05780478
+  coef: 0.18827829
+- name: credit_vs_profile
+  log: true
+  mean: 2.68789063
+  std: 2.36916225
+  coef: 0.03692306
+- name: distinct_payers
+  log: true
+  mean: 1.08924889
+  std: 0.38419968
+  coef: 0.38892932
+- name: distinct_payees
+  log: true
+  mean: 0.74279795
+  std: 0.68923415
+  coef: 1.71981218
+- name: out_in_ratio
+  log: true
+  mean: 1.20705689
+  std: 2.2484603
+  coef: 0.00179141
+- name: payment_count
+  log: true
+  mean: 2.91547173
+  std: 1.08249977
+  coef: -0.67822474
+- name: reciprocal_share
+  log: false
+  mean: 0.03659452
+  std: 0.17402373
+  coef: 0.20110989
+dropped:
+  cash_or_crypto_exits: no variation in the data
+metrics:
+  accounts:
+    train: 12963
+    test: 3220
+    flagged_train: 2143
+    flagged_test: 536
+  auc:
+    model: 0.7713
+    hand_set_same_signals: 0.5375
+    hand_set_plus_model: 0.6786
+    model_signals_only: 0.6375
+    boosted_trees_experiment: 0.8698
+  at_50:
+    precision: 0.296
+    recall: 0.666
+    rated_50_or_more: 1206

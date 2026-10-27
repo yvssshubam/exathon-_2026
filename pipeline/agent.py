@@ -57,8 +57,8 @@ TOOLS = {t.name: t for t in (
     Tool("trace_money", "Follow the payment forward through this bank's accounts (Exasol, CONNECT BY)."),
     Tool("attribute_victim_share", "Work out each victim's rupees in each account (Exasol Python UDF: LIBR, and pro "
                                    "rata between several victims)."),
-    Tool("get_account_evidence", "Read each own account's 90-day history: eight signals with reasons, cross-ticket "
-                                 "evidence and refused attempts (Exasol SQL)."),
+    Tool("get_account_evidence", "Read each own account's 90-day history: eight signals (nine with the learned one) "
+                                 "with reasons, cross-ticket evidence and refused attempts (Exasol SQL)."),
     Tool("allowed_actions", "Ask the rules engine what these facts allow per account: automatic, the officer's "
                             "decision, or nothing."),
     Tool("word_reasons", "Turn the rules engine's structured reasons into plain words, for narrow and widen "
@@ -245,7 +245,9 @@ def send_back_letter(c: dict, k: dict) -> str:
 def summary_template(f: dict) -> str:
     """Deterministic summary of one run, from what the maker proposed."""
     label = f.get("label") or f"ticket {f['case_id']}"
-    parts = [f"At {f['received_at'][11:16]} {label} reached the bank and the agent picked it up at once."]
+    hhmm = f["received_at"][11:16]
+    start = f"The {label}" if label.startswith(hhmm) else f"At {hhmm} {label}"    # "02:13 complaint": no time twice
+    parts = [f"{start} reached the bank and the agent picked it up at once."]
     if f.get("intake") not in ("EXACT", "ACCEPTED"):
         parts.append(f"It does not match a transaction ({(f.get('intake') or 'unknown').lower().replace('_', ' ')}): "
                      "nothing is held; it is sent back for correction.")

@@ -233,6 +233,14 @@ CREATE OR REPLACE TABLE SCORING_CONFIG (
     honest_sentence VARCHAR(300)  NOT NULL COMMENT IS 'Reason text when the signal looks honest'
 ) COMMENT IS 'Scoring rules loaded from config/scoring.yaml, so the scoring SQL reads them inside Exasol.';
 
+CREATE OR REPLACE TABLE LEARNED_COEF (
+    feature_name    VARCHAR(40)   NOT NULL COMMENT IS 'Signal the coefficient applies to, or (intercept)',
+    use_log         BOOLEAN       NOT NULL COMMENT IS 'TRUE: the value is taken as log(1 + x) before standardising',
+    mean_value      DOUBLE        NOT NULL COMMENT IS 'Training mean of the (transformed) value',
+    std_value       DOUBLE        NOT NULL COMMENT IS 'Training standard deviation of the (transformed) value',
+    coef            DOUBLE        NOT NULL COMMENT IS 'Logistic-regression coefficient on the standardised value'
+) COMMENT IS 'The learned signal (DECISIONS D-51), loaded from config/learned_signal.yaml; empty when no model is trained. One more signal, never a replacement for the eight.';
+
 CREATE OR REPLACE TABLE PROFILE_BAND (
     profile_band          VARCHAR(10)   NOT NULL COMMENT IS 'low, medium or high',
     expected_monthly_inr  DECIMAL(18,2) NOT NULL COMMENT IS 'Credits per month expected for an account declaring this band'

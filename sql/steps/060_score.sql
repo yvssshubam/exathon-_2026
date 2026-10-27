@@ -5,10 +5,11 @@
 -- bank's accounts are not scored: their history is that bank's); the watch also scores one account a refused
 -- transfer named (case_id WATCH:<account>).
 --
--- Eight signals per account, each over the 90 days before as_of (definitions: DECISIONS D-22). Weights and
--- thresholds come from SCORING_CONFIG (loaded from config/scoring.yaml). Each signal becomes a mule-likeness
--- m in [0, 1]; the score is the weighted sum; every signal keeps its value, contribution and a plain sentence,
--- ranked as a reason both ways, so the reasons can cite the top signals behind whichever way the account looks.
+-- Eight signals per account, each over the 90 days before as_of (definitions: DECISIONS D-22), and a ninth learned
+-- one when a model is loaded (D-51). Weights and thresholds come from SCORING_CONFIG (loaded from
+-- config/scoring.yaml). Each signal becomes a mule-likeness m in [0, 1]; the score is the weighted sum; every signal
+-- keeps its value, contribution and a plain sentence, ranked as a reason both ways, so the reasons can cite the top
+-- signals behind whichever way the account looks.
 -- The score is an input to the rules (narrow or propose a freeze), never a verdict shown on its own.
 -- Transactions come from TXN_LIVE; reported payments count only once their ticket reached the bank.
 
@@ -156,6 +157,105 @@ FROM (
     JOIN SCORING_CONFIG c ON c.signal_name = v.signal_name
     CROSS JOIN (SELECT SUM(weight) AS total_weight FROM SCORING_CONFIG) tw
 ) m;
+
+-- 9. The learned signal (DECISIONS D-51), only when a model is loaded: LEARNED_COEF holds the coefficients
+-- pipeline/learned.py fitted on AMLworld's labels, and SCORING_CONFIG has a learned_pattern row. Scored here, from the
+-- signal values above and five connection inputs that only the model uses (distinct payers and payees, money out /
+-- in, number of payments, share of payees that also paid it): each value log(1 + x) where marked, standardised,
+-- clipped to +-5 (a missing value counts as average); rating = 1 / (1 + e^-(intercept + sum(coef * z))). One more
+-- signal, with the smallest weight; it never replaces the eight, and the connection inputs never score on their own.
+-- No model: nothing is added and the score is the eight signals' alone.
+INSERT INTO ACCOUNT_SIGNALS (case_id, account_id, as_of, signal_name, signal_value, weight, mule_likeness,
+                                contribution, sentence, mule_rank, honest_rank, stmt_id)
+SELECT {case_id},
+       r.account_id,
+       TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'),
+       c.signal_name,
+       r.rating,
+       c.weight,
+       LEAST(1, GREATEST(0, (r.rating - c.honest_at) / (c.mule_at - c.honest_at))),
+       c.weight * LEAST(1, GREATEST(0, (r.rating - c.honest_at) / (c.mule_at - c.honest_at))) / tw.total_weight,
+       REPLACE(CASE WHEN (r.rating - c.honest_at) / (c.mule_at - c.honest_at) >= 0.5 THEN c.mule_sentence
+                    ELSE c.honest_sentence END,
+               '{{pct}}', CAST(CAST(ROUND(r.rating * 100) AS DECIMAL(18,0)) AS VARCHAR(30))),
+       NULL,
+       NULL,
+       CURRENT_STATEMENT
+FROM (
+    SELECT g.account_id, 1 / (1 + EXP(-LEAST(30, GREATEST(-30, SUM(g.term))))) AS rating
+    FROM (
+        SELECT x.account_id,
+               f.coef * CASE WHEN f.feature_name = '(intercept)' THEN 1
+                             WHEN x.v IS NULL THEN 0
+                             ELSE LEAST(5, GREATEST(-5,
+                                  ((CASE WHEN f.use_log THEN LN(1 + GREATEST(x.v, 0)) ELSE x.v END)
+                                   - f.mean_value) / f.std_value)) END AS term
+        FROM (
+            SELECT t.account_id, f.feature_name,
+                   CASE f.feature_name WHEN 'distinct_payers'  THEN cx.distinct_payers
+                                       WHEN 'distinct_payees'  THEN cx.distinct_payees
+                                       WHEN 'out_in_ratio'     THEN cx.out_in_ratio
+                                       WHEN 'payment_count'    THEN cx.payment_count
+                                       WHEN 'reciprocal_share' THEN cx.reciprocal_share
+                                       ELSE s.signal_value END AS v
+            FROM (SELECT DISTINCT account_id FROM SCORE_TARGET WHERE case_id = {case_id}) t
+            CROSS JOIN LEARNED_COEF f
+            LEFT JOIN ACCOUNT_SIGNALS s
+                   ON s.case_id = {case_id} AND s.account_id = t.account_id AND s.signal_name = f.feature_name
+            LEFT JOIN (
+                -- the model's connection inputs, as sql/learn/010_features.sql computes them for training
+                SELECT a.account_id,
+                       CAST(COALESCE(ci.payers, 0) AS DOUBLE) AS distinct_payers,
+                       CAST(COALESCE(co.payees, 0) AS DOUBLE) AS distinct_payees,
+                       CAST(COALESCE(co.amt, 0) / NULLIF(ci.amt, 0) AS DOUBLE) AS out_in_ratio,
+                       CAST(COALESCE(ci.n, 0) + COALESCE(co.n, 0) AS DOUBLE) AS payment_count,
+                       CAST(COALESCE(rc.n, 0) AS DOUBLE) / NULLIF(co.payees, 0) AS reciprocal_share
+                FROM (SELECT DISTINCT account_id FROM SCORE_TARGET WHERE case_id = {case_id}) a
+                LEFT JOIN (SELECT to_account AS account_id, COUNT(DISTINCT from_account) AS payers,
+                                  SUM(amount_inr) AS amt, COUNT(*) AS n
+                           FROM TXN_LIVE
+                           WHERE to_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
+                             AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
+                             AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+                           GROUP BY to_account) ci ON ci.account_id = a.account_id
+                LEFT JOIN (SELECT from_account AS account_id, COUNT(DISTINCT to_account) AS payees,
+                                  SUM(amount_inr) AS amt, COUNT(*) AS n
+                           FROM TXN_LIVE
+                           WHERE from_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
+                             AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
+                             AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+                           GROUP BY from_account) co ON co.account_id = a.account_id
+                LEFT JOIN (SELECT o.account_id, COUNT(DISTINCT o.other) AS n
+                           FROM (SELECT DISTINCT from_account AS account_id, to_account AS other FROM TXN_LIVE
+                                 WHERE from_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
+                                   AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
+                                   AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')) o
+                           JOIN (SELECT DISTINCT to_account AS account_id, from_account AS other FROM TXN_LIVE
+                                 WHERE to_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
+                                   AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
+                                   AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')) i
+                             ON i.account_id = o.account_id AND i.other = o.other
+                           GROUP BY o.account_id) rc ON rc.account_id = a.account_id
+            ) cx ON cx.account_id = t.account_id
+        ) x
+        JOIN LEARNED_COEF f ON f.feature_name = x.feature_name
+    ) g
+    GROUP BY g.account_id
+) r
+JOIN SCORING_CONFIG c ON c.signal_name = 'learned_pattern'
+CROSS JOIN (SELECT SUM(weight) AS total_weight FROM SCORING_CONFIG) tw;
+
+-- Rank every signal again, the learned one included, so the reasons can cite whichever signals weigh most.
+MERGE INTO ACCOUNT_SIGNALS s
+USING (
+    SELECT account_id, signal_name,
+           ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY weight * mule_likeness DESC, signal_name) AS mr,
+           ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY weight * (1 - mule_likeness) DESC, signal_name) AS hr
+    FROM ACCOUNT_SIGNALS
+    WHERE case_id = {case_id}
+) r
+ON (s.case_id = {case_id} AND s.account_id = r.account_id AND s.signal_name = r.signal_name)
+WHEN MATCHED THEN UPDATE SET mule_rank = r.mr, honest_rank = r.hr;
 
 DELETE FROM ACCOUNT_SCORE WHERE case_id = {case_id};
 

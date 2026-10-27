@@ -4,7 +4,7 @@ CASE_FILE ?=
 UNTIL ?= 2026-10-18 09:00:00
 
 .DEFAULT_GOAL := help
-.PHONY: help install test lint oracle gen check setup doctor db seed check-db demo-reset data lab run explain \
+.PHONY: help install test lint oracle gen check setup doctor db seed check-db demo-reset data lab learn run explain \
         agent night desk today web web-build
 
 help: ## List targets
@@ -59,6 +59,10 @@ data: ## Load AMLworld HI-Small from data/raw/ into PH_AML, then give each bank 
 
 lab: ## AMLworld trace and scoring tests in PH_LAB (needs `make data`); writes docs/AMLWORLD_TESTS.md
 	$(PY) -m pipeline.lab
+
+learn: ## Train the learned signal on AMLworld (needs `make data`), then reload the banks with it
+	$(PY) -m pipeline.learned
+	$(PY) -m pipeline.load_cases --verify
 
 night: ## Reset, then run the demo night across the three banks to 09:00 (UNTIL=..., MODE=llm)
 	$(PY) -m pipeline.night --until "$(UNTIL)" --mode $(or $(MODE),pipeline)

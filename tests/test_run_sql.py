@@ -50,10 +50,10 @@ def test_repo_sql_files_parse_and_are_numbered():
     assert [p.name for p in sql_files(PORTAL_SQL)] == ["010_portal.sql"]
     schema = split_statements((BANK_SQL / "010_schema.sql").read_text())
     tables = [s for s in schema if s.upper().startswith("CREATE OR REPLACE TABLE")]
-    assert len(tables) == 38
+    assert len(tables) == 39
     for stmt in tables:                       # every table says what it is for
         assert ") COMMENT IS '" in stmt, stmt.splitlines()[0]
-    for folder in ("bank", "portal", "lab", "steps", "amlworld"):
+    for folder in ("bank", "portal", "lab", "learn", "steps", "amlworld"):
         for f in sql_files(ROOT / "sql" / folder):
             split_statements(f.read_text())
 
@@ -77,7 +77,11 @@ def test_seed_rows_are_consistent():
         assert txn[3] in accounts or txn[3].startswith("EXT_")       # EXT_: history counterparties
         assert txn[4] in accounts or txn[4].startswith(("EXIT:", "EXT_"))
         assert txn[2].endswith(".000")
-    assert len(rows["SCORING_CONFIG"]) == 8 and len(rows["PROFILE_BAND"]) == 3
+    from pipeline import learned
+
+    trained = learned.load() is not None
+    assert len(rows["SCORING_CONFIG"]) == 8 + trained and len(rows["PROFILE_BAND"]) == 3
+    assert bool(rows["LEARNED_COEF"]) == trained
     assert len(rows["PORTAL_TICKET"]) == len(rows["COMPLAINTS"])
     assert sum(1 for r in rows["BANK"] if r[2] == "TRUE") == 0       # the world belongs to no bank
 

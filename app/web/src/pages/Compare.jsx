@@ -101,7 +101,17 @@ function One({ caseId, queue }) {
           </div>
           {sysBanks.length > 0 && (
             <div className="bar" role="img" aria-label={`System: ${sysBanks.map((b) => `${inrR(b.victim_held_inr)} at ${b.name}`).join(" and ")}, of ${inrR(d.victim_paid_inr)}`} style={{ marginTop: 6, background: "#e8ecf0" }}>
-              {sysBanks.map((b, i) => <div key={b.bank_id} style={{ flex: `0 0 ${(n(b.victim_held_inr) / n(d.victim_paid_inr)) * 100}%`, background: i ? "#3b6ea5" : "#5b3fa0" }}>{b.name} {inrR(b.victim_held_inr)}</div>)}
+              {sysBanks.map((b, i) => {
+                const pctW = (n(b.victim_held_inr) / n(d.victim_paid_inr)) * 100;
+                return <div key={b.bank_id} style={{ flex: `0 0 ${pctW}%`, background: i ? "#3b6ea5" : "#5b3fa0" }}>{pctW >= 30 ? `${b.name} ${inrR(b.victim_held_inr)}` : ""}</div>;
+              })}
+            </div>
+          )}
+          {sysBanks.length > 0 && (
+            // the amounts sit beside the bar too, so a narrow part never hides its figure
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", marginTop: 6, fontSize: 13 }}>
+              {sysBanks.map((b, i) => <span key={b.bank_id} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <span className="sw" style={{ background: i ? "#3b6ea5" : "#5b3fa0" }} />{b.name} <b>{inrR(b.victim_held_inr)}</b></span>)}
             </div>
           )}
           {cashNotes.length > 0 && <p className="note" style={{ marginTop: 6 }}>The rest left as cash before anyone could act: {joinAnd(cashNotes.map(([t, a]) => `${inrR(a)} at ${clock(t)}`))}.</p>}

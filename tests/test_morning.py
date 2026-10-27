@@ -19,7 +19,7 @@ FACTS = {
          "victim_tag": "V_MEENA", "holds_at": None, "held": [],
          "gone": {"SEND_BACK": (None, None, None, "2026-10-18 03:21:00")}, "caught": None}],
     "attempts": [("2026-10-18 04:30:00", "ACC_C", "CASHOUT_BLOCKED", "29500.00", None),
-                 ("2026-10-18 04:31:00", "ACC_C", "RECIPIENT_WATCHED", "29500.00", "ACC_E")],
+                 ("2026-10-18 04:31:00", "ACC_E", "RECIPIENT_WATCHED", "29500.00", "C")],
     "waiting": [(1, "CASE_DEMO", "ACC_D", "PROPOSE_NARROW", "500.00"),
                 (2, "CASE_BADUTR", "ACC_K", "UNMATCHED_NOTICE", "25000.00")],
 }
@@ -33,6 +33,7 @@ def test_the_log_is_the_handover_note_in_names():
             "entry was filed at 02:16. Rs 50,000 left as cash at 02:07, before the complaint.") in lines
     assert "## The holds stopped Rs 29,500 leaving" in lines
     assert "- C tried to take Rs 29,500 from an ATM at 04:30. Refused." in lines
+    assert "- E is now watched, after C tried to pay it at 04:31." in lines
     assert lines[-3:] == ["## Waiting for the morning desk", "- Smaller hold: reduce Murugan's hold to Rs 500.",
                           "- Near match: Meena's notice. Hold Rs 25,000 in K, or wait for the police?"]
 

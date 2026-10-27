@@ -424,3 +424,22 @@ stays as one signal. The Q&A had no pain behind it. Letters arrive through the p
 At a bank that sees only its own accounts, a victim's money can leave through another bank and come back into one
 of its accounts by a hop it cannot see. The money is still the victim's and still in the bank's view, so
 conservation sums the victim's money in every account and exit of the bank's attribution, not only on its own trail.
+
+## D-51 · DEFAULT · One learned signal next to the eight, never in their place
+
+Requirements section 9 allows a model to add one signal and never to replace the list. `python -m pipeline.learned`
+fits a logistic regression (numpy, classes balanced) on AMLworld's labels: accounts that sent a payment marked as
+laundering against those that did not. The model sees the case-independent signals that AMLworld really holds
+(dwell, pass-through, payer share, withdrawals, credits) and five connection inputs (distinct payers and payees, money
+out against in, number of payments, share of payees that also paid it), computed by the same SQL in training and at
+the bank. The connection inputs feed only the model: they are never signals of their own. Account age and profile are
+made up by the import, the complaint links and balance belong to a ticket, and the payment format is left out because
+in AMLworld it goes with laundering in a way that says nothing about UPI mules. One account in five is held out by a hash of its ID, and the report
+(docs/LEARNED_SIGNAL.md) sets the model's AUC next to the hand-set weights on the same accounts, whichever wins, and
+next to boosted trees as an experiment that is never deployed (one formula can be read and checked). A retrained model
+replaces the saved one only if it ranks the held-out accounts better than both the hand-set weights and the saved
+model; the feature list is fixed before the run, never tuned against the test.
+The coefficients are loaded into each bank's LEARNED_COEF and scored in Exasol by the same step as the eight. It has
+the smallest weight (0.05 of 1.05), so it can move a score a little but cannot flip a demo band on its own (tested),
+and its sentence says it was trained on synthetic data. The AMLworld lab test leaves it out, since it was trained on
+the same data. No model file: the eight signals alone, as before.

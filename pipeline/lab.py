@@ -52,6 +52,8 @@ def build(conn) -> None:
     from pipeline.load_cases import world_from_files
 
     world = world_from_files()
+    # The hand-set signals only: the learned one is trained on AMLworld itself, so it stays out of this test (D-51).
+    world["SCORING_CONFIG"] = [r for r in world["SCORING_CONFIG"] if r[0] != "learned_pattern"]
     for table in ("SCORING_CONFIG", "PROFILE_BAND"):
         conn.execute(f"TRUNCATE TABLE {LAB}.{table}")
         conn.import_from_iterable(world[table], (LAB, table))

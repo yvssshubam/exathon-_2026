@@ -1,4 +1,5 @@
-"""Reference implementation of the eight scoring signals (sql/steps/060_score.sql, DECISIONS D-22) in plain Python.
+"""Reference implementation of the eight scoring signals (sql/steps/060_score.sql, DECISIONS D-22) in plain Python,
+plus the learned one when a model is trained (D-51).
 
 Used to check the SQL's numbers and to predict bands without Exasol. Slow and simple on purpose.
 """
@@ -61,13 +62,28 @@ def signals(rows: dict, case: Case, account: str, as_of: str) -> dict[str, float
                                      and d["ts"] > now - timedelta(days=90)])
     expected = CONFIG["profile_band_expected_monthly_credit_inr"][acct[6]]
     v["credit_vs_profile"] = sum(c["amt"] for c in credits if c["ts"] > now - timedelta(days=30)) / expected
+    # the learned model's connection inputs (D-51): never signals of their own
+    out = [d for d in debits if d["ts"] > now - timedelta(days=90)]
+    payers, payees = {c["f"] for c in credits}, {d["t"] for d in out}
+    v["distinct_payers"], v["distinct_payees"] = float(len(payers)), float(len(payees))
+    v["out_in_ratio"] = sum(d["amt"] for d in out) / total_in if total_in else None
+    v["payment_count"] = float(len(credits) + len(out))
+    v["reciprocal_share"] = len(payees & payers) / len(payees) if payees else None
     return v
 
 
-def score(values: dict[str, float | None]) -> tuple[float, str]:
-    total_weight = sum(s["weight"] for s in CONFIG["signals"].values())
+def score(values: dict[str, float | None], model: dict | None = None) -> tuple[float, str]:
+    """The eight signals, plus the learned one when a model is trained (config/learned_signal.yaml, D-51)."""
+    from pipeline import learned
+
+    model = learned.load() if model is None else model
+    used = dict(CONFIG["signals"])
+    if model:
+        used[learned.SIGNAL["name"]] = learned.SIGNAL
+        values = {**values, learned.SIGNAL["name"]: learned.predict(values, model)}
+    total_weight = sum(s["weight"] for s in used.values())
     total = 0.0
-    for name, s in CONFIG["signals"].items():
+    for name, s in used.items():
         x = values.get(name)
         m = 0.0 if x is None else max(0.0, min(1.0, (x - s["honest_at"]) / (s["mule_at"] - s["honest_at"])))
         total += s["weight"] * m / total_weight

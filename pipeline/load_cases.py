@@ -39,7 +39,8 @@ CASE_FILES = {"demo_case": DEMO_CASE, "extra_cases": EXTRA_CASES, "loop_case": L
 SCORING = ROOT / "config" / "scoring.yaml"
 
 # Reference tables loaded into every bank's schema (all columns, in table order).
-BANK_TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "PAYMENT_REQUEST", "SCORING_CONFIG", "PROFILE_BAND"]
+BANK_TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "PAYMENT_REQUEST", "SCORING_CONFIG", "PROFILE_BAND",
+               "LEARNED_COEF"]
 # Emptied on every load: the inbox (the portal fills it) and every work table, so a reload is a clean slate.
 EMPTIED = ["COMPLAINT", "TICKET", "INTAKE_CHECK", "CASE_LINK", "TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT",
            "ATTRIBUTION", "ATTRIBUTION_RAW", "ATTRIBUTION_FLOW", "VICTIM_SPLIT", "SCORE_TARGET", "ACCOUNT_SIGNALS",
@@ -138,6 +139,11 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list]:
     for name, sig in scoring["signals"].items():
         out["SCORING_CONFIG"].append((name, sig["weight"], sig["honest_at"], sig["mule_at"],
                                       sig["mule_sentence"], sig["honest_sentence"]))
+    from pipeline import learned
+
+    model = learned.load()                      # the learned signal, only once it is trained (D-51)
+    out["SCORING_CONFIG"] += learned.config_row(model)
+    out["LEARNED_COEF"] = learned.coef_rows(model)
     for band, expected in scoring["profile_band_expected_monthly_credit_inr"].items():
         out["PROFILE_BAND"].append((band, str(Decimal(str(expected)))))
     out["ACCOUNT"] = list(accounts.values())
@@ -161,6 +167,7 @@ def bank_rows(world: dict[str, list], bank: str) -> dict[str, list[tuple]]:
         "PAYMENT_REQUEST": [r for r in world["PAYMENT_REQUEST"] if r[2] in own],
         "SCORING_CONFIG": world["SCORING_CONFIG"],
         "PROFILE_BAND": world["PROFILE_BAND"],
+        "LEARNED_COEF": world["LEARNED_COEF"],
     }
 
 

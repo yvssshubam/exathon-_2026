@@ -112,7 +112,13 @@ Don't open and re-save them in Excel: it drops the leading zeros of the bank cod
 python -m pipeline.load_amlworld --check    # files present and shaped as expected (no database)
 make data                                   # imports into PH_AML once, then gives each bank its share
 make lab                                    # trace and scoring tests on the labelled patterns (PH_LAB)
+make learn                                  # train the learned signal on the labels, then reload the banks
 ```
+
+**The learned signal (optional).** `make learn` trains a small logistic regression on AMLworld's laundering labels
+and writes `config/learned_signal.yaml` and `docs/LEARNED_SIGNAL.md`, the held-out test against the hand-set
+weights. A new model replaces the saved one only if it ranks the held-out accounts better. It becomes a ninth signal with the smallest weight, scored in Exasol next to the eight; it never replaces
+them (DECISIONS D-51). Without the file the scoring is the eight hand-set signals.
 
 Each AMLworld bank becomes a branch of Bank X, Y or Z, and each bank's schema gets only the AMLworld rows touching
 its own branches. The import into `PH_AML` runs once; `make seed` and the console's Reset keep it.
@@ -182,7 +188,8 @@ Stated as assumptions, not as how banks work. Each one is a question for anyone 
 - The split between several victims is a record for the refund stage. The investigating officer decides the actual
   payout.
 - AMLworld is synthetic and labels laundering, not cyber-fraud mule accounts.
-- The scoring weights are hand-set (unless the AMLworld scoring test runs).
+- The scoring weights are hand-set (unless the AMLworld scoring test runs). The one learned signal is trained on
+  synthetic laundering labels, so its test shows how well it ranks AMLworld accounts, not real mule accounts.
 - The model runs locally, so account data doesn't leave the bank.
 - Bank Z works tickets by hand: its desk opens at 10:00 and takes about 20 minutes for a ticket. Today's desk in
   Before / after is the same kind of stated model (desk hours, lookup times, whole-account freezes), not a

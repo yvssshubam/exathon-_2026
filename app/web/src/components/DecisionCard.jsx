@@ -101,6 +101,8 @@ function evidence(p, panel, inflows, watch, short = false) {
   const sig = Object.fromEntries((panel?.signals || []).map((s) => [s.signal_name, s.signal_value]));
   const dwell = sig.median_dwell_minutes, pass = sig.pass_through_ratio ?? p.pass_through, large = sig.large_payer_share;
   const cash = sig.cash_or_crypto_exits ?? p.cash_exits, links = sig.complaint_linked_credits_7d ?? p.complaint_links;
+  const learned = sig.learned_pattern; // the one learned signal (D-51): only when a model is trained
+  const MODEL = short ? "Model rating" : "Model trained on synthetic data";
   const rows = [];
   if (p.action_code === "PROPOSE_FULL_FREEZE") {
     const F = "For a freeze";
@@ -109,6 +111,7 @@ function evidence(p, panel, inflows, watch, short = false) {
     if (cash != null) rows.push(["Cash or crypto withdrawals", n(cash) ? String(Math.round(n(cash))) : "None", n(cash) ? F : "Against", n(cash) > 0]);
     const tries = attemptsOf(p, watch);
     if (tries.length) rows.push(["Tries to move held money", String(tries.length), F, true]);
+    if (learned != null) rows.push([MODEL, `${Math.round(n(learned) * 100)}% like flagged accounts`, n(learned) >= 0.5 ? F : "Against", n(learned) >= 0.5]);
     if (p.opened_on) { const d = ageDays(p.opened_on, p.held_since); rows.push(["Account age", ageWords(p.opened_on, p.held_since), d < 365 ? F : "Against", d < 365]); }
     const fresh = (watch || []).filter((e) => e.account_id === p.account_id && e.event_kind.startsWith("NEW_MONEY") && (!p.held_since || e.event_at > p.held_since));
     rows.push(["New money since the hold", fresh.length ? `${inrR(fresh.reduce((t, e) => t + n(e.amount_inr), 0))}` : `None since ${clock(p.held_since)}`,
@@ -120,6 +123,7 @@ function evidence(p, panel, inflows, watch, short = false) {
   if (pass != null) rows.push([short ? "Leaves within 1 h" : "Leaves within an hour", `${Math.round(n(pass) * 100)}%`, n(pass) < 0.5 ? G : "Against", n(pass) < 0.5]);
   if (large != null) rows.push(["Who pays it", large < 0.2 ? (short ? "Many small payers" : "Many small payers, like a shop") : large > 0.8 ? "A few large payers" : "A mix of payers", large < 0.5 ? G : "Against", large < 0.5]);
   if (cash != null) rows.push([short ? "Cash or crypto out" : "Cash or crypto withdrawals", n(cash) ? String(Math.round(n(cash))) : "None", n(cash) ? "Against" : G, !n(cash)]);
+  if (learned != null) rows.push([MODEL, `${Math.round(n(learned) * 100)}% like flagged accounts`, n(learned) < 0.5 ? G : "Against", n(learned) < 0.5]);
   const inn = inflows || [];
   const from = (x) => accountName(x.from_name).replace(/^Account /, "account ");
   if (inn.length) rows.push([short ? "Fraud payments in" : "Fraud payments received", inn.length === 1 ? `1: ${inrR(inn[0].amount_inr)} from ${from(inn[0])}${inn[0].ts && !short ? ` at ${clock(inn[0].ts)}` : ""}` : String(inn.length), "Against", false]);

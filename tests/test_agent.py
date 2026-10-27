@@ -170,6 +170,9 @@ def test_summary_template():
                              "filings": 5, "waiting": ["narrow on Murugan"]})
     assert text.startswith("At 02:13 ticket CASE_DEMO reached the bank")
     assert "hold Rs 50,000 on A and Rs 29,500 on C" in text and "For you: narrow on Murugan." in text
+    labelled = summary_template({"case_id": "CASE_DEMO", "received_at": "2026-10-18 02:13:00", "intake": "EXACT",
+                                 "label": "02:13 complaint", "holds": [], "filings": 0, "waiting": []})
+    assert labelled.startswith("The 02:13 complaint reached the bank")
 
 
 @pytest.mark.parametrize("text,expected", [("Rs 1,000 and ₹500.00", {"1000", "500"}), ("no money", set()),

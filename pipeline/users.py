@@ -24,7 +24,8 @@ from pipeline.db import BANKS, PORTAL_SCHEMA, role_user, schema_for
 # Tables the maker fills while it analyses a ticket (insert, update, delete).
 MAKER_WORK = ["INTAKE_CHECK", "TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT", "ATTRIBUTION", "ATTRIBUTION_RAW",
               "ATTRIBUTION_FLOW", "SCORE_TARGET", "ACCOUNT_SIGNALS", "ACCOUNT_SCORE", "CASE_ACCOUNT", "CASE_ACTION",
-              "AGENT_RUN", "AGENT_STEP", "MORNING_LOG", "TODAY_RAW", "TODAY_OUTCOME", "WATCH_EVENT"]
+              "AGENT_RUN", "AGENT_STEP", "MORNING_LOG", "TODAY_RAW", "TODAY_OUTCOME", "WATCH_EVENT",
+              "LEARNED_INPUT"]
 MAKER_INSERT = ["PROPOSAL", "AUDIT_LOG"]
 MAKER_UPDATE = ["TICKET"]                       # picking a ticket up: QUEUED -> WORKING
 # Tables only the checker changes.

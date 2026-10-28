@@ -60,8 +60,8 @@ def test_training_finds_the_pattern_and_drops_what_does_not_vary():
     acc = metrics["accounts"]
     assert acc["train"] + acc["test"] == 2000 and 300 < acc["test"] < 500
     assert coef["reciprocal_share"] > 0                                          # a connection input that matters
-    assert set(metrics["auc"]) == {"model", "hand_set_same_signals", "hand_set_plus_model", "model_signals_only",
-                                   "boosted_trees_experiment"}
+    assert set(metrics["auc"]) == {"model", "hand_set_same_signals", "hand_set_plus_model", "logistic",
+                                   "model_signals_only", "boosted_trees_experiment"}
     assert metrics["auc"]["model"] >= metrics["auc"]["model_signals_only"]
     assert metrics["auc"]["boosted_trees_experiment"] > 0.9
 
@@ -127,3 +127,36 @@ def test_one_more_signal_never_decides_the_demo_band():
         v = signals(rows, demo, account, demo.tool_as_of)
         base = score(v, {})[1]
         assert score(v, never)[1] == base == score(v, always)[1], account
+
+
+def test_the_trees_can_be_deployed_and_score_as_trained(tmp_path):
+    import numpy as np
+
+    rows = fake_rows()
+    model, metrics = learned.train_rows(rows, "trees")
+    assert model["kind"] == "trees" and len(model["trees"]) == 200 and all(f["coef"] == 0 for f in model["features"])
+    assert metrics["deployed"] == "trees" and metrics["auc"]["model"] == metrics["auc"]["boosted_trees_experiment"]
+    # the exported fixed-shape trees give exactly what the fitted ones give
+    linear = learned.logistic(rows, learned.FEATURES)
+    z = learned.zmatrix(rows, linear)
+    fitted = learned.boost_fit(z, np.array([r["label"] for r in rows]))
+    exported = {**model, "trees": learned.export_trees(fitted, [f["name"] for f in linear["features"]]),
+                "features": [{**f, "coef": 0.0} for f in linear["features"]]}
+    want = learned.boost_predict(fitted, z)
+    got = np.array([learned.predict(r, exported) for r in rows])
+    assert np.allclose(got, want, atol=1e-6)
+    rows_ = learned.tree_rows(model)
+    assert len(rows_) == 200 and len(rows_[0]) == 12 and learned.tree_rows(TINY) == []
+    path = tmp_path / "trees.yaml"
+    learned.save(model, metrics, "2026-10-17 23:59:00", path)
+    back = learned.load(path)
+    assert back["trees"] == model["trees"] and "gradient-boosted trees" in learned.report(back)
+
+
+def test_no_value_sits_on_a_split():
+    import numpy as np
+
+    col = np.array([0.0, 0.0, 1.0, 1.0, 2.5, 3.0, 3.0])
+    t = learned._thresholds(col, 32)
+    assert not np.isin(t, col).any() and list(t) == [0.5, 1.75, 2.75]
+    assert len(learned._thresholds(np.arange(1000.0), 32)) <= 32

@@ -50,7 +50,7 @@ def test_repo_sql_files_parse_and_are_numbered():
     assert [p.name for p in sql_files(PORTAL_SQL)] == ["010_portal.sql"]
     schema = split_statements((BANK_SQL / "010_schema.sql").read_text())
     tables = [s for s in schema if s.upper().startswith("CREATE OR REPLACE TABLE")]
-    assert len(tables) == 39
+    assert len(tables) == 41
     for stmt in tables:                       # every table says what it is for
         assert ") COMMENT IS '" in stmt, stmt.splitlines()[0]
     for folder in ("bank", "portal", "lab", "learn", "steps", "amlworld"):

@@ -24,10 +24,22 @@ TINY = {"intercept": -0.5, "dropped": {},
                      {"name": "out_in_ratio", "log": True, "mean": 0.6, "std": 0.3, "coef": 0.7},
                      {"name": "payment_count", "log": True, "mean": 3.0, "std": 1.5, "coef": -0.1},
                      {"name": "reciprocal_share", "log": False, "mean": 0.2, "std": 0.2, "coef": 0.5}]}
+# The same inputs as boosted trees: no coefficients, two trees that split on a signal and on connection inputs.
+TREES = {"kind": "trees", "intercept": 0.0, "rate": 0.5, "dropped": {},
+         "features": [{**f, "coef": 0.0} for f in TINY["features"]],
+         "trees": [{"root_f": "pass_through_ratio", "root_t": 0.25, "left_f": "distinct_payers", "left_t": -0.1,
+                    "ll": -1.0, "lr": -0.4, "right_f": "out_in_ratio", "right_t": 0.6, "rl": 0.3, "rr": 1.2},
+                   {"root_f": "reciprocal_share", "root_t": 1e9, "left_f": "median_dwell_minutes", "left_t": 0.05,
+                    "ll": 0.8, "lr": -0.6, "right_f": "pass_through_ratio", "right_t": 1e9, "rl": 0.0, "rr": 0.0}]}
+
+
+@pytest.fixture(scope="module", params=[TINY, TREES], ids=["logistic", "trees"])
+def model(request):
+    return request.param
 
 
 @pytest.fixture(scope="module")
-def maker():
+def maker(model):
     from pipeline import portal, steps
     from pipeline.db import schema_for
     from pipeline.load_cases import reset
@@ -36,9 +48,12 @@ def maker():
     reset(admin, amlworld=False)
     s = schema_for(BANK)
     admin.execute(f"TRUNCATE TABLE {s}.LEARNED_COEF")
-    admin.import_from_iterable(learned.coef_rows(TINY), (s, "LEARNED_COEF"))
+    admin.import_from_iterable(learned.coef_rows(model), (s, "LEARNED_COEF"))
+    admin.execute(f"TRUNCATE TABLE {s}.LEARNED_TREE")
+    if learned.tree_rows(model):
+        admin.import_from_iterable(learned.tree_rows(model), (s, "LEARNED_TREE"))
     admin.execute(f"DELETE FROM {s}.SCORING_CONFIG WHERE signal_name = 'learned_pattern'")
-    admin.import_from_iterable(learned.config_row(TINY), (s, "SCORING_CONFIG"))
+    admin.import_from_iterable(learned.config_row(model), (s, "SCORING_CONFIG"))
     p = connect_or_skip("portal")
     portal.deliver_one(p, "CASE_DEMO")
     p.close()
@@ -61,7 +76,7 @@ def signal_values(maker) -> dict[str, dict]:
     return out
 
 
-def test_the_sql_rates_each_account_as_python_does(maker):
+def test_the_sql_rates_each_account_as_python_does(maker, model):
     from pipeline.load_cases import bank_rows, world_from_files
     from tests.score_oracle import signals
 
@@ -71,17 +86,17 @@ def test_the_sql_rates_each_account_as_python_does(maker):
     assert set(values) == {"ACC_A", "ACC_C", "ACC_D"}
     for acc, v in values.items():
         want = signals(rows, demo, acc, AS_OF)             # the connection inputs too, computed in Python
-        assert v["learned_pattern"] == pytest.approx(learned.predict(want, TINY), abs=1e-6), acc
+        assert v["learned_pattern"] == pytest.approx(learned.predict(want, model), abs=1e-6), acc
 
 
-def test_the_score_is_the_oracles_with_one_more_signal(maker):
+def test_the_score_is_the_oracles_with_one_more_signal(maker, model):
     from pipeline.load_cases import bank_rows, world_from_files
     from tests.score_oracle import score, signals
 
     world = world_from_files()
     rows = dict(bank_rows(world, BANK), COMPLAINTS=world["COMPLAINTS"])
     for acc, s, band in q(maker, "SELECT account_id, score, band FROM ACCOUNT_SCORE WHERE case_id = 'CASE_DEMO'"):
-        want, want_band = score(signals(rows, demo, acc, AS_OF), TINY)
+        want, want_band = score(signals(rows, demo, acc, AS_OF), model)
         assert band == want_band and float(s) == pytest.approx(want, abs=1e-6), acc
         assert band == score(signals(rows, demo, acc, AS_OF), {})[1], acc     # the eight still set the band
 
@@ -103,5 +118,14 @@ def test_training_on_amlworld_gives_a_model():
     finally:
         conn.close()
     assert sum(int(r["label"]) for r in rows) > 10 and as_of.startswith("20")
-    model, metrics = learned.train_rows(rows)
-    assert model["features"] and 0.0 <= metrics["auc"]["model"] <= 1.0
+    linear, metrics = learned.train_rows(rows)
+    assert linear["features"] and 0.0 <= metrics["auc"]["model"] <= 1.0
+    trees, metrics = learned.train_rows(rows, "trees")
+    assert trees["trees"] and metrics["auc"]["model"] == metrics["auc"]["boosted_trees_experiment"]
+
+
+def test_the_model_s_inputs_are_kept_for_every_account(maker, model):
+    n = len(model["features"])
+    for acc, count in q(maker, "SELECT account_id, COUNT(*) FROM LEARNED_INPUT WHERE case_id = 'CASE_DEMO' "
+                               "GROUP BY account_id"):
+        assert int(count) == n, acc

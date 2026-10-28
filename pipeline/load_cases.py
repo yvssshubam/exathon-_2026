@@ -40,13 +40,13 @@ SCORING = ROOT / "config" / "scoring.yaml"
 
 # Reference tables loaded into every bank's schema (all columns, in table order).
 BANK_TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "PAYMENT_REQUEST", "SCORING_CONFIG", "PROFILE_BAND",
-               "LEARNED_COEF"]
+               "LEARNED_COEF", "LEARNED_TREE"]
 # Emptied on every load: the inbox (the portal fills it) and every work table, so a reload is a clean slate.
 EMPTIED = ["COMPLAINT", "TICKET", "INTAKE_CHECK", "CASE_LINK", "TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT",
            "ATTRIBUTION", "ATTRIBUTION_RAW", "ATTRIBUTION_FLOW", "VICTIM_SPLIT", "SCORE_TARGET", "ACCOUNT_SIGNALS",
            "ACCOUNT_SCORE", "CASE_ACCOUNT", "CASE_ACTION", "PROPOSAL", "CHECK_RESULT", "HOLD_LEDGER",
            "PORTAL_ENTRY", "HOLDER_MESSAGE", "DECISION", "WATCH_LIST", "DECLINED_ATTEMPT", "WATCH_EVENT",
-           "AGENT_RUN", "AGENT_STEP", "MORNING_LOG", "TODAY_RAW", "TODAY_OUTCOME"]
+           "AGENT_RUN", "AGENT_STEP", "MORNING_LOG", "TODAY_RAW", "TODAY_OUTCOME", "LEARNED_INPUT"]
 PORTAL_TABLES = ["TICKET", "ENTRY", "ROUTE_LOG", "SIM_CLOCK"]
 PORTAL_TICKET_COLUMNS = ["case_id", "to_bank_id", "origin", "parent_case_id", "source_entry_id", "ack_no",
                          "complaint_source", "ticket_kind", "victim_account", "victim_tag", "utr", "amount_inr",
@@ -144,6 +144,7 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list]:
     model = learned.load()                      # the learned signal, only once it is trained (D-51)
     out["SCORING_CONFIG"] += learned.config_row(model)
     out["LEARNED_COEF"] = learned.coef_rows(model)
+    out["LEARNED_TREE"] = learned.tree_rows(model)
     for band, expected in scoring["profile_band_expected_monthly_credit_inr"].items():
         out["PROFILE_BAND"].append((band, str(Decimal(str(expected)))))
     out["ACCOUNT"] = list(accounts.values())
@@ -168,6 +169,7 @@ def bank_rows(world: dict[str, list], bank: str) -> dict[str, list[tuple]]:
         "SCORING_CONFIG": world["SCORING_CONFIG"],
         "PROFILE_BAND": world["PROFILE_BAND"],
         "LEARNED_COEF": world["LEARNED_COEF"],
+        "LEARNED_TREE": world["LEARNED_TREE"],
     }
 
 

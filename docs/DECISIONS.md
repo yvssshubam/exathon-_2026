@@ -444,7 +444,11 @@ the bank. The connection inputs feed only the model: they are never signals of t
 made up by the import, the complaint links and balance belong to a ticket, and the payment format is left out because
 in AMLworld it goes with laundering in a way that says nothing about UPI mules. One account in five is held out by a hash of its ID, and the report
 (docs/LEARNED_SIGNAL.md) sets the model's AUC next to the hand-set weights on the same accounts, whichever wins, and
-next to boosted trees as an experiment that is never deployed (one formula can be read and checked). A retrained model
+next to gradient-boosted trees (200 trees of depth 2, plain numpy, the XGBoost family). Either can be deployed
+(`--model logistic` or `--model trees`): the logistic regression is one formula an auditor can read; the trees rank
+better but a rating is a sum of small trees. Both are scored in Exasol SQL, the trees from LEARNED_TREE, from the
+inputs kept in LEARNED_INPUT so any rating can be checked. Split points sit between data values, so Exasol and Python
+always take the same branch. A retrained model
 replaces the saved one only if it ranks the held-out accounts better than both the hand-set weights and the saved
 model; the feature list is fixed before the run, never tuned against the test.
 The coefficients are loaded into each bank's LEARNED_COEF and scored in Exasol by the same step as the eight. It has

@@ -57,7 +57,7 @@ def build(conn, schema: str = LAB, learned: bool = False) -> None:
     from pipeline.load_cases import world_from_files
 
     world = world_from_files()
-    tables = ["SCORING_CONFIG", "PROFILE_BAND"] + (["LEARNED_COEF"] if learned else [])
+    tables = ["SCORING_CONFIG", "PROFILE_BAND"] + (["LEARNED_COEF", "LEARNED_TREE"] if learned else [])
     if not learned:
         # The hand-set signals only: the learned one is trained on AMLworld itself, so it stays out of this test (D-51).
         world["SCORING_CONFIG"] = [r for r in world["SCORING_CONFIG"] if r[0] != "learned_pattern"]

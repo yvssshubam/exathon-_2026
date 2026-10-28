@@ -244,6 +244,30 @@ CREATE OR REPLACE TABLE LEARNED_COEF (
     coef            DOUBLE        NOT NULL COMMENT IS 'Logistic-regression coefficient on the standardised value'
 ) COMMENT IS 'The learned signal (DECISIONS D-51), loaded from config/learned_signal.yaml; empty when no model is trained. One more signal, never a replacement for the eight.';
 
+CREATE OR REPLACE TABLE LEARNED_TREE (
+    tree_id         DECIMAL(9,0)  NOT NULL COMMENT IS 'Tree number',
+    root_f          VARCHAR(40)   NOT NULL COMMENT IS 'Input the first split reads (a LEARNED_COEF feature)',
+    root_t          DOUBLE        NOT NULL COMMENT IS 'Its threshold on the standardised value: at or below goes left',
+    left_f          VARCHAR(40)   NOT NULL COMMENT IS 'Input the left side splits on',
+    left_t          DOUBLE        NOT NULL COMMENT IS 'Its threshold (1e9: the side does not split)',
+    right_f         VARCHAR(40)   NOT NULL COMMENT IS 'Input the right side splits on',
+    right_t         DOUBLE        NOT NULL COMMENT IS 'Its threshold (1e9: the side does not split)',
+    leaf_ll         DOUBLE        NOT NULL COMMENT IS 'Leaf: left, then left',
+    leaf_lr         DOUBLE        NOT NULL COMMENT IS 'Leaf: left, then right',
+    leaf_rl         DOUBLE        NOT NULL COMMENT IS 'Leaf: right, then left',
+    leaf_rr         DOUBLE        NOT NULL COMMENT IS 'Leaf: right, then right',
+    rate            DOUBLE        NOT NULL COMMENT IS 'Learning rate: each leaf counts this much towards the log-odds'
+) COMMENT IS 'The learned signal as gradient-boosted trees (DECISIONS D-51), from config/learned_signal.yaml; empty when the logistic regression is deployed. Scored in SQL by 060.';
+
+CREATE OR REPLACE TABLE LEARNED_INPUT (
+    case_id         VARCHAR(40)   NOT NULL COMMENT IS 'Case scored',
+    account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Account',
+    feature_name    VARCHAR(40)   NOT NULL COMMENT IS 'Model input (a LEARNED_COEF feature)',
+    raw_value       DOUBLE                 COMMENT IS 'Its value for the account (NULL: none, counted as average)',
+    z_value         DOUBLE        NOT NULL COMMENT IS 'Standardised and clipped to +-5, as the model reads it',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'What the learned signal saw for each account (060): its inputs, raw and standardised, so a rating can be checked.';
+
 CREATE OR REPLACE TABLE PROFILE_BAND (
     profile_band          VARCHAR(10)   NOT NULL COMMENT IS 'low, medium or high',
     expected_monthly_inr  DECIMAL(18,2) NOT NULL COMMENT IS 'Credits per month expected for an account declaring this band'

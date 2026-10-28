@@ -2,6 +2,8 @@
 
 _Synthetic data (IBM AMLworld HI-Small); laundering labels, not cyber-fraud mule labels._
 
+Deployed: gradient-boosted trees (200 trees of depth 2), scored in Exasol SQL from LEARNED_TREE.
+
 One more signal next to the eight hand-set ones (DECISIONS D-51), weight 0.05 of 1.05: it can move a score a little, and the hand-set signals still decide the band.
 
 Trained on 12963 accounts (2143 flagged); tested on 3220 held-out accounts (536 flagged). Features as of 2026-10-17 16:19:00.
@@ -10,32 +12,32 @@ Trained on 12963 accounts (2143 flagged); tested on 3220 held-out accounts (536 
 
 | Score | AUC |
 | --- | ---: |
-| **The model (deployed)** | **0.771** |
+| **The model (deployed)** | **0.870** |
 | The hand-set weights on the signals AMLworld holds | 0.537 |
-| The hand-set weights plus the model at weight 0.05 | 0.679 |
-| The same model on those signals only, no connection features | 0.637 |
-| Boosted trees on every feature (experiment, not deployed) | 0.870 |
+| The hand-set weights plus the model at weight 0.05 | 0.726 |
+| Logistic regression, every input (not deployed) | 0.771 |
+| Logistic regression on those signals only, no connection inputs | 0.637 |
+| Boosted trees on every input | 0.870 |
 
 AUC: the chance that a random flagged account rates above a random other one (0.5 is a coin toss). The model ranks the held-out accounts better than the hand-set weights.
 
-The boosted trees are measured to show what a more complex model would add; they are not scored at the banks, because one formula can be read and checked line by line.
+The trees rank the held-out accounts better than the logistic regression; the price of trees is that a rating is the sum of many small trees, not one weight per input. They are scored in SQL like the rest, and the logistic regression stays one retrain away.
 
-At a rating of 50% or more: precision 29.6%, recall 66.6% (1206 accounts rated 50% or more).
+At a rating of 50% or more: precision 37.2%, recall 89.4% (1288 accounts rated 50% or more).
 
 ## The model
 
-| Input | Transform | Weight on the standardised value |
+| Input | Transform | Splits on it |
 | --- | --- | ---: |
-| median_dwell_minutes | log(1 + x) | +0.444 |
-| pass_through_ratio | none | -0.011 |
-| large_payer_share | none | +0.188 |
-| credit_vs_profile | log(1 + x) | +0.037 |
-| distinct_payers | log(1 + x) | +0.389 |
-| distinct_payees | log(1 + x) | +1.720 |
-| out_in_ratio | log(1 + x) | +0.002 |
-| payment_count | log(1 + x) | -0.678 |
-| reciprocal_share | none | +0.201 |
-| (intercept) | | -0.369 |
+| median_dwell_minutes | log(1 + x) | 92 |
+| pass_through_ratio | none | 29 |
+| large_payer_share | none | 9 |
+| credit_vs_profile | log(1 + x) | 42 |
+| distinct_payers | log(1 + x) | 58 |
+| distinct_payees | log(1 + x) | 157 |
+| out_in_ratio | log(1 + x) | 78 |
+| payment_count | log(1 + x) | 71 |
+| reciprocal_share | none | 18 |
 
 Left out: cash_or_crypto_exits (no variation in the data).
 
@@ -43,6 +45,6 @@ Also left out on purpose: account age and declared profile (AMLworld has neither
 
 The connection inputs (distinct payers and payees, money out against in, number of payments, share of payees that also paid it) are inputs to this model only: they never enter the score on their own.
 
-A positive weight means a higher value looks more like the flagged accounts. The rating is not a probability that an account is a mule: the classes are balanced, and the labels are laundering in synthetic data.
+The rating is not a probability that an account is a mule: the classes are balanced, and the labels are laundering in synthetic data.
 
 _Synthetic data (IBM AMLworld HI-Small); laundering labels, not cyber-fraud mule labels._

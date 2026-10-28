@@ -158,13 +158,78 @@ FROM (
     CROSS JOIN (SELECT SUM(weight) AS total_weight FROM SCORING_CONFIG) tw
 ) m;
 
--- 9. The learned signal (DECISIONS D-51), only when a model is loaded: LEARNED_COEF holds the coefficients
--- pipeline/learned.py fitted on AMLworld's labels, and SCORING_CONFIG has a learned_pattern row. Scored here, from the
--- signal values above and five connection inputs that only the model uses (distinct payers and payees, money out /
--- in, number of payments, share of payees that also paid it): each value log(1 + x) where marked, standardised,
--- clipped to +-5 (a missing value counts as average); rating = 1 / (1 + e^-(intercept + sum(coef * z))). One more
--- signal, with the smallest weight; it never replaces the eight, and the connection inputs never score on their own.
+-- 9. The learned signal (DECISIONS D-51), only when a model is loaded: LEARNED_COEF holds the inputs' scaling (and
+-- the logistic regression's coefficients), LEARNED_TREE the boosted trees when those are deployed, and SCORING_CONFIG
+-- has a learned_pattern row. Its inputs are the signal values above and five connection inputs that only the model
+-- uses (distinct payers and payees, money out / in, number of payments, share of payees that also paid it). Each
+-- input is taken as log(1 + x) where marked, standardised and clipped to +-5 (a missing value counts as average),
+-- and kept in LEARNED_INPUT so any rating can be checked. rating = 1 / (1 + e^-(intercept + sum(coef * z) +
+-- sum over trees of rate * leaf)): the logistic regression has no trees, the trees have no coefficients. One more
+-- signal, with the smallest weight; it never replaces the eight, and the inputs never score on their own.
 -- No model: nothing is added and the score is the eight signals' alone.
+DELETE FROM LEARNED_INPUT WHERE case_id = {case_id};
+
+INSERT INTO LEARNED_INPUT (case_id, account_id, feature_name, raw_value, z_value, stmt_id)
+SELECT {case_id},
+       x.account_id,
+       x.feature_name,
+       x.v,
+       CASE WHEN x.v IS NULL THEN 0
+            ELSE LEAST(5, GREATEST(-5,
+                 ((CASE WHEN f.use_log THEN LN(1 + GREATEST(x.v, 0)) ELSE x.v END) - f.mean_value) / f.std_value))
+            END,
+       CURRENT_STATEMENT
+FROM (
+    SELECT t.account_id, f.feature_name,
+           CASE f.feature_name WHEN 'distinct_payers'  THEN cx.distinct_payers
+                               WHEN 'distinct_payees'  THEN cx.distinct_payees
+                               WHEN 'out_in_ratio'     THEN cx.out_in_ratio
+                               WHEN 'payment_count'    THEN cx.payment_count
+                               WHEN 'reciprocal_share' THEN cx.reciprocal_share
+                               ELSE s.signal_value END AS v
+    FROM (SELECT DISTINCT account_id FROM SCORE_TARGET WHERE case_id = {case_id}) t
+    CROSS JOIN LEARNED_COEF f
+    LEFT JOIN ACCOUNT_SIGNALS s
+           ON s.case_id = {case_id} AND s.account_id = t.account_id AND s.signal_name = f.feature_name
+    LEFT JOIN (
+        -- the model's connection inputs, as sql/learn/010_features.sql computes them for training
+        SELECT a.account_id,
+               CAST(COALESCE(ci.payers, 0) AS DOUBLE) AS distinct_payers,
+               CAST(COALESCE(co.payees, 0) AS DOUBLE) AS distinct_payees,
+               CAST(COALESCE(co.amt, 0) / NULLIF(ci.amt, 0) AS DOUBLE) AS out_in_ratio,
+               CAST(COALESCE(ci.n, 0) + COALESCE(co.n, 0) AS DOUBLE) AS payment_count,
+               CAST(COALESCE(rc.n, 0) AS DOUBLE) / NULLIF(co.payees, 0) AS reciprocal_share
+        FROM (SELECT DISTINCT account_id FROM SCORE_TARGET WHERE case_id = {case_id}) a
+        LEFT JOIN (SELECT to_account AS account_id, COUNT(DISTINCT from_account) AS payers,
+                          SUM(amount_inr) AS amt, COUNT(*) AS n
+                   FROM TXN_LIVE
+                   WHERE to_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
+                     AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
+                     AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+                   GROUP BY to_account) ci ON ci.account_id = a.account_id
+        LEFT JOIN (SELECT from_account AS account_id, COUNT(DISTINCT to_account) AS payees,
+                          SUM(amount_inr) AS amt, COUNT(*) AS n
+                   FROM TXN_LIVE
+                   WHERE from_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
+                     AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
+                     AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+                   GROUP BY from_account) co ON co.account_id = a.account_id
+        LEFT JOIN (SELECT o.account_id, COUNT(DISTINCT o.other) AS n
+                   FROM (SELECT DISTINCT from_account AS account_id, to_account AS other FROM TXN_LIVE
+                         WHERE from_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
+                           AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
+                           AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')) o
+                   JOIN (SELECT DISTINCT to_account AS account_id, from_account AS other FROM TXN_LIVE
+                         WHERE to_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
+                           AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
+                           AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')) i
+                     ON i.account_id = o.account_id AND i.other = o.other
+                   GROUP BY o.account_id) rc ON rc.account_id = a.account_id
+    ) cx ON cx.account_id = t.account_id
+) x
+JOIN LEARNED_COEF f ON f.feature_name = x.feature_name
+WHERE f.feature_name <> '(intercept)';
+
 INSERT INTO ACCOUNT_SIGNALS (case_id, account_id, as_of, signal_name, signal_value, weight, mule_likeness,
                                 contribution, sentence, mule_rank, honest_rank, stmt_id)
 SELECT {case_id},
@@ -182,65 +247,35 @@ SELECT {case_id},
        NULL,
        CURRENT_STATEMENT
 FROM (
-    SELECT g.account_id, 1 / (1 + EXP(-LEAST(30, GREATEST(-30, SUM(g.term))))) AS rating
-    FROM (
-        SELECT x.account_id,
-               f.coef * CASE WHEN f.feature_name = '(intercept)' THEN 1
-                             WHEN x.v IS NULL THEN 0
-                             ELSE LEAST(5, GREATEST(-5,
-                                  ((CASE WHEN f.use_log THEN LN(1 + GREATEST(x.v, 0)) ELSE x.v END)
-                                   - f.mean_value) / f.std_value)) END AS term
-        FROM (
-            SELECT t.account_id, f.feature_name,
-                   CASE f.feature_name WHEN 'distinct_payers'  THEN cx.distinct_payers
-                                       WHEN 'distinct_payees'  THEN cx.distinct_payees
-                                       WHEN 'out_in_ratio'     THEN cx.out_in_ratio
-                                       WHEN 'payment_count'    THEN cx.payment_count
-                                       WHEN 'reciprocal_share' THEN cx.reciprocal_share
-                                       ELSE s.signal_value END AS v
-            FROM (SELECT DISTINCT account_id FROM SCORE_TARGET WHERE case_id = {case_id}) t
-            CROSS JOIN LEARNED_COEF f
-            LEFT JOIN ACCOUNT_SIGNALS s
-                   ON s.case_id = {case_id} AND s.account_id = t.account_id AND s.signal_name = f.feature_name
-            LEFT JOIN (
-                -- the model's connection inputs, as sql/learn/010_features.sql computes them for training
-                SELECT a.account_id,
-                       CAST(COALESCE(ci.payers, 0) AS DOUBLE) AS distinct_payers,
-                       CAST(COALESCE(co.payees, 0) AS DOUBLE) AS distinct_payees,
-                       CAST(COALESCE(co.amt, 0) / NULLIF(ci.amt, 0) AS DOUBLE) AS out_in_ratio,
-                       CAST(COALESCE(ci.n, 0) + COALESCE(co.n, 0) AS DOUBLE) AS payment_count,
-                       CAST(COALESCE(rc.n, 0) AS DOUBLE) / NULLIF(co.payees, 0) AS reciprocal_share
-                FROM (SELECT DISTINCT account_id FROM SCORE_TARGET WHERE case_id = {case_id}) a
-                LEFT JOIN (SELECT to_account AS account_id, COUNT(DISTINCT from_account) AS payers,
-                                  SUM(amount_inr) AS amt, COUNT(*) AS n
-                           FROM TXN_LIVE
-                           WHERE to_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
-                             AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
-                             AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
-                           GROUP BY to_account) ci ON ci.account_id = a.account_id
-                LEFT JOIN (SELECT from_account AS account_id, COUNT(DISTINCT to_account) AS payees,
-                                  SUM(amount_inr) AS amt, COUNT(*) AS n
-                           FROM TXN_LIVE
-                           WHERE from_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
-                             AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
-                             AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
-                           GROUP BY from_account) co ON co.account_id = a.account_id
-                LEFT JOIN (SELECT o.account_id, COUNT(DISTINCT o.other) AS n
-                           FROM (SELECT DISTINCT from_account AS account_id, to_account AS other FROM TXN_LIVE
-                                 WHERE from_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
-                                   AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
-                                   AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')) o
-                           JOIN (SELECT DISTINCT to_account AS account_id, from_account AS other FROM TXN_LIVE
-                                 WHERE to_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
-                                   AND ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
-                                   AND ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')) i
-                             ON i.account_id = o.account_id AND i.other = o.other
-                           GROUP BY o.account_id) rc ON rc.account_id = a.account_id
-            ) cx ON cx.account_id = t.account_id
-        ) x
-        JOIN LEARNED_COEF f ON f.feature_name = x.feature_name
-    ) g
-    GROUP BY g.account_id
+    SELECT a.account_id,
+           1 / (1 + EXP(-LEAST(30, GREATEST(-30, i.coef + COALESCE(lin.total, 0) + COALESCE(tr.total, 0)))))
+               AS rating
+    FROM (SELECT DISTINCT account_id FROM SCORE_TARGET WHERE case_id = {case_id}) a
+    CROSS JOIN (SELECT coef FROM LEARNED_COEF WHERE feature_name = '(intercept)') i
+    LEFT JOIN (
+        SELECT n.account_id, SUM(f.coef * n.z_value) AS total
+        FROM LEARNED_INPUT n
+        JOIN LEARNED_COEF f ON f.feature_name = n.feature_name
+        WHERE n.case_id = {case_id}
+        GROUP BY n.account_id
+    ) lin ON lin.account_id = a.account_id
+    LEFT JOIN (
+        -- each tree: one split at the root, one under each side, a leaf at the end (the same as learned.tree_leaf)
+        SELECT a2.account_id,
+               SUM(t.rate * CASE WHEN COALESCE(zr.z_value, 0) <= t.root_t
+                                 THEN CASE WHEN COALESCE(zl.z_value, 0) <= t.left_t THEN t.leaf_ll ELSE t.leaf_lr END
+                                 ELSE CASE WHEN COALESCE(zz.z_value, 0) <= t.right_t THEN t.leaf_rl ELSE t.leaf_rr END
+                            END) AS total
+        FROM (SELECT DISTINCT account_id FROM SCORE_TARGET WHERE case_id = {case_id}) a2
+        CROSS JOIN LEARNED_TREE t
+        LEFT JOIN LEARNED_INPUT zr
+               ON zr.case_id = {case_id} AND zr.account_id = a2.account_id AND zr.feature_name = t.root_f
+        LEFT JOIN LEARNED_INPUT zl
+               ON zl.case_id = {case_id} AND zl.account_id = a2.account_id AND zl.feature_name = t.left_f
+        LEFT JOIN LEARNED_INPUT zz
+               ON zz.case_id = {case_id} AND zz.account_id = a2.account_id AND zz.feature_name = t.right_f
+        GROUP BY a2.account_id
+    ) tr ON tr.account_id = a.account_id
 ) r
 JOIN SCORING_CONFIG c ON c.signal_name = 'learned_pattern'
 CROSS JOIN (SELECT SUM(weight) AS total_weight FROM SCORING_CONFIG) tw;

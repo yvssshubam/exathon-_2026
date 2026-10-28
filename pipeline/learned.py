@@ -17,6 +17,7 @@ hand-set weights and than the saved model; otherwise the saved one stays. Booste
 an experiment and never deployed. With no model file the scoring runs on the eight signals alone, as before.
 
     python -m pipeline.learned              # train on PH_AML (needs `make data`), then `make seed`
+    python -m pipeline.learned --model trees   # deploy the boosted trees instead of the logistic regression
     python -m pipeline.learned --replace    # save the new model even if it is not better than the saved one
     python -m pipeline.learned --show       # print the saved model's test results
 """
@@ -73,13 +74,33 @@ def predict(values: dict, model: dict | None) -> float | None:
     if not model:
         return None
     logit = model["intercept"]
+    z: dict[str, float] = {}
     for f in model["features"]:
         x = values.get(f["name"])
         if x is None:
+            z[f["name"]] = 0.0
             continue
         x = math.log1p(max(float(x), 0.0)) if f["log"] else float(x)
-        logit += f["coef"] * _clip((x - f["mean"]) / f["std"], Z_LIMIT)
+        z[f["name"]] = _clip((x - f["mean"]) / f["std"], Z_LIMIT)
+        logit += f["coef"] * z[f["name"]]
+    for t in model.get("trees") or []:
+        logit += model["rate"] * tree_leaf(t, z)
     return 1.0 / (1.0 + math.exp(-_clip(logit, LOGIT_LIMIT)))
+
+
+def tree_leaf(t: dict, z: dict[str, float]) -> float:
+    """One depth-2 tree (the SQL reads the same seven numbers from LEARNED_TREE)."""
+    if z.get(t["root_f"], 0.0) <= t["root_t"]:
+        return t["ll"] if z.get(t["left_f"], 0.0) <= t["left_t"] else t["lr"]
+    return t["rl"] if z.get(t["right_f"], 0.0) <= t["right_t"] else t["rr"]
+
+
+def tree_rows(model: dict | None) -> list[tuple]:
+    """LEARNED_TREE rows; none for the logistic model."""
+    if not model or not model.get("trees"):
+        return []
+    return [(i + 1, t["root_f"], t["root_t"], t["left_f"], t["left_t"], t["right_f"], t["right_t"],
+             t["ll"], t["lr"], t["rl"], t["rr"], model["rate"]) for i, t in enumerate(model["trees"])]
 
 
 def coef_rows(model: dict | None) -> list[tuple]:
@@ -264,12 +285,24 @@ def _apply(node, z):
     return out
 
 
+def _thresholds(col, bins: int):
+    """Candidate split points: midpoints between neighbouring distinct values, at most `bins` of them, so no account's
+    value ever sits exactly on a threshold (Exasol and Python then always take the same branch)."""
+    import numpy as np
+
+    u = np.unique(col)
+    mids = (u[:-1] + u[1:]) / 2
+    if len(mids) > bins:
+        mids = mids[np.unique(np.linspace(0, len(mids) - 1, bins).round().astype(int))]
+    return mids
+
+
 def boost_fit(z, y, rounds: int = 200, rate: float = 0.1, depth: int = 2, bins: int = 32, lam: float = 1.0):
     """Gradient-boosted trees (logistic loss, classes balanced), fixed settings, no tuning. Returns the trees."""
     import numpy as np
 
     n, k = z.shape
-    edges = [np.unique(np.quantile(z[:, j], np.linspace(0, 1, bins + 1)[1:-1])) for j in range(k)]
+    edges = [_thresholds(z[:, j], bins) for j in range(k)]
     b = np.column_stack([np.searchsorted(edges[j], z[:, j], side="left") for j in range(k)])
     pos = y.sum()
     sw = np.where(y == 1, n / (2 * pos), n / (2 * (n - pos)))
@@ -280,6 +313,27 @@ def boost_fit(z, y, rounds: int = 200, rate: float = 0.1, depth: int = 2, bins: 
         f += rate * _apply(tree, z)
         trees.append(tree)
     return trees
+
+
+def export_trees(trees, names: list[str]) -> list[dict]:
+    """The fitted trees in the fixed shape LEARNED_TREE stores: a root split and one split under each side. A side
+    that did not split splits on a threshold no value reaches, with the same leaf both ways."""
+    never = 1e9                              # standardised values are clipped to +-5
+
+    def side(node):
+        if isinstance(node, dict):
+            return names[node["f"]], round(node["t"], 10), round(node["l"], 10), round(node["r"], 10)
+        return names[0], never, round(node, 10), round(node, 10)
+
+    out = []
+    for t in trees:
+        if not isinstance(t, dict):
+            t = {"f": 0, "t": never, "l": t, "r": t}
+        lf, lt, ll, lr = side(t["l"])
+        rf, rt, rl, rr = side(t["r"])
+        out.append({"root_f": names[t["f"]], "root_t": round(t["t"], 10), "left_f": lf, "left_t": lt, "ll": ll,
+                    "lr": lr, "right_f": rf, "right_t": rt, "rl": rl, "rr": rr})
+    return out
 
 
 def boost_predict(trees, z, rate: float = 0.1):
@@ -293,21 +347,33 @@ def boost_predict(trees, z, rate: float = 0.1):
 
 # ---------------------------------------------------------------- training and the held-out test
 
-def train_rows(rows: list[dict]) -> tuple[dict, dict]:
+KINDS = ("logistic", "trees")
+RATE = 0.1
+
+
+def train_rows(rows: list[dict], kind: str = "logistic") -> tuple[dict, dict]:
     """Fit on the training accounts, measure on the held-out ones. Returns (model, metrics).
-    The model is the logistic regression on every feature; the rest of the table is there to compare it with."""
+    kind: which model is deployed, the logistic regression or the boosted trees (both are measured either way)."""
     import numpy as np
 
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {KINDS}")
     train = [r for r in rows if not held_out(r["account_id"])]
     test = [r for r in rows if held_out(r["account_id"])]
     y_train = np.array([int(r["label"]) for r in train])
     y_test = np.array([int(r["label"]) for r in test])
-    model = logistic(train, FEATURES)
+    linear = logistic(train, FEATURES)
     signals_only = logistic(train, SIGNAL_FEATURES)
-    p_test = np.array([predict(r, model) for r in test])
+    p_linear = np.array([predict(r, linear) for r in test])
     p_signals = np.array([predict(r, signals_only) for r in test])
-    trees = boost_fit(zmatrix(train, model), y_train)
-    p_trees = boost_predict(trees, zmatrix(test, model))
+    names_z = [f["name"] for f in linear["features"]]
+    fitted = boost_fit(zmatrix(train, linear), y_train, rate=RATE)
+    tree_model = {"kind": "trees", "intercept": 0.0, "rate": RATE, "dropped": linear["dropped"],
+                  "features": [{**f, "coef": 0.0} for f in linear["features"]],
+                  "trees": export_trees(fitted, names_z)}
+    p_trees = np.array([predict(r, tree_model) for r in test])        # the exported trees, as the banks score them
+    model = tree_model if kind == "trees" else {"kind": "logistic", **linear}
+    p_test = p_trees if kind == "trees" else p_linear
     names = [n for n, _ in SIGNAL_FEATURES if n not in signals_only["dropped"]]
     hand = hand_score(test, names)
     wl = SIGNAL["weight"]
@@ -316,10 +382,12 @@ def train_rows(rows: list[dict]) -> tuple[dict, dict]:
     flagged = p_test >= 0.5
     tp = int((flagged & (y_test == 1)).sum())
     metrics = {
+        "deployed": kind,
         "accounts": {"train": len(train), "test": len(test), "flagged_train": int(y_train.sum()),
                      "flagged_test": int(y_test.sum())},
         "auc": {"model": round(auc(y_test, p_test), 4), "hand_set_same_signals": round(auc(y_test, hand), 4),
                 "hand_set_plus_model": round(auc(y_test, combined), 4),
+                "logistic": round(auc(y_test, p_linear), 4),
                 "model_signals_only": round(auc(y_test, p_signals), 4),
                 "boosted_trees_experiment": round(auc(y_test, p_trees), 4)},
         "at_50": {"precision": round(tp / max(int(flagged.sum()), 1), 4),
@@ -368,11 +436,15 @@ def features(conn, max_txns: int = 1000, max_positives: int = 20000, negatives_p
 
 def save(model: dict, metrics: dict, as_of: str, path: Path = MODEL_FILE) -> None:
     body = {"data": CAVEAT, "trained_at": datetime.now().strftime(FMT), "features_as_of": as_of,
-            "method": "logistic regression, classes balanced, L2 1e-3, standardised (log1p where marked), "
-                      "clipped to +-5; held out: 1 account in 5 by a hash of its ID",
+            "method": (f"gradient-boosted trees, {len(model.get('trees') or [])} trees of depth 2, rate {RATE}, "
+                       "classes balanced, on the standardised inputs" if model.get("kind") == "trees" else
+                       "logistic regression, classes balanced, L2 1e-3")
+                      + "; standardised (log1p where marked), clipped to +-5; held out: 1 account in 5 by a hash of "
+                        "its ID",
             **model, "metrics": metrics}
     head = ("# Written by `python -m pipeline.learned` (DECISIONS D-51). Do not edit by hand: retrain instead.\n"
-            "# Loaded into every bank's LEARNED_COEF by `make seed`; scored in Exasol by sql/steps/060_score.sql.\n")
+            "# Loaded into every bank's LEARNED_COEF and LEARNED_TREE by `make seed`; scored in Exasol by "
+            "sql/steps/060_score.sql.\n")
     path.write_text(head + yaml.safe_dump(body, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
@@ -380,7 +452,11 @@ def report(m: dict) -> str:
     met = m["metrics"]
     a, acc, at = met["auc"], met["accounts"], met["at_50"]
     better = a["model"] - a["hand_set_same_signals"]
+    trees = m.get("kind") == "trees"
     lines = ["# The learned signal (generated by `python -m pipeline.learned`)", "", f"_{CAVEAT}_", "",
+             "Deployed: " + (f"gradient-boosted trees ({len(m['trees'])} trees of depth 2), scored in Exasol SQL "
+                             "from LEARNED_TREE." if trees else "logistic regression, scored in Exasol SQL from "
+                                                                "LEARNED_COEF."), "",
              "One more signal next to the eight hand-set ones (DECISIONS D-51), weight "
              f"{SIGNAL['weight']} of {1 + SIGNAL['weight']:.2f}: it can move a score a little, and the hand-set "
              "signals still decide the band.", "",
@@ -391,20 +467,39 @@ def report(m: dict) -> str:
              f"| The hand-set weights on the signals AMLworld holds | {a['hand_set_same_signals']:.3f} |",
              f"| The hand-set weights plus the model at weight {SIGNAL['weight']} | {a['hand_set_plus_model']:.3f} |"]
     if "model_signals_only" in a:
-        lines += [f"| The same model on those signals only, no connection features | {a['model_signals_only']:.3f} |",
-                  f"| Boosted trees on every feature (experiment, not deployed) | "
+        lines += [f"| Logistic regression, every input{' (not deployed)' if trees else ''} | "
+                  f"{a.get('logistic', a['model']):.3f} |",
+                  "| Logistic regression on those signals only, no connection inputs | "
+                  f"{a['model_signals_only']:.3f} |",
+                  f"| Boosted trees on every input{'' if trees else ' (experiment, not deployed)'} | "
                   f"{a['boosted_trees_experiment']:.3f} |"]
     lines += ["", "AUC: the chance that a random flagged account rates above a random other one (0.5 is a coin "
              "toss). " + ("The model ranks the held-out accounts better than the hand-set weights." if better > 0.005
                           else "The model does not rank them better than the hand-set weights."), "",
-             "The boosted trees are measured to show what a more complex model would add; they are not scored at the "
-             "banks, because one formula can be read and checked line by line.", "",
+             (("The trees rank the held-out accounts better than the logistic regression"
+               if a["model"] > a.get("logistic", 0) + 0.005 else
+               "The trees do not rank the held-out accounts better than the logistic regression")
+              + "; the price of trees is that a rating is the sum of many small trees, not one weight per input. "
+                "They are scored in SQL like the rest, and the logistic regression stays one retrain away."
+              if trees else
+              "The boosted trees are measured to show what a more complex model would add; they are not scored at "
+              "the banks, because one formula can be read and checked line by line."), "",
               f"At a rating of 50% or more: precision {at['precision']:.1%}, recall {at['recall']:.1%} "
               f"({at['rated_50_or_more']} accounts rated 50% or more).", "", "## The model", "",
               "| Input | Transform | Weight on the standardised value |", "| --- | --- | ---: |"]
-    for f in m["features"]:
-        lines.append(f"| {f['name']} | {'log(1 + x)' if f['log'] else 'none'} | {f['coef']:+.3f} |")
-    lines.append(f"| (intercept) | | {m['intercept']:+.3f} |")
+    if trees:
+        lines[-2:] = ["| Input | Transform | Splits on it |", "| --- | --- | ---: |"]
+        used = {}
+        for t in m["trees"]:
+            for key, th in (("root_f", "root_t"), ("left_f", "left_t"), ("right_f", "right_t")):
+                if t[th] < 1e8:
+                    used[t[key]] = used.get(t[key], 0) + 1
+        for f in m["features"]:
+            lines.append(f"| {f['name']} | {'log(1 + x)' if f['log'] else 'none'} | {used.get(f['name'], 0)} |")
+    else:
+        for f in m["features"]:
+            lines.append(f"| {f['name']} | {'log(1 + x)' if f['log'] else 'none'} | {f['coef']:+.3f} |")
+        lines.append(f"| (intercept) | | {m['intercept']:+.3f} |")
     if m.get("dropped"):
         lines += ["", "Left out: " + "; ".join(f"{k} ({v})" for k, v in m["dropped"].items()) + "."]
     lines += ["", "Also left out on purpose: account age and declared profile (AMLworld has neither; the import makes "
@@ -413,7 +508,8 @@ def report(m: dict) -> str:
               "The connection inputs (distinct payers and payees, money out against in, number of payments, share "
               "of payees that also paid it) are inputs to this model only: they never enter the score on their own.",
               "",
-              "A positive weight means a higher value looks more like the flagged accounts. The rating is not a "
+              ("" if trees else "A positive weight means a higher value looks more like the flagged accounts. ")
+              + "The rating is not a "
               "probability that an account is a mule: the classes are balanced, and the labels are laundering in "
               "synthetic data.", "", f"_{CAVEAT}_", ""]
     return "\n".join(lines)
@@ -425,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-txns", type=int, default=1000, help="leave out accounts with more payments in or out")
     ap.add_argument("--negatives", type=int, default=4, help="other accounts per flagged account")
     ap.add_argument("--replace", action="store_true", help="save the new model even if it is not better")
+    ap.add_argument("--model", choices=KINDS, default="logistic",
+                    help="which model to deploy: logistic (one formula) or trees (gradient-boosted trees)")
     args = ap.parse_args(argv)
     if args.show:
         m = load()
@@ -447,11 +545,11 @@ def main(argv: list[str] | None = None) -> int:
               f"{time.perf_counter() - started:.0f}s")
     finally:
         conn.close()
-    model, metrics = train_rows(rows)
+    model, metrics = train_rows(rows, args.model)
     a = metrics["auc"]
-    print(f"held-out AUC: model {a['model']:.3f}, hand-set {a['hand_set_same_signals']:.3f}, hand-set plus model "
-          f"{a['hand_set_plus_model']:.3f}, model without connection features {a['model_signals_only']:.3f}, "
-          f"boosted trees (experiment) {a['boosted_trees_experiment']:.3f}")
+    print(f"held-out AUC: deployed ({args.model}) {a['model']:.3f}, hand-set {a['hand_set_same_signals']:.3f}, "
+          f"hand-set plus model {a['hand_set_plus_model']:.3f}; logistic {a['logistic']:.3f}, logistic without "
+          f"connection inputs {a['model_signals_only']:.3f}, boosted trees {a['boosted_trees_experiment']:.3f}")
     ok, why = should_save(metrics, load())
     if not (ok or args.replace):
         print(f"kept the saved model: the new one is not saved because {why}")

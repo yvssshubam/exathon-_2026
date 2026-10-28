@@ -85,10 +85,31 @@ def facts(conn, bank: str, period_from: str, period_to: str) -> dict:
                             f"WHERE event_at {window} AND event_kind IN ('CASHOUT_BLOCKED', 'TRANSFER_BLOCKED', "
                             "'RECIPIENT_WATCHED') ORDER BY event_at, event_id", p).fetchall()
 
+    # why each waiting freeze was proposed, however long ago: refused tries so far, and fraud complaints that paid it
+    tries = dict(conn.execute("SELECT account_id, COUNT(*) FROM WATCH_EVENT WHERE event_kind IN ('CASHOUT_BLOCKED', "
+                              "'TRANSFER_BLOCKED') AND event_at <= TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS') "
+                              "GROUP BY account_id", p).fetchall())
+    links = dict(conn.execute("SELECT ca.account_id, MAX(ca.complaint_links) FROM CASE_ACCOUNT ca "
+                              "JOIN CASE_ACTION a ON a.case_id = ca.case_id AND a.account_id = ca.account_id "
+                              "WHERE a.action_code = 'PROPOSE_FULL_FREEZE' GROUP BY ca.account_id").fetchall())
+
     return {"names": names, "labels": ticket_labels(conn), "tickets": tickets, "holds": holds, "filings": filings,
-            "stories": stories, "attempts": attempts,
+            "stories": stories, "attempts": attempts, "tries": tries, "links": links,
             "watch": watch,
             "splits": splits, "refused": refused, "failed": failed, "waiting": waiting}
+
+
+def freeze_why(f: dict, acc: str) -> str:
+    """The reason a freeze is proposed, in a few words: refused tries to move held money (since the hold, not only
+    in this log's period), else the fraud complaints that paid the account."""
+    tries = int((f.get("tries") or {}).get(acc) or 0) or sum(
+        1 for _w, a, k, *_ in f.get("attempts", []) if a == acc and k != "RECIPIENT_WATCHED")
+    if tries:
+        return f", after {tries} tr{'y' if tries == 1 else 'ies'} to move held money."
+    links = int(float((f.get("links") or {}).get(acc) or 0))
+    if links > 1:
+        return f", money from {links} fraud complaints in 7 days."
+    return "."
 
 
 def victim_name(tag: str | None) -> str:
@@ -187,9 +208,7 @@ def template(f: dict, bank_name: str, period_to: str) -> str:
             elif code == "PROPOSE_NARROW":
                 lines.append(f"- Smaller hold: reduce {who}'s hold to {rupees(amount)}.")
             elif code == "PROPOSE_FULL_FREEZE":
-                tries = sum(1 for _w, a, k, *_ in f.get("attempts", []) if a == acc and k != "RECIPIENT_WATCHED")
-                lines.append(f"- Freeze: {who}" + (f", after {tries} tr{'y' if tries == 1 else 'ies'} to move held "
-                                                   "money." if tries else "."))
+                lines.append(f"- Freeze: {who}{freeze_why(f, acc)}")
             else:
                 lines.append(f"- Release: the hold on {who}, no police direction in 75 days.")
     else:

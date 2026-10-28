@@ -46,3 +46,12 @@ def test_refused_duplicates_stay_out_of_the_note():
     f = dict(FACTS, refused=[("CASE_DEMO", "PROPOSE_FULL_FREEZE", "ACC_C",
                               "a full-freeze proposal on this account is already waiting for the officer")] * 3)
     assert "already waiting" not in template(f, "Bank X", "2026-10-18 09:00:00")
+
+
+def test_a_freeze_says_why_even_when_the_tries_were_in_an_earlier_period():
+    from pipeline.morning import freeze_why
+
+    f = {"attempts": [], "tries": {"ACC_B": 1}, "links": {"ACC_M13": 3.0}}
+    assert freeze_why(f, "ACC_B") == ", after 1 try to move held money."
+    assert freeze_why(f, "ACC_M13") == ", money from 3 fraud complaints in 7 days."
+    assert freeze_why(f, "ACC_Q") == "."

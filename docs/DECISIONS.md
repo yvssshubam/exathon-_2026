@@ -127,13 +127,21 @@ always shows the SQL that ran. Because a small local model writes weaker SQL, ev
 COMMENT, and common questions are backed by plain SQL views (for example the repeat-offender view, FR-17) so the
 model only has to select from a view.
 
-## D-17 · PLANNED · Referrals that survive partial adoption and tampering
+## D-17 · DEFAULT · Referrals that survive partial adoption and tampering
 
 - **Share unknown.** If an incoming referral carries no victim share (the sending bank does not use the tool), the
   receiving bank treats the whole amount as possibly the victim's, holds at most that amount (never the whole
-  account) and marks the hop "share unknown".
+  account) and marks the hop "share unknown". The portal routes such an entry with the whole transfer as the
+  reported amount and `share_known = FALSE`, and signs it itself so the chain goes on.
 - **Hash chain.** Each referral stores a SHA-256 of its own fields plus the previous hop's hash, so a receiving
-  bank, the police or a court can check that the victim's share was passed on unchanged.
+  bank, the police or a court can check that the victim's share was passed on unchanged. The portal signs a police
+  ticket as it delivers it (the root); a bank signs each onward entry as it files it (083); the portal passes the
+  hash on unchanged. The receiving bank's checker recomputes it (075, `referral_intact`): a changed field fails the
+  check, and nothing is held automatically on that ticket. The text hashed is fixed (`pipeline/chain.py`): version,
+  previous hash, acknowledgement number, victim, sender, receiver, account, UTR, amount in paise, share known, time.
+  Exasol computes it with HASH_SHA256 and Python with hashlib, and the tests check that the two agree;
+  `python -m pipeline.chain` walks every chain on the portal. Free-text remarks are not signed: they are untrusted
+  data, never acted on.
 
 ## D-18 · DEFAULT · Case steps are parameterised SQL run inside Exasol
 

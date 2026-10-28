@@ -28,7 +28,10 @@ CREATE OR REPLACE TABLE TICKET (
     fir_reference       VARCHAR(100)           COMMENT IS 'FIR number, for a notice after an FIR',
     remarks             VARCHAR(2000)          COMMENT IS 'Free text typed on the ticket',
     corrects_case_id    VARCHAR(40)            COMMENT IS 'A corrected ticket: the case it replaces',
-    delivered_at        TIMESTAMP              COMMENT IS 'When the portal put it in the bank''s inbox'
+    delivered_at        TIMESTAMP              COMMENT IS 'When the portal put it in the bank''s inbox',
+    share_known         BOOLEAN       DEFAULT TRUE COMMENT IS 'FALSE: the onward entry gave no victim share; the amount is the whole transfer (D-17)',
+    prev_hash           VARCHAR(64)            COMMENT IS 'Hash of the ticket this one came from (NULL for a police ticket)',
+    chain_hash          VARCHAR(64)            COMMENT IS 'SHA-256 over prev_hash and the referral fields: signed by the filing bank, or by the portal (a police ticket, or an entry without a share)'
 ) COMMENT IS 'Every ticket the portal routed: police tickets, and onward tickets it made from banks'' onward entries.';
 
 CREATE OR REPLACE TABLE ENTRY (
@@ -49,7 +52,9 @@ CREATE OR REPLACE TABLE ENTRY (
     detail            VARCHAR(4000)          COMMENT IS 'Exit identifiers, KYC packet or send-back letter',
     filed_at          TIMESTAMP              COMMENT IS 'When the bank filed it (simulated clock)',
     received_at       TIMESTAMP              COMMENT IS 'When the portal collected it',
-    routed_ticket_id  DECIMAL(18,0)          COMMENT IS 'For an onward entry: the ticket it became'
+    routed_ticket_id  DECIMAL(18,0)          COMMENT IS 'For an onward entry: the ticket it became',
+    prev_hash         VARCHAR(64)            COMMENT IS 'ONWARD: the hash the filing bank chained it to',
+    chain_hash        VARCHAR(64)            COMMENT IS 'ONWARD: the hash the filing bank signed (NULL: the bank gave none)'
 ) COMMENT IS 'Everything banks filed, as the portal received it. The police see the whole trail here; no bank does.';
 
 CREATE OR REPLACE TABLE ROUTE_LOG (

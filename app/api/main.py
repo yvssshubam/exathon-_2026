@@ -254,10 +254,11 @@ def demo_reset(admin=Depends(get_admin)):
 @app.get("/api/narrator")
 def narrator(victim: str = Query("V_LAKSHMI"), admin=Depends(get_admin)):
     """The whole trail across every bank. No single bank sees this: it reads every schema as the admin."""
+    from pipeline import chain
     from pipeline.narrator import CAPTION, timeline, victim_trail
 
     return {"caption": CAPTION, "clock": sim_clock(admin), "trail": victim_trail(admin, victim),
-            "timeline": timeline(admin)}
+            "timeline": timeline(admin), "chain": chain.verify(chain.tickets(admin, victim))}
 
 
 # ---------------------------------------------------------------- the ticket queue and the agent

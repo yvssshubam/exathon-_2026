@@ -86,6 +86,9 @@ CREATE OR REPLACE TABLE COMPLAINT (
     fir_reference       VARCHAR(100)           COMMENT IS 'FIR number, when the notice comes from an investigating officer after an FIR',
     remarks             VARCHAR(2000)          COMMENT IS 'Free text typed on the ticket. Untrusted: the agent reads it as data, never as an instruction',
     corrects_case_id    VARCHAR(40)            COMMENT IS 'A corrected ticket: the sent-back case it replaces',
+    share_known         BOOLEAN       DEFAULT TRUE COMMENT IS 'FALSE: the sending bank gave no victim share, so the amount is the whole transfer, the most this bank may hold (D-17)',
+    prev_hash           VARCHAR(64)            COMMENT IS 'Hash of the ticket this referral came from (NULL for a police ticket): the chain link (D-17)',
+    chain_hash          VARCHAR(64)            COMMENT IS 'SHA-256 the sender signed over prev_hash and the fields above it acts on; the checker recomputes it (referral_intact)',
     CONSTRAINT pk_complaint PRIMARY KEY (case_id) DISABLE
 ) COMMENT IS 'One row per ticket this bank received from the portal: the notice''s fields as the ticket carries them.';
 
@@ -349,7 +352,7 @@ CREATE OR REPLACE TABLE PROPOSAL (
 CREATE OR REPLACE TABLE CHECK_RESULT (
     case_id         VARCHAR(40)   NOT NULL COMMENT IS 'Case',
     viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'This bank',
-    check_name      VARCHAR(40)   NOT NULL COMMENT IS 'conservation, holds_within_balance, holds_within_trail, holds_within_report, automatic_allowed, own_accounts_only, never_full_respected',
+    check_name      VARCHAR(40)   NOT NULL COMMENT IS 'conservation, holds_within_balance, holds_within_trail, holds_within_report, automatic_allowed, own_accounts_only, never_full_respected, referral_intact',
     check_passed    BOOLEAN       NOT NULL COMMENT IS 'TRUE when the check passed. Any FALSE stops every change for the case',
     detail          VARCHAR(500)           COMMENT IS 'The numbers behind the check',
     stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
@@ -393,7 +396,9 @@ CREATE OR REPLACE TABLE PORTAL_ENTRY (
     filed_at          TIMESTAMP              COMMENT IS 'When it was filed (simulated clock)',
     filed_by          VARCHAR(60)            COMMENT IS 'agent (carried out by the checker) or the officer',
     proposal_id       DECIMAL(18,0)          COMMENT IS 'Proposal the checker carried out',
-    stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+    stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it',
+    prev_hash         VARCHAR(64)            COMMENT IS 'ONWARD: the hash of the ticket this case came from (D-17)',
+    chain_hash        VARCHAR(64)            COMMENT IS 'ONWARD: SHA-256 this bank signs over prev_hash and the referral, carried to the next bank unchanged'
 ) COMMENT IS 'This bank''s CFCFRMS outbox: onward entries, exits, KYC packets and send-backs. The portal service collects them; onward entries become the next bank''s ticket.';
 
 CREATE OR REPLACE TABLE HOLDER_MESSAGE (

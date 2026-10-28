@@ -13,6 +13,9 @@
 --   automatic_allowed     only the four automatic hold and filing actions are marked automatic (a freeze never is)
 --   own_accounts_only     holds and markers only on this bank's own accounts
 --   never_full_respected  no full-freeze proposal on a nodal, pool or escrow account
+--   referral_intact       the ticket's fields still give the SHA-256 hash its sender signed (D-17, pipeline/chain.py):
+--                         a victim share or any other field changed between banks fails it. An onward ticket must
+--                         carry a hash; a police ticket is signed by the portal on delivery
 
 DELETE FROM CHECK_RESULT WHERE case_id = {case_id} AND viewing_bank_id = {own_bank_id};
 
@@ -98,4 +101,32 @@ FROM CASE_ACTION a
 JOIN ACCOUNT acc ON acc.account_id = a.account_id
 WHERE a.case_id = {case_id} AND a.viewing_bank_id = {own_bank_id}
   AND a.action_code = 'PROPOSE_FULL_FREEZE'
-  AND acc.account_type IN ('nodal', 'pool', 'escrow');
+  AND acc.account_type IN ('nodal', 'pool', 'escrow')
+UNION ALL
+SELECT {case_id}, {own_bank_id}, 'referral_intact',
+       CASE WHEN h.chain_hash IS NULL AND h.ticket_kind = 'ONWARD' THEN FALSE
+            WHEN h.chain_hash IS NULL THEN TRUE
+            WHEN h.chain_hash = h.recomputed THEN TRUE
+            ELSE FALSE END,
+       CASE WHEN h.chain_hash IS NULL AND h.ticket_kind = 'ONWARD' THEN 'onward ticket without the sender''s hash'
+            WHEN h.chain_hash IS NULL THEN 'ticket carries no hash'
+            WHEN h.chain_hash = h.recomputed THEN 'ticket matches the hash its sender signed, '
+                 || SUBSTR(h.chain_hash, 1, 16)
+            ELSE 'ticket does not match the hash its sender signed: changed on the way' END,
+       CURRENT_STATEMENT
+FROM (
+    SELECT c.ticket_kind, c.chain_hash,
+           LOWER(HASH_SHA256(
+                   'PHv1|' || COALESCE(c.prev_hash, '-') || '|'
+                || COALESCE(c.ack_no, '-') || '|'
+                || COALESCE(c.victim_tag, '-') || '|'
+                || COALESCE(c.from_bank_id, 'POLICE') || '|'
+                || {own_bank_id} || '|'
+                || COALESCE(c.beneficiary_account, '-') || '|'
+                || COALESCE(c.utr, '-') || '|'
+                || COALESCE(CAST(CAST(ROUND(c.amount_inr * 100) AS DECIMAL(20,0)) AS VARCHAR(30)), '-') || '|'
+                || CASE WHEN c.share_known = FALSE THEN 'N' ELSE 'Y' END || '|'
+                || COALESCE(TO_CHAR(c.txn_at, 'YYYY-MM-DD HH24:MI:SS'), '-'))) AS recomputed
+    FROM COMPLAINT c
+    WHERE c.case_id = {case_id}
+) h;

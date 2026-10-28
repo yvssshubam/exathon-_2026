@@ -113,7 +113,13 @@ python -m pipeline.load_amlworld --check    # files present and shaped as expect
 make data                                   # imports into PH_AML once, then gives each bank its share
 make lab                                    # trace and scoring tests on the labelled patterns (PH_LAB)
 make learn                                  # train the learned signal on the labels, then reload the banks
+make bench                                  # scale benchmark: 100 tickets at once (TICKETS=1000 for more)
 ```
+
+**Scale benchmark (optional).** `python -m pipeline.bench --tickets 1000` fires a burst of tickets at the full
+AMLworld table and works each through every step, up to the holds, in its own schemas (`PH_BENCH_*`, never the demo
+banks). It writes `docs/BENCHMARK.md`: time per step and how many tickets were held within the golden hour, with the
+machine it ran on.
 
 **The learned signal (optional).** `make learn` trains a small logistic regression on AMLworld's laundering labels
 and writes `config/learned_signal.yaml` and `docs/LEARNED_SIGNAL.md`, the held-out test against the hand-set
@@ -187,6 +193,8 @@ Stated as assumptions, not as how banks work. Each one is a question for anyone 
   linked to the first case, not held twice.
 - The split between several victims is a record for the refund stage. The investigating officer decides the actual
   payout.
+- Every referral between banks is signed with a SHA-256 hash chain (DECISIONS D-17); `python -m pipeline.chain`
+  checks every hop. A real portal would also sign with each bank's key; a hash chain shows tampering, not who did it.
 - AMLworld is synthetic and labels laundering, not cyber-fraud mule accounts.
 - The scoring weights are hand-set (unless the AMLworld scoring test runs). The one learned signal is trained on
   synthetic laundering labels, so its test shows how well it ranks AMLworld accounts, not real mule accounts.

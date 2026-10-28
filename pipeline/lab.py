@@ -40,23 +40,30 @@ FMT = "%Y-%m-%d %H:%M:%S"
 CLEAN_RECEIVERS_NEEDED = 30
 
 
-def build(conn) -> None:
-    """PH_LAB: a bank schema whose transactions and accounts are AMLworld's."""
+def build(conn, schema: str = LAB, learned: bool = False) -> None:
+    """A bank schema (PH_LAB by default) whose transactions and accounts are AMLworld's. learned=True also loads the
+    learned signal (the benchmark measures the scoring as the banks run it)."""
     from pipeline.run_sql import BANK_SQL, split_statements, sql_files
 
-    conn.execute(f"CREATE SCHEMA IF NOT EXISTS {LAB}")
-    conn.execute(f"OPEN SCHEMA {LAB}")
+    if not schema.startswith(("PH_LAB", "PH_BENCH_")):
+        raise ValueError(f"{schema} is not a lab schema: build only ever replaces PH_LAB or PH_BENCH_*")
+    # A rebuild starts clean: the views below replace tables of the same names, which the bank SQL cannot replace.
+    conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+    conn.execute(f"CREATE SCHEMA {schema}")
+    conn.execute(f"OPEN SCHEMA {schema}")
     for path in sql_files(BANK_SQL) + [ROOT / "sql" / "lab" / "010_lab.sql"]:
         for stmt in split_statements(path.read_text(encoding="utf-8")):
             conn.execute(stmt)
     from pipeline.load_cases import world_from_files
 
     world = world_from_files()
-    # The hand-set signals only: the learned one is trained on AMLworld itself, so it stays out of this test (D-51).
-    world["SCORING_CONFIG"] = [r for r in world["SCORING_CONFIG"] if r[0] != "learned_pattern"]
-    for table in ("SCORING_CONFIG", "PROFILE_BAND"):
-        conn.execute(f"TRUNCATE TABLE {LAB}.{table}")
-        conn.import_from_iterable(world[table], (LAB, table))
+    tables = ["SCORING_CONFIG", "PROFILE_BAND"] + (["LEARNED_COEF"] if learned else [])
+    if not learned:
+        # The hand-set signals only: the learned one is trained on AMLworld itself, so it stays out of this test (D-51).
+        world["SCORING_CONFIG"] = [r for r in world["SCORING_CONFIG"] if r[0] != "learned_pattern"]
+    for table in tables:
+        conn.execute(f"TRUNCATE TABLE {schema}.{table}")
+        conn.import_from_iterable(world[table], (schema, table))
 
 
 def patterns(conn, per_type: int | None) -> list[tuple]:

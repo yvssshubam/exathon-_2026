@@ -98,7 +98,7 @@ def test_every_check_passes_and_names_its_statement(maker):
     rows = q(maker, "SELECT check_name, check_passed, detail, stmt_id FROM CHECK_RESULT WHERE case_id = 'CASE_DEMO'")
     assert {r[0] for r in rows} == {"conservation", "holds_within_balance", "holds_within_trail",
                                     "holds_within_report", "automatic_allowed", "own_accounts_only",
-                                    "never_full_respected"}
+                                    "never_full_respected", "referral_intact"}
     assert all(r[1] for r in rows), [r for r in rows if not r[1]]
     assert all(r[3] is not None for r in rows)
 

@@ -338,6 +338,7 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
         {wide ? <Header p={p} pill="Nothing held" pillClass="p-urgent" /> : null}
         <h4 style={{ fontSize: 19, marginBottom: wide ? 12 : 2 }}>{wide ? "Is this the payment the police meant?" : `Hold ${inrR(p.near_amount_inr)} in ${shortName(p.name)} on a notice that does not fully match?`}</h4>
         {!wide && <p className="note" style={{ marginBottom: 12 }}>{f.victim}'s complaint, {clock(p.received_at)} · {shortName(p.name)} <span className="id">{p.account_id}</span></p>}
+        {!wide && <div style={{ marginBottom: 14 }}><Actions p={p} officer={officer} onDone={onDone} variant={variant} note={false} /></div>}
         <div className="tw" style={{ marginBottom: 14 }}>
           <table className="t">
             <thead><tr><th scope="col"></th><th scope="col">{wide ? "On the notice" : "Notice"}</th><th scope="col">{wide ? `Payment into ${shortName(p.name)}` : "Payment"}</th><th scope="col">{wide ? "Match" : ""}</th></tr></thead>
@@ -369,8 +370,8 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
             <p style={{ fontSize: 14, marginBottom: 10 }}><b>Since the notice:</b> sent back to the police at {clock(p.proposed_at)} for a corrected UTR. No reply yet.</p>
           </>
         )}
-        <p className="note" style={{ marginBottom: 14 }}>Legal basis: {legal}</p>
-        <Actions p={p} officer={officer} onDone={onDone} variant={variant} />
+        <p className="note" style={{ marginBottom: wide ? 14 : 0 }}>Legal basis: {legal}</p>
+        {wide && <Actions p={p} officer={officer} onDone={onDone} variant={variant} />}
       </article>
     );
   }
@@ -385,6 +386,7 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
         <Changed p={p} />
         <h4 style={{ fontSize: 19, marginBottom: wide ? 12 : 2 }}>{wide ? `Freeze ${who}'s full account?` : `Freeze ${who}'s whole account?`}</h4>
         {!wide && <p className="note" style={{ marginBottom: 12 }}>{who} <span className="id">{p.account_id}</span> · {p.account_type}, opened {String(p.opened_on || "").slice(0, 10)}</p>}
+        {!wide && <div style={{ marginBottom: 14 }}><Actions p={p} officer={officer} onDone={onDone} variant={variant} note={false} /></div>}
         {wide ? (
           <div className="nowfreeze">
             <div><p className="label">Now</p><p style={{ fontSize: 15 }}><b>{inrR(f.held)} held</b>{f.held >= f.balance ? ", the whole balance" : ` of a ${inrR(f.balance)} balance`}{victimShare >= f.held ? `, all of it ${f.victim}'s` : ""}.</p><p className="note">Money that comes in later is not held.</p></div>
@@ -405,8 +407,8 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
         <EvidenceTable rows={wide ? rows : rows.filter((r) => !r[0].startsWith("New money"))} panel={!wide} />
         {!wide && <div className="against" style={{ marginBottom: 12 }}><b>Against freezing:</b> a freeze blocks nothing yet. Every rupee in {who} is already held. It only matters if new money arrives, and a full freeze is harder to defend in court than a hold.</div>}
         <Since p={p} watch={watch} />
-        <p className="note" style={{ marginBottom: 14 }}>Legal basis: {legal}</p>
-        <Actions p={p} officer={officer} onDone={onDone} variant={variant} note={false} />
+        <p className="note" style={{ marginBottom: wide ? 14 : 0 }}>Legal basis: {legal}</p>
+        {wide && <Actions p={p} officer={officer} onDone={onDone} variant={variant} note={false} />}
       </article>
     );
   }
@@ -451,6 +453,7 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
       <Changed p={p} />
       <h4 style={{ fontSize: 19, marginBottom: wide ? 12 : 4 }}>{p.action_code === "PROPOSE_RELEASE" ? `Release the hold on ${who}?` : wide ? `Reduce the hold from ${inrR(f.held)} to ${inrR(f.target)}?` : `Reduce ${who}'s hold to ${inrR(f.target)}?`}</h4>
       {!wide && <p className="note" style={{ marginBottom: 12 }}>{p.name}, {p.bank_name || "Bank X"} {p.account_type} account, open {ageWords(p.opened_on, p.held_since)}</p>}
+      {!wide && <div style={{ marginBottom: 14 }}><Actions p={p} officer={officer} onDone={onDone} variant={variant} note={false} /></div>}
       {p.action_code === "PROPOSE_NARROW" && wide && (
         <>
           <div className="bar" role="img" aria-label={`Of ${inrR(f.held)} held, ${inrR(f.target)} is the victim's and ${inrR(f.release)} is the customer's own`}>
@@ -472,8 +475,8 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
       )}
       <EvidenceTable rows={rows} />
       <Since p={p} watch={watch} />
-      <p className="note" style={{ marginBottom: 14 }}>Legal basis: {rs(legal || "")}</p>
-      <Actions p={p} officer={officer} onDone={onDone} variant={variant} note={false} />
+      <p className="note" style={{ marginBottom: wide ? 14 : 0 }}>Legal basis: {rs(legal || "")}</p>
+      {wide && <Actions p={p} officer={officer} onDone={onDone} variant={variant} note={false} />}
       {!wide && <p className="note" style={{ marginTop: 12 }}>Signed as {officer || "the signed-in officer"}, with your reasons, in the audit log and the hold record. <a href={`#/record/${encodeURIComponent(p.account_id)}`}>Hold record</a></p>}
     </article>
   );

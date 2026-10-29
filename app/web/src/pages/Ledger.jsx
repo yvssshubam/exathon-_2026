@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../api.js";
-import { KEY_EVENTS, shortEvent } from "../components/DecisionCard.jsx";
+import { KEY_EVENTS, shortEvent, Undo } from "../components/DecisionCard.jsx";
 import { Failed, Loading, MoreButton } from "../components/bits.jsx";
 import { accountName, clock, inrR, joinAnd, plural, rs, shortName, victim } from "../format.js";
 import { useLoad } from "../hooks.js";
@@ -103,7 +103,7 @@ export function Holds() {
                     <td>{a.since.length ? <>{a.since.slice(0, 2).map((e) => <div key={e.event_id}><span className="mono">{clock(e.event_at)}</span> {shortEvent(e)}</div>)}
                       {a.since.length > 2 && <a className="note" href={`#/record/${encodeURIComponent(a.id)}`}>+ {a.since.length - 2} more</a>}</> : <span className="note">Nothing</span>}</td>
                     <td>{a.decision ? (
-                      <a className="pill p-wait" href="#/review" style={a.decision.action_code === "PROPOSE_NARROW" ? { border: "2px solid #2f7a5a", color: "#1f5a41" } : { border: "2px solid #2a3744" }}>
+                      <a className="pill p-wait" href={`#/record/${encodeURIComponent(a.id)}`} style={a.decision.action_code === "PROPOSE_NARROW" ? { border: "2px solid #2f7a5a", color: "#1f5a41" } : { border: "2px solid #2a3744" }}>
                         {a.decision.action_code === "PROPOSE_NARROW" ? `Reduce hold to ${inrR(a.decision.amount_inr)}?` : a.decision.action_code === "PROPOSE_FULL_FREEZE" ? "Freeze account?" : a.decision.action_code === "PROPOSE_RELEASE" ? "Release the hold?" : "Accept the near match?"}</a>
                     ) : <span className="note">{a.kind === "frozen" ? "Police reply" : a.kind === "watched" ? "Holds itself if money arrives from a held account" : "Nothing to do"}</span>}</td>
                   </tr>
@@ -157,31 +157,92 @@ function HandoverNote({ log }) {
   );
 }
 
-export function Audit({ caseId }) {
+// ---------------------------------------------------------------- decided today (moved here from Review, which is only for what is waiting)
+function DecidedToday({ list, officer, onDone }) {
+  const [show, setShow] = useState(list.length <= 3);
+  return (
+    <section id="decided" style={{ marginBottom: 26, maxWidth: 970 }} aria-labelledby="decided-h">
+      <h2 id="decided-h" style={{ fontSize: 20, marginBottom: 10 }}>Decided today <span style={{ color: "#5b6675", fontWeight: 400 }}>{list.length}</span>
+        {!show && <button className="linkbtn" type="button" style={{ marginLeft: 12, fontSize: 14 }} onClick={() => setShow(true)}>Show</button>}</h2>
+      {show && list.map((p) => {
+        const rej = p.decision_outcome === "REJECTED";
+        const word = p.undo_code ? { HOLD_AGAIN: "Held again", UNFREEZE: "Unfrozen", RELEASE: "Released" }[p.undo_code]
+          : rej ? "Kept" : { PROPOSE_NARROW: "Reduced", PROPOSE_FULL_FREEZE: "Frozen", UNMATCHED_NOTICE: "Accepted", PROPOSE_RELEASE: "Released" }[p.action_code];
+        const what = { PROPOSE_NARROW: rej ? `hold kept at ${inrR(p.current_hold_inr || p.amount_inr)}` : `hold reduced to ${inrR(p.decided_amount_inr ?? p.amount_inr)}`,
+          PROPOSE_FULL_FREEZE: rej ? "hold kept, not frozen" : `full account (${inrR(p.decided_amount_inr ?? p.amount_inr)})`,
+          UNMATCHED_NOTICE: rej ? "left with the police" : `near match accepted, ${inrR(p.amount_inr)}`, PROPOSE_RELEASE: "hold released" }[p.action_code];
+        return (
+          <div key={p.proposal_id} className="card" style={{ padding: "14px 18px", display: "flex", flexWrap: "wrap", gap: "8px 16px", alignItems: "baseline", marginBottom: 8 }}>
+            <span className="pill p-done">{word}</span>
+            <span><b>{shortName(p.name)}</b>, {what}, by {p.decided_by} at {clock(p.decided_at)}{p.decided_reason ? `: "${rs(p.decided_reason)}"` : "."}</span>
+            {p.action_code === "PROPOSE_FULL_FREEZE" && !rej && !n(p.victim_amount_inr) && <span className="note">Not counted as {victim(p.victim_tag)}'s money: {shortName(p.name)} received none of it.</span>}
+            {p.undo_code && <span className="note">{p.undone_by} at {clock(p.undone_at)}: "{p.undo_reason}"</span>}
+            <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}><Undo p={p} officer={officer} onDone={onDone} compact /><a href={`#/record/${encodeURIComponent(p.account_id)}`}>Hold record</a></span>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+const WHOM = [["all", "Everyone"], ["officers", "Any officer"], ["system", "The system"], ["watch", "After the hold"]];
+
+export function Audit({ caseId, officer, onChange }) {
   const story = useLoad(() => api.story(), []);
   const inbox = useLoad(() => api.inbox().catch(() => null), []);
-  const [filter, setFilter] = useState("all");
-  const [complaint, setComplaint] = useState(caseId || "all");
+  const [q, setQ] = useState("");
+  const [whom, setWhom] = useState("all");
+  const [date, setDate] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [onlyCase, setOnlyCase] = useState(caseId || null);
   const [showAll, setShowAll] = useState(false);
   // wait for the handover note too, so the page does not jump when it arrives
   if ((story.loading && !story.data) || (inbox.loading && !inbox.data)) return <div className="wrap"><Loading what="Loading the audit log" /></div>;
   if (story.error) return <div className="wrap"><Failed error={story.error} retry={story.reload} /></div>;
   const all = story.data;
-  const FILTERS = [["all", "All", () => true], ["officer", "Officer decisions", (e) => e.kind === "officer"], ["system", "System steps", (e) => e.kind === "system" || e.kind === "note"], ["watch", "After the holds", (e) => e.kind === "watch"]];
-  const complaints = [...new Map(all.filter((e) => e.case_id).map((e) => [e.case_id, `${e.label}${e.victim ? `, ${e.victim}` : ""}`])).entries()];
-  const byComplaint = all.filter((e) => complaint === "all" || e.case_id === complaint);
-  const rows = byComplaint.filter(FILTERS.find((f) => f[0] === filter)[2]);
+  const reload = () => { story.reload(); inbox.reload(); onChange?.(); };
+  const officers = [...new Set(all.filter((e) => e.kind === "officer").map((e) => e.who))].sort();
+  const dates = [...new Set(all.map((e) => (e.t || "").slice(0, 10)).filter(Boolean))].sort();
+  const byWhom = (e) => whom === "all" ? true : whom === "officers" ? e.kind === "officer" : whom === "system" ? e.kind === "system" || e.kind === "note"
+    : whom === "watch" ? e.kind === "watch" : e.kind === "officer" && `o:${e.who}` === whom;
+  const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const hay = (e) => [rs(e.what), e.who, e.label, e.victim, e.ref].filter(Boolean).join(" ").toLowerCase();
+  const rows = all.filter((e) => {
+    const day = (e.t || "").slice(0, 10), hm = (e.t || "").slice(11, 16);
+    return (!onlyCase || e.case_id === onlyCase) && byWhom(e) && (!date || day === date)
+      && (!from || (hm && hm >= from)) && (!to || (hm && hm <= to)) && words.every((w) => hay(e).includes(w));
+  });
+  const filtered = q || whom !== "all" || date || from || to || onlyCase;
+  const clear = () => { setQ(""); setWhom("all"); setDate(""); setFrom(""); setTo(""); setOnlyCase(null); };
+  const caseName = onlyCase && (all.find((e) => e.case_id === onlyCase) || {});
   const log = inbox.data?.morning_log;
+  const decided = inbox.data?.decided || [];
   return (
     <main id="main" className="wrap" style={{ paddingTop: 24, paddingBottom: 40 }}>
       <h1 style={{ fontSize: 30 }}>Audit log</h1>
       <p style={{ fontSize: 15, color: "#44505e", marginTop: 4, marginBottom: 22 }}>Every step the system took and every decision an officer signed, in order. Nothing here can be edited.</p>
       {log && <HandoverNote log={log} />}
-      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "10px 16px", marginBottom: 12 }}>
-        <div className="chips">{FILTERS.map(([k, label, fn]) => <button key={k} type="button" className={`chip${filter === k ? " on" : ""}`} onClick={() => setFilter(k)}>{label} <span>{byComplaint.filter(fn).length}</span></button>)}</div>
-        <label className="note" style={{ display: "flex", alignItems: "center", gap: 8 }}>Complaint
-          <select value={complaint} onChange={(e) => setComplaint(e.target.value)}><option value="all">All {complaints.length}</option>{complaints.map(([id, l]) => <option key={id} value={id}>{l}</option>)}</select></label>
+      {decided.length > 0 && <DecidedToday list={decided} officer={officer} onDone={reload} />}
+      <h2 style={{ fontSize: 20, marginBottom: 10 }}>Every event</h2>
+      <div className="filters" role="search" aria-label="Filter the audit log">
+        <label className="f-search">Search
+          <input type="search" value={q} onChange={(e) => { setQ(e.target.value); setShowAll(false); }} placeholder="A name, a complaint, an amount or a reference" /></label>
+        <label>By whom
+          <select value={whom} onChange={(e) => { setWhom(e.target.value); setShowAll(false); }}>
+            {WHOM.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            {officers.length > 0 && <optgroup label="Officers">{officers.map((o) => <option key={o} value={`o:${o}`}>{o}</option>)}</optgroup>}
+          </select></label>
+        <label>Date
+          <input type="date" value={date} min={dates[0]} max={dates.at(-1)} onChange={(e) => setDate(e.target.value)} /></label>
+        <label>From
+          <input type="time" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+        <label>To
+          <input type="time" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+        {filtered && <button type="button" className="linkbtn" style={{ alignSelf: "center", marginTop: 20 }} onClick={clear}>Clear filters</button>}
       </div>
+      {onlyCase && <p className="note" style={{ marginBottom: 10 }}>Only {caseName.label || onlyCase}{caseName.victim ? `, ${caseName.victim}` : ""}. <button type="button" className="linkbtn" onClick={() => setOnlyCase(null)}>Show every complaint</button></p>}
+      {from && to && from > to && <p className="note" style={{ marginBottom: 10, color: "#7a211b" }}>The "From" time is after the "To" time, so nothing can match.</p>}
       <div className="card" style={{ overflowX: "auto" }}>
         <table className="t">
           <thead><tr><th scope="col">Time</th><th scope="col">Who</th><th scope="col">What happened</th><th scope="col">Complaint</th><th scope="col">Reference</th></tr></thead>
@@ -190,7 +251,7 @@ export function Audit({ caseId }) {
               const [who, cls] = e.kind === "officer" ? [e.who, "p-officer"] : WHO[e.kind] || [e.who, "p-system"];
               return (
                 <tr key={`${e.ref}-${i}`}>
-                  <td className="mono">{clock(e.t)}</td>
+                  <td className="mono">{clock(e.t)}{dates.length > 1 && <span className="note" style={{ display: "block" }}>{(e.t || "").slice(0, 10)}</span>}</td>
                   <td><span className={`pill ${cls}`}>{who}</span></td>
                   <td>{rs(e.what)}</td>
                   <td className="note">{e.case_id ? (e.victim || e.label) : e.kind === "note" ? "All" : "None"}</td>
@@ -198,7 +259,7 @@ export function Audit({ caseId }) {
                 </tr>
               );
             })}
-            {!rows.length && <tr><td colSpan={5} className="note">Nothing in this view.</td></tr>}
+            {!rows.length && <tr><td colSpan={5} className="note">Nothing matches these filters.</td></tr>}
           </tbody>
         </table>
       </div>

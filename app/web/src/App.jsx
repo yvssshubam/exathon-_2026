@@ -98,7 +98,7 @@ export default function App() {
   else if (page === "compare") body = <Compare key={`${a || ""}-${version}`} caseId={a} />;
   else if (page === "queue") body = <Queue key={version} onChange={bump} />;
   else if (page === "holds") body = <Holds key={version} />;
-  else if (page === "audit") body = <Audit key={version} caseId={a} />;
+  else if (page === "audit") body = <Audit key={`${a || ""}-${version}`} caseId={a} officer={officer} onChange={bump} />;
   else if (page === "narrator") body = <Narrator key={version} victim={a} />;
   else body = <Review key={version} officer={officer} onChange={bump} />;
 

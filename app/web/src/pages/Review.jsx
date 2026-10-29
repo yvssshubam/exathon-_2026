@@ -43,7 +43,6 @@ export default function Review({ officer, onChange }) {
   // waiting items, plus the ones decided this visit (kept where they were, from the snapshot taken before deciding)
   const items = [...d.waiting, ...justDone.filter((p) => !d.waiting.some((w) => w.proposal_id === p.proposal_id))];
   const groups = GROUPS.map((g) => ({ ...g, items: items.filter((p) => p.action_code === g.code), waiting: d.waiting.filter((p) => p.action_code === g.code) }));
-  const decided = (d.decided || []).filter((p) => !justDone.some((j) => j.proposal_id === p.proposal_id));
   const total = d.waiting.length;
 
   return (
@@ -59,14 +58,12 @@ export default function Review({ officer, onChange }) {
                 return <a key={g.id} href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); document.getElementById(`g-${g.id}`)?.scrollIntoView({ behavior: "smooth" }); }}>
                   {g.jump} <b style={g.badge}>{g.waiting.length}{clear ? ` · ${clear} clear` : ""}</b></a>;
               })}
-              {decided.length > 0 && <a href="#g-decided" onClick={(e) => { e.preventDefault(); document.getElementById("g-decided")?.scrollIntoView({ behavior: "smooth" }); }}>Decided today <b style={{ background: "#e8ecf0", color: "#44505e" }}>{decided.length}</b></a>}
             </nav>
           </div>
           {total === 0 && justDone.length === 0 && <p className="card" style={{ padding: "14px 18px", marginTop: 12 }}>Nothing is waiting for you.{d.done.length ? ` All ${plural(d.done.length, "complaint")} today are handled.` : " No complaints have come in yet."}</p>}
           {groups.filter((g) => g.items.length).map((g) => (
             <Group key={g.id} g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById} />
           ))}
-          {decided.length > 0 && <DecidedToday list={decided} officer={officer} onDone={reload} />}
         </section>
         <aside style={{ flex: "1 1 360px", minWidth: 0 }} aria-labelledby="today-h">
           <TodayList d={d} groups={groups} />
@@ -346,34 +343,6 @@ function SignStep({ list, officer, onBack, onSigned }) {
       {error && <p className="error" role="alert">{error}</p>}
       <div className="acts"><button className="btn btn-p" type="button" disabled={busy} onClick={sign}>{busy ? "Signing…" : `Sign ${plural(list.length, "decision")} as ${officer}`}</button>
         <button className="btn btn-q" type="button" onClick={onBack}>Back to the list</button></div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------- decided today
-function DecidedToday({ list, officer, onDone }) {
-  const [show, setShow] = useState(list.length <= 3);
-  return (
-    <div id="g-decided" style={{ marginTop: 26, scrollMarginTop: 110 }}>
-      <h3 style={{ fontSize: 17, marginBottom: 10 }}>Decided today <span style={{ color: "#5b6675", fontWeight: 400 }}>{list.length}</span>
-        {!show && <button className="linkbtn" type="button" style={{ marginLeft: 12, fontSize: 14 }} onClick={() => setShow(true)}>Show</button>}</h3>
-      {show && list.map((p) => {
-        const rej = p.decision_outcome === "REJECTED";
-        const word = p.undo_code ? { HOLD_AGAIN: "Held again", UNFREEZE: "Unfrozen", RELEASE: "Released" }[p.undo_code]
-          : rej ? "Kept" : { PROPOSE_NARROW: "Reduced", PROPOSE_FULL_FREEZE: "Frozen", UNMATCHED_NOTICE: "Accepted", PROPOSE_RELEASE: "Released" }[p.action_code];
-        const what = { PROPOSE_NARROW: rej ? `hold kept at ${inrR(p.current_hold_inr || p.amount_inr)}` : `hold reduced to ${inrR(p.decided_amount_inr ?? p.amount_inr)}`,
-          PROPOSE_FULL_FREEZE: rej ? "hold kept, not frozen" : `full account (${inrR(p.decided_amount_inr ?? p.amount_inr)})`,
-          UNMATCHED_NOTICE: rej ? "left with the police" : `near match accepted, ${inrR(p.amount_inr)}`, PROPOSE_RELEASE: "hold released" }[p.action_code];
-        return (
-          <div key={p.proposal_id} className="card" style={{ padding: "14px 18px", display: "flex", flexWrap: "wrap", gap: "8px 16px", alignItems: "baseline", marginBottom: 8 }}>
-            <span className="pill p-done">{word}</span>
-            <span><b>{shortName(p.name)}</b>, {what}, by {p.decided_by} at {clock(p.decided_at)}{p.decided_reason ? `: "${rs(p.decided_reason)}"` : "."}</span>
-            {p.action_code === "PROPOSE_FULL_FREEZE" && !rej && !n(p.victim_amount_inr) && <span className="note">Not counted as {victim(p.victim_tag)}'s money: {shortName(p.name)} received none of it.</span>}
-            {p.undo_code && <span className="note">{p.undone_by} at {clock(p.undone_at)}: "{p.undo_reason}"</span>}
-            <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}><Undo p={p} officer={officer} onDone={onDone} compact /><a href={`#/record/${encodeURIComponent(p.account_id)}`}>Hold record</a></span>
-          </div>
-        );
-      })}
     </div>
   );
 }

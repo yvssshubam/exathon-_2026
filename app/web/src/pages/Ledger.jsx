@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { KEY_EVENTS, shortEvent } from "../components/DecisionCard.jsx";
-import { Failed, Loading } from "../components/bits.jsx";
+import { Failed, Loading, MoreButton } from "../components/bits.jsx";
 import { accountName, clock, inrR, joinAnd, plural, rs, shortName, victim } from "../format.js";
 import { useLoad } from "../hooks.js";
 
@@ -14,6 +14,7 @@ export function Holds() {
   const holds = useLoad(() => api.holds(), []);
   const inbox = useLoad(() => api.inbox().catch(() => null), []);
   const [filter, setFilter] = useState("all");
+  const [showAllHolds, setShowAllHolds] = useState(false);
   if (holds.loading && !holds.data) return <div className="wrap"><Loading what="Loading the hold ledger" /></div>;
   if (holds.error) return <div className="wrap"><Failed error={holds.error} retry={holds.reload} /></div>;
   const waiting = inbox.data?.waiting || [];
@@ -87,7 +88,7 @@ export function Holds() {
           <table className="t">
             <thead><tr><th scope="col">Account</th><th scope="col">Hold</th><th scope="col" className="r">Held</th><th scope="col">Victims' money</th><th scope="col" className="r">Customer's own</th><th scope="col">Since the hold</th><th scope="col">Next</th></tr></thead>
             <tbody>
-              {rows.map((a) => {
+              {(showAllHolds ? rows : rows.slice(0, 25)).map((a) => {
                 const sub = a.name && a.name.includes("(") ? ` · ${a.name.replace(/^.*\((.*)\)$/, "$1")}` : "";
                 return (
                   <tr key={a.id} style={a.kind === "watched" ? { background: "#fafbfc" } : undefined}>
@@ -116,6 +117,7 @@ export function Holds() {
           </table>
         </div>
       )}
+      {rows.length > 25 && <MoreButton open={showAllHolds} setOpen={setShowAllHolds} label={`Show all ${rows.length} accounts`} style={{ marginTop: 10 }} />}
       <p className="note" style={{ marginTop: 10 }}>Sorted with decisions first, then by size. Every account opens its hold record.</p>
       <p className="note">Amber always means waiting for you. The edge tells the two apart: green for reducing a hold, which releases a customer's own money, and dark for freezing the whole account. The wording differs too.</p>
     </main>
@@ -160,6 +162,7 @@ export function Audit({ caseId }) {
   const inbox = useLoad(() => api.inbox().catch(() => null), []);
   const [filter, setFilter] = useState("all");
   const [complaint, setComplaint] = useState(caseId || "all");
+  const [showAll, setShowAll] = useState(false);
   // wait for the handover note too, so the page does not jump when it arrives
   if ((story.loading && !story.data) || (inbox.loading && !inbox.data)) return <div className="wrap"><Loading what="Loading the audit log" /></div>;
   if (story.error) return <div className="wrap"><Failed error={story.error} retry={story.reload} /></div>;
@@ -183,7 +186,7 @@ export function Audit({ caseId }) {
         <table className="t">
           <thead><tr><th scope="col">Time</th><th scope="col">Who</th><th scope="col">What happened</th><th scope="col">Complaint</th><th scope="col">Reference</th></tr></thead>
           <tbody>
-            {rows.map((e, i) => {
+            {(showAll ? rows : rows.slice(0, 25)).map((e, i) => {
               const [who, cls] = e.kind === "officer" ? [e.who, "p-officer"] : WHO[e.kind] || [e.who, "p-system"];
               return (
                 <tr key={`${e.ref}-${i}`}>
@@ -199,7 +202,8 @@ export function Audit({ caseId }) {
           </tbody>
         </table>
       </div>
-      <p className="note" style={{ marginTop: 10 }}>Showing {rows.length} of {all.length}. Each row carries the officer's name or "the system", never a free-text name.</p>
+      {rows.length > 25 && <MoreButton open={showAll} setOpen={setShowAll} label={`Show all ${rows.length} events`} style={{ marginTop: 10 }} />}
+      <p className="note" style={{ marginTop: 10 }}>Showing {showAll ? rows.length : Math.min(rows.length, 25)} of {all.length}. Each row carries the officer's name or "the system", never a free-text name.</p>
     </main>
   );
 }

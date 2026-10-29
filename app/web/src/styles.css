@@ -231,3 +231,10 @@ table.tl { width: 100%; border-collapse: collapse; font-size: 14px; }
   body.printing-note .handover .acts { display: none !important; }
   body.printing-note .handover { border: 0; }
 }
+
+.db-note { font-size: 12px; color: #b9c3cf; }
+.db-act.saved:disabled { opacity: .55; cursor: not-allowed; }
+
+
+/* the Show more button as the last row of a list card */
+.row-more { padding: 12px 16px; border-top: 1px solid #e8ecf0; }

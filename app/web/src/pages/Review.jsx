@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { api, SNAPSHOT } from "../api.js";
 import DecisionCard, { attemptsOf, balanceChanged, clearCase, figures, matchCount, Undo } from "../components/DecisionCard.jsx";
-import { Failed, Loading } from "../components/bits.jsx";
+import { Failed, Loading, MoreButton } from "../components/bits.jsx";
 import { ageWords, clock, duration, inrR, joinAnd, plural, rs, shortName, victim } from "../format.js";
 import { useLoad } from "../hooks.js";
 
@@ -298,7 +298,7 @@ function ListGroup({ g, d, officer, onDone, reload, decidedById }) {
               </tbody>
             </table>
           </div>
-          {shown.length > 10 && !more && <button className="btn" type="button" style={{ marginTop: 10 }} onClick={() => setMore(true)}>Show {shown.length - 10} more</button>}
+          {shown.length > 10 && <MoreButton open={more} setOpen={setMore} label={`Show ${shown.length - 10} more`} style={{ marginTop: 10 }} />}
           <p className="note" style={{ marginTop: 8 }}>{g.id === "narrow" ? "Sorted by money to release, largest first, so the customers hurt most come up first. A clear case is an account older than 1 year, with no cash out in 90 days, where the victim's share is under 5% of the balance. Other rows say why they need a look."
             : g.id === "freeze" ? "Sorted by attempts to move held money, then by number of complaints, then by amount held. An account that tried to empty itself during a hold is the strongest case for a freeze, so it comes first. No checkboxes: a full freeze needs reasons for each account."
               : "Sorted by money still in the account, because that is what can still be lost. A row with ₹0 left drops to the bottom. Its only remaining job is the police report."}</p>
@@ -394,6 +394,8 @@ export function complaintText(t) {
 
 function TodayList({ d, groups }) {
   const done = d.done || [];
+  const [all, setAll] = useState(false);
+  const FIRST = 5;
   const jumpFor = (t) => groups.find((g) => g.waiting.some((p) => p.case_id === t.case_id))?.id;
   return (
     <>
@@ -403,7 +405,7 @@ function TodayList({ d, groups }) {
       </div>
       <ol className="card" style={{ listStyle: "none", padding: 0, margin: "0 0 20px" }}>
         {done.length === 0 && <li className="row-c"><span /><span className="note">No complaints yet.</span></li>}
-        {done.map((t) => {
+        {(all ? done : done.slice(0, FIRST)).map((t) => {
           const mine = d.waiting.filter((p) => p.case_id === t.case_id).length;
           const failed = ["FAILED", "CHECK_FAILED"].includes(t.run_status);
           const jump = jumpFor(t);
@@ -423,6 +425,7 @@ function TodayList({ d, groups }) {
             </li>
           );
         })}
+        {done.length > FIRST && <li className="row-more"><MoreButton open={all} setOpen={setAll} label={`Show ${done.length - FIRST} more`} scrollTo="today-h" /></li>}
       </ol>
     </>
   );
@@ -465,6 +468,8 @@ function SinceHolds({ watch }) {
 
 // KYC packets: neutral when everything is filed; blue while a run is filing (design board "KYC packets card")
 function Kyc({ d }) {
+  const [all, setAll] = useState(false);
+  const FIRST = 5;
   const done = (d.done || []).filter((t) => n(t.kyc));
   const filed = n(d.kyc_filed);
   const filing = n(d.queued) > 0;
@@ -482,9 +487,10 @@ function Kyc({ d }) {
         {done.length > 0 && (
           <table className="t" style={{ fontSize: 14 }}>
             <thead><tr><th scope="col">Complaint</th><th scope="col" style={{ textAlign: "right" }}>Packets</th><th scope="col">Filed</th></tr></thead>
-            <tbody>{done.map((t) => <tr key={t.case_id}><td><span className="mono">{clock(t.received_at)}</span> {victim(t.victim_tag)}</td><td style={{ textAlign: "right" }}>{t.kyc}</td><td className="mono">{clock(t.kyc_filed_at || t.sim_holds_at)}</td></tr>)}</tbody>
+            <tbody>{(all ? done : done.slice(0, FIRST)).map((t) => <tr key={t.case_id}><td><span className="mono">{clock(t.received_at)}</span> {victim(t.victim_tag)}</td><td style={{ textAlign: "right" }}>{t.kyc}</td><td className="mono">{clock(t.kyc_filed_at || t.sim_holds_at)}</td></tr>)}</tbody>
           </table>
         )}
+        {done.length > FIRST && <MoreButton open={all} setOpen={setAll} label={`Show ${done.length - FIRST} more`} style={{ marginTop: 10 }} />}
         {sentBack.length > 0 && <p className="note" style={{ marginTop: 8 }}>None for {joinAnd(sentBack.map((t) => `${possessive(victim(t.victim_tag))} ${clock(t.received_at)}`))} complaint{sentBack.length === 1 ? "" : "s"}: {sentBack.length === 1 ? "its notice was" : "their notices were"} sent back, so no account was named.</p>}
         <a href="#/audit" style={{ display: "inline-block", marginTop: 8, fontSize: 14 }}>Each packet in the audit log</a>
       </section>

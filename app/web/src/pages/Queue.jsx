@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, SNAPSHOT } from "../api.js";
-import { Failed, Loading } from "../components/bits.jsx";
+import { Failed, Loading, MoreButton } from "../components/bits.jsx";
 import { clock, inrR, plural, victim } from "../format.js";
 import { useLoad } from "../hooks.js";
 
@@ -86,6 +86,7 @@ export default function Queue({ onChange }) {
   const { data, error, loading, reload } = useLoad(() => api.queue(), []);
   const day = useLoad(() => api.day().catch(() => null), []);
   const [filter, setFilter] = useState("all");
+  const [showAll, setShowAll] = useState(false);
   const [note, setNote] = useState(null);
 
   async function run(t) {
@@ -122,7 +123,7 @@ export default function Queue({ onChange }) {
           <thead><tr><th scope="col">Received</th><th scope="col">Victim</th><th scope="col" className="r">Reported</th><th scope="col">Police notice</th>
             <th scope="col" className="r">Held at Bank X</th><th scope="col">First hold</th><th scope="col">Status</th><th scope="col"><span className="sr">Actions</span></th></tr></thead>
           <tbody>
-            {rows.map((t) => {
+            {(showAll ? rows : rows.slice(0, 25)).map((t) => {
               const [word, cls] = status(t);
               return (
                 <tr key={t.case_id}>
@@ -141,6 +142,7 @@ export default function Queue({ onChange }) {
           </tbody>
         </table>
       </div>
+      {rows.length > 25 && <MoreButton open={showAll} setOpen={setShowAll} label={`Show all ${rows.length} complaints`} style={{ marginTop: 10 }} />}
       <p className="note" style={{ marginTop: 10 }}>Status chips are the same here and on Review: amber means a decision is waiting, red means nothing is held yet.</p>
     </main>
   );

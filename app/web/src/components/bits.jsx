@@ -28,3 +28,17 @@ export function Logo({ size = 26 }) {
     </svg>
   );
 }
+// "Show N more" that turns into "Show fewer" once the list is open. Closing a long list brings its top back into
+// view, so the officer is not left far down an empty page.
+export function MoreButton({ open, setOpen, label, style, scrollTo }) {
+  return (
+    <button type="button" className="btn" style={style} aria-expanded={open}
+      onClick={(e) => {
+        const list = scrollTo ? document.getElementById(scrollTo) : e.currentTarget.previousElementSibling;
+        setOpen(!open);
+        if (open && list) requestAnimationFrame(() => { if (list.getBoundingClientRect().top < 0) list.scrollIntoView({ block: "start", behavior: "smooth" }); });
+      }}>
+      {open ? "Show fewer" : label}
+    </button>
+  );
+}

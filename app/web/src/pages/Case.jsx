@@ -85,7 +85,7 @@ export default function Case({ caseId, officer, onChange }) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 32, alignItems: "flex-start" }}>
         <section style={{ flex: "1 1 600px", minWidth: 0 }} aria-labelledby="trail-h">
           {trail.data ? <Where c={c} t={trail.data} acts={acts.data || []} paper={paper.data || []} events={events} v={v} /> : null}
-          {trail.data ? <Trail c={c} t={trail.data} acts={acts.data || []} events={events} watchList={watch.data?.watch_list || []} holds={holds.data || []} waiting={waiting} v={v} caseId={caseId} />
+          {trail.data ? <Trail c={c} t={trail.data} acts={acts.data || []} events={events} watchList={watch.data?.watch_list || []} holds={holds.data || []} waiting={waiting} v={v} caseId={caseId} current={cur?.proposal_id} onPick={setPos} />
             : !trail.loading && <section className="card" style={{ padding: "18px 22px" }}><h2 style={{ fontSize: 18 }}>Nothing was traced</h2>
               <p style={{ marginTop: 6 }}>{c.intake?.mismatched ? rs(c.intake.mismatched) + ". " : ""}{intake === "NEAR_MATCH" || intake === "NO_MATCH" ? "The notice does not match a payment into the account it names, so the system sent it back to the police and held nothing." : "The system has not traced this complaint yet."}</p></section>}
         </section>
@@ -170,7 +170,7 @@ function Where({ t, acts, paper, events, v }) {
 }
 
 // ---------------------------------------------------------------- the trail, account by account
-function Trail({ c, t, acts, events, watchList, holds, waiting, v, caseId }) {
+function Trail({ c, t, acts, events, watchList, holds, waiting, v, caseId, current, onPick }) {
   const byId = Object.fromEntries(t.nodes.map((x) => [x.id, x]));
   const name = (id) => shortName(byId[id]?.label || accountName(id));
   const layers = [];
@@ -218,11 +218,14 @@ function Trail({ c, t, acts, events, watchList, holds, waiting, v, caseId }) {
                   </a>);
               }
               const honest = x.evidence === "HONEST";
-              const color = dec ? "#b07a1c" : hold ? "#5b3fa0" : "#c9d1da";
+              const now = dec && dec[1].proposal_id === current;        // the decision open on the right
+              const color = now ? "#8f5400" : dec ? "#b07a1c" : hold ? "#5b3fa0" : "#c9d1da";
               const hers = n(hold?.victim_amount_inr), held = n(hold?.amount_inr);
               return (
-                <a key={x.id} className={`hop${dec?.[0] === 1 ? " on" : ""}`} href={dec ? "#decide" : `#/record/${encodeURIComponent(x.id)}`} style={{ ...style, borderLeftColor: color }}
-                  onClick={dec ? (e) => { e.preventDefault(); document.getElementById("decide")?.scrollIntoView({ behavior: "smooth" }); } : undefined}>
+                <a key={x.id} className={`hop${now ? " now" : ""}`} href={dec ? "#decide" : `#/record/${encodeURIComponent(x.id)}`} aria-current={now ? "true" : undefined}
+                  style={now ? { ...style, borderLeft: "6px solid #8f5400", borderRadius: "0 10px 10px 0", background: "#fdf3e1", boxShadow: "0 4px 14px rgba(143,84,0,0.18)", padding: "10px 12px 10px 14px" } : { ...style, borderLeftColor: color }}
+                  onClick={dec ? (e) => { e.preventDefault(); onPick?.(dec[0] - 1); document.getElementById("decide")?.scrollIntoView({ behavior: "smooth", block: "nearest" }); } : undefined}>
+                  {now && <span className="pill" style={{ background: "#8f5400", color: "#fff", marginBottom: 6, display: "inline-block" }}>Deciding now</span>}
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}><b>{shortName(x.label)}</b>
                     {honest ? <span className="pill p-honest">Likely genuine</span> : held ? <span className="pill p-held">Held</span> : <span className="pill p-plain">Nothing left</span>}</div>
                   <p style={{ fontSize: 13, color: "#44505e", margin: "4px 0 8px" }}>
@@ -232,7 +235,7 @@ function Trail({ c, t, acts, events, watchList, holds, waiting, v, caseId }) {
                   {held > 0 && <p><b>{inrR(held)} held</b>, {hers >= held ? "all hers" : `${inrR(hers)} of it hers`}.</p>}
                   {!held && <p className="note">Nothing left to hold here.</p>}
                   {after.length > 0 && <div className="after">{after.map((e) => <span key={e.event_id}><b>{clock(e.event_at)}</b>{sinceLine(e)}</span>)}</div>}
-                  {dec && <p style={{ fontSize: 13, color: "#8f5400", fontWeight: 600, marginTop: 8 }}>Decision {dec[0]}: {dec[1].action_code === "PROPOSE_NARROW" ? "smaller hold" : dec[1].action_code === "PROPOSE_FULL_FREEZE" ? "freeze the account?" : "near match"}{dec[0] === 1 ? " · open on the right" : ""}</p>}
+                  {dec && <p style={{ fontSize: 13, color: "#8f5400", fontWeight: 600, marginTop: 8 }}>Decision {dec[0]}: {dec[1].action_code === "PROPOSE_NARROW" ? "smaller hold" : dec[1].action_code === "PROPOSE_FULL_FREEZE" ? "freeze the account?" : "near match"}{now ? " · open on the right" : " · click to open"}</p>}
                 </a>);
             })}
           </div>

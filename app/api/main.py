@@ -11,6 +11,7 @@ Start it:   python -m app.api            (http://127.0.0.1:8000, interactive doc
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Iterator
 from decimal import Decimal
@@ -406,7 +407,7 @@ def plain_error(text: str | None) -> str:
 
 @app.get("/api/inbox")
 def inbox(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
-    """The officer's morning: what was done automatically (read only), and the decisions waiting (the four only)."""
+    """The officer's morning: what was done automatically (read only), and the decisions waiting (the five only)."""
     from pipeline.morning import latest
 
     waiting = proposal_rows(conn, "p.proposal_status = 'WAITING'", {})
@@ -494,7 +495,7 @@ class Decide(BaseModel):
 
 @app.post("/api/proposals/{proposal_id}/approve")
 def approve(proposal_id: int, body: Decide, bank: str = Query("BANK_X"), checker=Depends(get_checker)):
-    """The officer approves one of the four decisions; the checker carries it out."""
+    """The officer approves one of the five decisions; the checker carries it out."""
     from pipeline import officer
 
     try:
@@ -597,6 +598,11 @@ def case_detail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn
         c["problem"] = plain_error(err)
     c["filed"] = dict(conn.execute("SELECT entry_kind, COUNT(*) FROM PORTAL_ENTRY WHERE case_id = {c} "
                                    "GROUP BY entry_kind", {"c": case_id}).fetchall())
+    c["notice"] = one(conn, "SELECT notice_id, received_at, channel, sender, source_file, raw_text, read_by, "
+                            "fields_json, read_note, stmt_id FROM NOTICE_INBOX WHERE case_id = {c}", {"c": case_id})
+    if c["notice"]:                        # a police notice read by the agent (DECISIONS D-52)
+        read = json.loads(c["notice"].pop("fields_json") or "{}")
+        c["notice"]["fields"], c["notice"]["source"] = read.get("fields", {}), read.get("source", {})
     return c
 
 
@@ -773,6 +779,287 @@ def day(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
         raise HTTPException(409, str(exc)) from exc
 
 
+# ---------------------------------------------------------------- police notices and pre-alerts (D-52, D-53)
+
+class NoticeIn(BaseModel):
+    text: str | None = Field(None, description="The notice as pasted (an e-mail)")
+    pdf_base64: str | None = Field(None, description="A PDF as a data URL or base64 (typed, or a scan read by OCR)")
+    file_name: str | None = None
+    sent_from: str | None = Field(None, description="Who sent it (optional)")
+    sample: str | None = Field(None, description="One of the demo notices in data/notices.yaml, by notice_id")
+
+
+def notice_samples() -> list[dict]:
+    """The demo notices (data/notices.yaml), offered as samples to read; the file's header says what each is."""
+
+    from pipeline.notices import NOTICES
+
+    if not NOTICES.exists():
+        return []
+    raw = NOTICES.read_text(encoding="utf-8")
+    about = {m[1]: m[2].split("->")[0].strip() for m in re.finditer(r"^#\s+(NTC_\d+)\s+(.+)$", raw, re.M)}
+    return [{"name": n["notice_id"], "about": about.get(n["notice_id"], n["channel"]), "channel": n["channel"],
+             "sender": n.get("sender"), "file": n.get("file"), "text": n.get("text")}
+            for n in yaml.safe_load(raw).get("notices") or []]
+
+
+def _money(v) -> str | None:
+    return None if v is None or v == "" else f"Rs {Decimal(str(v)):,.0f}".replace("Rs ", "₹")
+
+
+def _ts16(v) -> str:
+    return str(v or "")[:16]
+
+
+def _when(v: str | None) -> str | None:
+    """'2026-10-18 16:31' -> '18 Oct 2026, 16:31'; a date alone -> '18 Oct 2026'."""
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}:\d{2}))?", str(v or ""))
+    if not m:
+        return v
+    mon = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()[int(m[2]) - 1]
+    return f"{int(m[3])} {mon} {m[1]}" + (f", {m[4]}" if m[4] else "")
+
+
+def notice_checks(conn, f: dict, case_id: str | None) -> tuple[list[dict], dict | None]:
+    """Each field of the notice against the bank's records, the same rules as ticket intake (sql/steps/030_intake.sql):
+    the UTR must be a payment here, into the account named, for the amount named, within 15 minutes of the time
+    named (or on the day named, when the notice gives no time)."""
+    utr, amt, acc = f.get("utr"), f.get("amount_inr"), f.get("beneficiary_account")
+    day, hm = f.get("txn_date"), f.get("txn_time")
+    txn = one(conn, "SELECT txn_id, utr, amount_inr, ts, to_account FROM TXN WHERE utr = {u}", {"u": utr}) \
+        if utr else None
+    near = one(conn, "SELECT near_utr, near_at, near_amount_inr FROM INTAKE_CHECK WHERE case_id = {c}",
+               {"c": case_id}) if case_id else None
+    out = []
+
+    def add(field, label, notice, records, result, note=None):
+        out.append({"field": field, "label": label, "notice": notice, "records": records, "result": result,
+                    "note": note})
+
+    if not utr:
+        add("utr", "UTR", None, None, "missing", None)
+    elif txn:
+        add("utr", "UTR", utr, txn["utr"], "match")
+    else:
+        hint = (f"A payment that fits the rest of the notice has UTR {near['near_utr']}: "
+                f"{_money(near['near_amount_inr'])} at {clock_of(near['near_at'])}. Nothing is held on it until the "
+                "police confirm it.") if near and near.get("near_utr") else "No payment here has this UTR."
+        add("utr", "UTR", utr, None, "not_found", hint)
+    if amt is None:
+        add("amount", "Amount", None, None, "missing")
+    elif not txn:
+        add("amount", "Amount", _money(amt), None, "no_record")
+    else:
+        same = Decimal(str(amt)) == Decimal(str(txn["amount_inr"]))
+        add("amount", "Amount", _money(amt), _money(txn["amount_inr"]), "match" if same else "differs",
+            None if same else f"The notice says {_money(amt)}; the payment with this UTR is "
+                              f"{_money(txn['amount_inr'])}.")
+    when_notice = None if not day else f"{day} {hm}" if hm else day
+    if not day:
+        add("when", "Date and time", None, None, "missing")
+    elif not txn:
+        add("when", "Date and time", _when(when_notice), None, "no_record")
+    else:
+        t = _ts16(txn["ts"])
+        if hm:
+            from datetime import datetime as _dt
+
+            gap = abs((_dt.fromisoformat(t) - _dt.fromisoformat(f"{day} {hm}")).total_seconds()) / 60
+            ok = gap <= 15
+        else:
+            ok = t[:10] == day
+        add("when", "Date and time", _when(when_notice), _when(t), "match" if ok else "differs",
+            None if hm or not ok else "No time on the notice, so the day is compared.")
+    if not acc:
+        add("account", "Receiving account", None, None, "missing")
+    elif not txn:
+        add("account", "Receiving account", acc, None, "no_record")
+    else:
+        same = acc == txn["to_account"]
+        add("account", "Receiving account", acc, txn["to_account"], "match" if same else "differs",
+            None if same else "The payment with this UTR went to another account.")
+    add("legal", "Legal provision", f.get("legal_basis"), None, "given" if f.get("legal_basis") else "missing",
+        None if f.get("legal_basis") else "A hold needs the provision the notice is issued under (S.94 or "
+                                          "S.106 BNSS, or S.168 BNSS).")
+    ack = f.get("ack_no")
+    if not ack:
+        add("ack", "Acknowledgement number", None, None, "missing",
+            "The 14-digit number of the victim's complaint on 1930 or the NCRP.")
+    else:
+        other = one(conn, "SELECT case_id FROM COMPLAINT WHERE ack_no = {a} AND case_id <> {c} "
+                          "AND ticket_kind <> 'IO_NOTICE' ORDER BY case_id", {"a": ack, "c": case_id or "-"})
+        label = ticket_labels(conn).get(other["case_id"]) if other else None
+        add("ack", "Acknowledgement number", ack, label, "match" if other else "no_record",
+            None if other else "No complaint with this number has reached the bank yet.")
+    who = ", ".join(x for x in (f.get("authority"), f.get("notice_ref")) if x)
+    add("authority", "Authority and reference", who or None, None, "given" if who else "missing",
+        None if who else "Not given.")
+    if f.get("fir_reference"):
+        add("fir", "FIR", f["fir_reference"], None, "given")
+    return out, txn
+
+
+def clock_of(ts) -> str:
+    m = re.search(r"[ T](\d{2}):(\d{2})", str(ts or ""))
+    return f"{m[1]}:{m[2]}" if m else "–"
+
+
+def notice_view(conn, n: dict, letter: dict | None, labels: dict) -> dict:
+    read = json.loads(n.get("fields_json") or "{}")
+    f = read.get("fields", {})
+    checks, _ = notice_checks(conn, f, n.get("case_id")) if n["notice_status"] == "READ" else ([], None)
+    problems = [x for x in f"{n.get('mismatched') or ''}\n{n.get('problems') or ''}".split("\n") if x.strip()]
+    match = n.get("match_status")
+    if n["notice_status"] == "UNREADABLE":
+        status = "UNREADABLE"
+    elif letter or match in ("NEAR_MATCH", "NO_MATCH", "INCOMPLETE"):
+        status = "SENT_BACK"
+    elif match in ("EXACT", "ACCEPTED"):
+        status = "MATCHED"
+    else:
+        status = "READ"
+    label = labels.get(n["related_case_id"] if n.get("related") == "DUPLICATE" and n.get("related_case_id")
+                       else n.get("case_id"))
+    notes = [n["read_note"]] if n.get("read_note") else []
+    if n.get("related") == "DUPLICATE" and status == "MATCHED":
+        notes.append(f"It names the same payment as the {label}, so it is linked to it and nothing is held twice.")
+    near = one(conn, "SELECT proposal_id FROM PROPOSAL WHERE case_id = {c} AND action_code = 'UNMATCHED_NOTICE' "
+                     "AND proposal_status = 'WAITING'", {"c": n.get("case_id")}) if n.get("case_id") else None
+    if near:
+        notes.append("A payment that fits the rest of the notice waits for your decision on the Review page.")
+    src = n.get("source_file") or ""
+    read_from = ("the PDF's text" if src.lower().endswith(".pdf") or "pdf" in (n.get("channel") or "").lower()
+                 else "the e-mail" if src.lower().endswith(".eml") else "the text as received")
+    return {"notice_id": n["notice_id"], "received_at": n["received_at"], "channel": n["channel"],
+            "sent_from": n.get("sender"), "authority": f.get("authority"), "utr": f.get("utr"),
+            "amount_inr": f.get("amount_inr"), "raw_text": n.get("raw_text"), "notice_status": status,
+            "case_id": n.get("case_id"), "label": label if status == "MATCHED" else None, "problems": problems,
+            "checks": checks, "agent_notes": notes, "read_by": n.get("read_by"), "read_from": read_from,
+            "file_name": src.rsplit("/", 1)[-1] or None,
+            "reply_text": (letter or {}).get("detail"), "reply_by": "template",
+            "sent_at": (letter or {}).get("filed_at"), "sent_by": "the agent, through the portal" if letter else None}
+
+
+@app.get("/api/notices")
+def notices(conn=Depends(get_conn)):
+    """Police notices that came by e-mail or letter (DECISIONS D-52): as received, every field checked against the
+    bank's records, the ticket they became and the letter sent back; and the demo notices to try."""
+    labels = ticket_labels(conn)
+    found = rows(conn, """
+        SELECT n.notice_id, n.received_at, n.channel, n.sender, n.source_file, n.raw_text, n.notice_status,
+               n.read_by, n.fields_json, n.read_note, n.case_id, k.match_status, k.mismatched, k.problems,
+               k.related, k.related_case_id
+        FROM NOTICE_INBOX n LEFT JOIN INTAKE_CHECK k ON k.case_id = n.case_id
+        WHERE n.notice_status <> 'NEW'
+        ORDER BY n.received_at DESC, n.notice_id DESC""")
+    letters = {r["case_id"]: r for r in rows(conn, "SELECT case_id, detail, filed_at FROM PORTAL_ENTRY "
+                                                   "WHERE entry_kind = 'SEND_BACK'")}
+    return {"notices": [notice_view(conn, n, letters.get(n["case_id"]), labels) for n in found],
+            "samples": [{"name": x["name"], "about": x["about"]} for x in notice_samples()]}
+
+
+@app.post("/api/notices")
+def read_notice(body: NoticeIn, bank: str = Query("BANK_X")):
+    """The officer gives the desk a notice (pasted, a PDF, or a demo sample): it goes into the bank's inbox, the agent
+    reads it into a ticket and works it now, like any other. Nothing is held on the notice alone."""
+    import base64
+    import tempfile
+
+    from pipeline import portal
+    from pipeline.agent import work_ticket
+    from pipeline.db import ROOT
+    from pipeline.notices import Unreadable, read_file, register
+
+    check_bank(bank)
+    sender, channel, source = (body.sent_from or "").strip() or None, "e-mail (pasted)", None
+    if body.sample:
+        x = next((s for s in notice_samples() if s["name"] == body.sample), None)
+        if x is None:
+            raise HTTPException(404, f"No sample notice {body.sample!r}")
+        text = (x["text"] or "").strip() or read_file(ROOT / x["file"])
+        channel, sender, source = x["channel"], sender or x["sender"], x["file"]
+    elif body.pdf_base64:
+        data = body.pdf_base64.split(",", 1)[-1]
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "notice.pdf"
+            path.write_bytes(base64.b64decode(data))
+            try:
+                text = read_file(path)
+            except Unreadable as exc:
+                raise HTTPException(422, str(exc)) from exc
+        channel, source = "letter (PDF)", None
+    else:
+        text = (body.text or "").strip()
+    if len(text) < 20:
+        raise HTTPException(400, "Paste the notice, upload a PDF, or pick a sample.")
+    now = clock_now() or "2026-10-18 09:00:00"
+    pconn, maker, checker = _open("portal"), _open("maker", bank), _open("checker", bank)
+    try:
+        n = int(maker.execute("SELECT COUNT(*) FROM NOTICE_INBOX WHERE LEFT(notice_id, 3) = 'IN_'").fetchval()) + 1
+        nid = f"IN_{n:03d}"
+        maker.execute("INSERT INTO NOTICE_INBOX (notice_id, received_at, channel, sender, source_file, raw_text, "
+                      "notice_status, stmt_id) VALUES ({n}, TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS'), {ch}, {s}, "
+                      "{f}, {x}, 'NEW', CURRENT_STATEMENT)",
+                      {"n": nid, "t": now, "ch": channel, "s": sender, "f": body.file_name if body.pdf_base64
+                       else source, "x": text[:4000]})
+        r = register(maker, bank, nid, now)
+        if r["status"] == "READ":
+            work_ticket(maker, checker, r["case_id"], bank, "pipeline", now=now)
+            portal.collect(pconn, bank)
+        return {"notice_id": nid, "case_id": r["case_id"], "status": r["status"]}
+    except steps.StepFailed as exc:
+        raise HTTPException(500, str(exc)) from exc
+    finally:
+        for c in (pconn, maker, checker):
+            c.close()
+
+
+@app.get("/api/prealerts")
+def prealerts(conn=Depends(get_conn)):
+    """Pre-alerts (DECISIONS D-53): new money from a sender that never paid an account already on hold, with no
+    complaint behind it; where that account is on hold now; and the alert for the police. Sending it is the officer's
+    decision (approve, with the text as sent)."""
+    labels = ticket_labels(conn)
+    out = []
+    for p in proposal_rows(conn, "p.action_code = 'PROPOSE_PRE_ALERT'", {}):
+        r = p["reasons"]
+        holds = rows(conn, """
+            SELECT h.hold_id, h.case_id, h.hold_kind, h.amount_inr, h.hold_tag, h.source_txn_id, h.placed_at,
+                   c.ordering_authority
+            FROM HOLD_LEDGER h LEFT JOIN COMPLAINT c ON c.case_id = h.case_id
+            WHERE h.account_id = {a} AND h.hold_status = 'ACTIVE' AND h.hold_kind IN ('LIEN', 'ACCOUNT_FREEZE')
+            ORDER BY h.placed_at, h.hold_id""", {"a": p["account_id"]})
+        view = []
+        for h in holds:
+            mine = h["hold_tag"] == "NOT_LINKED" and h["source_txn_id"] == r.get("source_txn_id")
+            what = ("this payment, held under the existing notice, not linked to a reported victim yet" if mine
+                    else "the whole account, frozen" if h["hold_kind"] == "ACCOUNT_FREEZE"
+                    else f"new money not linked to a reported victim yet ({labels.get(h['case_id'], h['case_id'])})"
+                    if h["hold_tag"] == "NOT_LINKED" else labels.get(h["case_id"], h["case_id"]))
+            view.append({"hold_id": h["hold_id"], "what": what, "since": h["placed_at"],
+                         "authority": h["ordering_authority"], "amount_inr": h["amount_inr"], "this_payment": mine})
+        reported = None
+        if p["proposal_status"] == "CANCELLED":
+            m = re.search(r"complaint (\S+) names the payment", p.get("checker_note") or "")
+            reported = m[1] if m else None          # else closed because the payment is on a complaint's trail
+        sent = p["proposal_status"] in ("DONE", "APPROVED", "EDITED") and p.get("decision_outcome") in (
+            "APPROVED", "EDITED")
+        out.append({"alert_id": p["proposal_id"], "received_at": r.get("paid_at"), "account_id": p["account_id"],
+                    "account_name": p["name"], "sender_text": r.get("payer_where") or "a new sender",
+                    "amount_inr": r.get("amount") or p["amount_inr"], "utr": r.get("utr"),
+                    "held_inr": sum(float(h["amount_inr"] or 0) for h in view if h["this_payment"]),
+                    "held_total_inr": sum(float(h["amount_inr"] or 0) for h in view), "holds": view,
+                    "alert_text": p.get("signed_text") or p.get("draft_text"),
+                    "alert_status": "SENT" if sent else "NOT_SENT" if p["proposal_status"] == "REJECTED"
+                    else p["proposal_status"], "sent_by": p.get("decided_by"), "sent_at": p.get("decided_at"),
+                    "reported_case_id": reported, "reported_label": labels.get(reported) if reported else None,
+                    "reported_at": p.get("checked_at") if reported else None,
+                    "closed_note": p.get("checker_note") if p["proposal_status"] in ("CANCELLED", "REJECTED")
+                    else None, "waiting": p["proposal_status"] == "WAITING"})
+    out.sort(key=lambda a: str(a["received_at"] or ""), reverse=True)
+    return out
+
+
 @app.get("/api/holds")
 def holds(conn=Depends(get_conn)):
     labels = ticket_labels(conn)
@@ -860,6 +1147,7 @@ def plain_step(tool: str, text: str | None, case: str, paid: dict, checks: dict,
 DECIDED_WORDS = {"PROPOSE_NARROW": "Reduced the hold on {name} to {amt}", "PROPOSE_FULL_FREEZE": "Froze {name}, {amt}",
                  "UNMATCHED_NOTICE": "Accepted the near match on {name}",
                  "PROPOSE_RELEASE": "Released the hold on {name}",
+                 "PROPOSE_PRE_ALERT": "Sent the pre-alert about the {amt} into {name}",
                  "HOLD_AGAIN": "Held {name} again, {amt}", "UNFREEZE": "Unfroze {name}",
                  "RELEASE": "Released the near-match hold on {name}"}
 

@@ -1,10 +1,11 @@
-"""The officer's four decisions, from a terminal (the console uses the same code through the API).
+"""The officer's five decisions, from a terminal (the console uses the same code through the API).
 
-Only four things ever wait for the officer: narrow (hold less than the notice asks, sized to the victims' money),
-widen (a full freeze), an unmatched notice (a near match: what to do with it) and a release (a hold with no police
-direction in 75 days). Each waits as a proposal the checker already validated; approving or rejecting is recorded
-with the officer's name and time, and the checker carries it out (pipeline/checker.py: apply_decision). Editing the
-reasons is optional; when the officer does, the draft and the signed version are both kept.
+Only five things ever wait for the officer: narrow (hold less than the notice asks, sized to the victims' money),
+widen (a full freeze), an unmatched notice (a near match: what to do with it), a release (a hold with no police
+direction in 75 days) and a pre-alert (a new payer into a held account may be a victim who has not reported yet).
+Each waits as a proposal the checker already validated; approving or rejecting is recorded with the officer's name
+and time, and the checker carries it out (pipeline/checker.py: apply_decision). Editing the reasons is optional;
+when the officer does, the draft and the signed version are both kept.
 
     python -m pipeline.officer waiting
     python -m pipeline.officer approve 7 --officer priya
@@ -18,7 +19,7 @@ import sys
 
 from pipeline.checker import Checker, DecisionError
 
-DECISIONS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE")
+DECISIONS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE", "PROPOSE_PRE_ALERT")
 
 __all__ = ["DECISIONS", "DecisionError", "approve", "reject", "undo", "waiting"]
 

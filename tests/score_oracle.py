@@ -24,6 +24,36 @@ def _txns(rows: dict) -> list[dict]:
                  ch=r[6], exit=r[7] == "TRUE") for r in rows["TXN"]]
 
 
+# Automatic payments to registered companies (loan EMIs, SIPs, insurance, bills): set up in advance and recorded
+# by the bank, so they are not money being moved on (DECISIONS D-54). Same list as sql/steps/060_score.sql.
+AUTOMATIC_CHANNELS = ("NACH", "AUTOPAY")
+
+
+def speed(credits: list[dict], debits: list[dict], now: datetime) -> tuple[float | None, float | None]:
+    """Median dwell (minutes from each credit to the next debit) and pass-through (share of each credit matched by
+    debits within an hour, over all credits). Automatic payments are left out of both."""
+    moved = [d for d in debits if d["ch"] not in AUTOMATIC_CHANNELS]
+    dwell, passed = [], 0.0
+    for c in credits:
+        later = [d["ts"] for d in moved if d["ts"] >= c["ts"]]
+        dwell.append(((min(later) if later else now) - c["ts"]).total_seconds() / 60)
+        passed += min(c["amt"], sum(d["amt"] for d in moved if c["ts"] <= d["ts"] <= c["ts"] + timedelta(hours=1)))
+    total_in = sum(c["amt"] for c in credits)
+    return (statistics.median(dwell) if dwell else None), (passed / total_in if total_in else None)
+
+
+# Money paid in through NACH comes from registered companies (salary, pension, dividends, refunds), so it is not the
+# sudden jump in money received that rented accounts show (DECISIONS D-55). UPI AutoPay coming in is a merchant's
+# customers paying it, so that still counts.
+COMPANY_CREDIT_CHANNELS = ("NACH",)
+
+
+def declared_ratio(credits: list[dict], now: datetime, expected: float) -> float:
+    """Money received in the last 30 days, leaving out NACH credits, against the declared band's monthly amount."""
+    return sum(c["amt"] for c in credits if c["ts"] > now - timedelta(days=30)
+               and c["ch"] not in COMPANY_CREDIT_CHANNELS) / expected
+
+
 def signals(rows: dict, case: Case, account: str, as_of: str) -> dict[str, float | None]:
     """Signal values for one account. rows: pipeline.load_cases.rows_for(...); case: the account's case."""
     now = datetime.strptime(as_of, FMT)
@@ -36,14 +66,8 @@ def signals(rows: dict, case: Case, account: str, as_of: str) -> dict[str, float
     debits = [x for x in txns if x["f"] == account and x["ts"] <= now]
     v: dict[str, float | None] = {}
     v["account_age_days"] = (now.date() - datetime.strptime(acct[3], "%Y-%m-%d").date()).days
-    dwell, passed = [], 0.0
-    for c in credits:
-        later = [d["ts"] for d in debits if d["ts"] >= c["ts"]]
-        dwell.append(((min(later) if later else now) - c["ts"]).total_seconds() / 60)
-        passed += min(c["amt"], sum(d["amt"] for d in debits if c["ts"] <= d["ts"] <= c["ts"] + timedelta(hours=1)))
+    v["median_dwell_minutes"], v["pass_through_ratio"] = speed(credits, debits, now)
     total_in = sum(c["amt"] for c in credits)
-    v["median_dwell_minutes"] = statistics.median(dwell) if dwell else None
-    v["pass_through_ratio"] = passed / total_in if total_in else None
     v["complaint_linked_credits_7d"] = len({c["utr"] for c in credits
                                             if c["utr"] in roots and c["ts"] > now - timedelta(days=7)})
     by_payer: dict[str, float] = {}
@@ -61,7 +85,7 @@ def signals(rows: dict, case: Case, account: str, as_of: str) -> dict[str, float
     v["cash_or_crypto_exits"] = len([d for d in debits if d["exit"] and d["ch"] in ("ATM", "CASH", "CRYPTO")
                                      and d["ts"] > now - timedelta(days=90)])
     expected = CONFIG["profile_band_expected_monthly_credit_inr"][acct[6]]
-    v["credit_vs_profile"] = sum(c["amt"] for c in credits if c["ts"] > now - timedelta(days=30)) / expected
+    v["credit_vs_profile"] = declared_ratio(credits, now, expected)
     # the learned model's connection inputs (D-51): never signals of their own
     out = [d for d in debits if d["ts"] > now - timedelta(days=90)]
     payers, payees = {c["f"] for c in credits}, {d["t"] for d in out}

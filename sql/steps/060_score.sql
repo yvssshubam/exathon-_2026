@@ -49,7 +49,8 @@ FROM (
         WHERE a.account_id IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
 
         UNION ALL
-        -- 2. median minutes from a credit to the next debit (or to as_of if nothing has left yet)
+        -- 2. median minutes from a credit to the next debit (or to as_of if nothing has left yet),
+        --    automatic payments (NACH, UPI AutoPay) are not counted as money moving on (D-54)
         SELECT x.account_id, 'median_dwell_minutes', CAST(MEDIAN(x.dwell) AS DOUBLE)
         FROM (
             SELECT c.to_account AS account_id, c.txn_id,
@@ -59,6 +60,7 @@ FROM (
                    ON d.from_account = c.to_account
                   AND d.ts >= c.ts
                   AND d.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+                  AND d.channel NOT IN ('NACH', 'AUTOPAY')  -- automatic payments to registered companies (D-54)
             WHERE c.to_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
               AND c.ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
               AND c.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
@@ -67,7 +69,7 @@ FROM (
         GROUP BY x.account_id
 
         UNION ALL
-        -- 3. share of each credit sent on within 60 minutes, over all credits
+        -- 3. share of each credit sent on within 60 minutes, over all credits (automatic payments left out, D-54)
         SELECT y.account_id, 'pass_through_ratio', CAST(SUM(y.passed) / NULLIF(SUM(y.amount), 0) AS DOUBLE)
         FROM (
             SELECT c.to_account AS account_id, c.txn_id, c.amount_inr AS amount,
@@ -77,6 +79,7 @@ FROM (
                    ON d.from_account = c.to_account
                   AND d.ts >= c.ts
                   AND d.ts <= ADD_MINUTES(c.ts, 60)
+                  AND d.channel NOT IN ('NACH', 'AUTOPAY')  -- automatic payments to registered companies (D-54)
                   AND d.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
             WHERE c.to_account IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
               AND c.ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
@@ -142,7 +145,8 @@ FROM (
         GROUP BY a.account_id
 
         UNION ALL
-        -- 8. credits in the last 30 days / what the declared profile band expects in a month
+        -- 8. credits in the last 30 days / what the declared profile band expects in a month, leaving out money paid
+        --    in through NACH (salary, pension, dividends, refunds from registered companies, D-55)
         SELECT a.account_id, 'credit_vs_profile',
                CAST(COALESCE(SUM(t.amount_inr), 0) / NULLIF(MAX(pb.expected_monthly_inr), 0) AS DOUBLE)
         FROM ACCOUNT a
@@ -151,6 +155,7 @@ FROM (
                ON t.to_account = a.account_id
               AND t.ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -30)
               AND t.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+              AND t.channel <> 'NACH'  -- money paid in by registered companies through NACH (D-55)
         WHERE a.account_id IN (SELECT account_id FROM SCORE_TARGET WHERE case_id = {case_id})
         GROUP BY a.account_id
     ) v

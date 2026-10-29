@@ -20,6 +20,7 @@ legal_basis:
   trail: "Trail update to CFCFRMS: onward transfers, exits and KYC (SOP 6.1(k), 9.1(i))"
   release: "Lifting a hold needs approval (Department Head); a hold with no police direction is reviewed, not kept by default"
   send_back: "Notice that does not match a transaction: returned for correction, nothing held (Rajasthan HC: clarify unclear notices)"
+  pre_alert: "Information to CFCFRMS for the police and the payer's bank (SOP 6.1(k)): the payment is already held under the existing notice; nothing more is held on the alert"
 
 # Automatic: the bank cannot refuse these, or they move no money, so the agent does them the moment the ticket lands.
 # Filings are filed, never left as drafts: a draft onward entry sitting until 9 a.m. stalls the next bank's ticket.
@@ -35,13 +36,14 @@ automatic:
   WATCH_HOLD: "New money on a mule-like watched account: hold it up to the reported amount, tagged not linked to a reported victim yet"
   WATCH_ADD: "Add an account to the watch (a failed transfer named it), with no hold"
 
-# The officer's four decisions. The agent prepares the proposal, the reasons and the case against; nothing changes
+# The officer's five decisions. The agent prepares the proposal, the reasons and the case against; nothing changes
 # until the officer approves. Nothing else ever waits for the officer.
 officer:
   PROPOSE_NARROW: "Likely honest receiver, or a nodal/pool/escrow account, holding less victim money than the mandatory hold: narrow the lien to the victims' money"
   PROPOSE_FULL_FREEZE: "Mule-like account whose own behaviour shows the pattern courts accept: propose a whole-account freeze (widen), with the reasons written down"
   UNMATCHED_NOTICE: "The ticket matches no transaction exactly but a near match exists on the named account: decide what to do with it"
   PROPOSE_RELEASE: "A hold with no police direction for 75 days: decide whether to release it"
+  PROPOSE_PRE_ALERT: "A new sender paid an account already held as mule-like: send a pre-alert that the payer may be a victim who has not reported yet (D-53)"
 
 # When a full freeze may be proposed (Rajasthan HC: a deliberately operated account, or repeated credits followed by
 # onward transfers). Never on a nodal, pool or escrow account; never placed without the officer.
@@ -55,6 +57,8 @@ full_freeze_evidence:
 watch:
   release_review_days: 75                # no police direction by then: one release flag to the officer
   business_holder_types: [merchant, business]   # a refused transfer to these is noted, never labelled a next mule
+  pre_alert_min_inr: 1000                # a new sender's payment this size or more is flagged (the RBI draft's Rs 1,000)
+  pre_alert_new_sender_days: 90          # "new": the payer has not paid the account in this many days before the hold
 
 # Never, whoever asks: the checker refuses these.
 forbidden:

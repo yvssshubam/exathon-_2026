@@ -29,7 +29,7 @@ export default function Record({ accountId, officer, onChange }) {
   const balance = r.balance_now_inr ?? r.cases[0]?.libr_steps?.at(-1)?.balance_inr;
   const tagOf = (caseId) => r.holds.find((h) => h.case_id === caseId && h.hold_tag !== "NOT_LINKED")?.hold_tag;
   const reloadAll = () => { reload(); watch.reload(); onChange?.(); };
-  const kindWord = { PROPOSE_NARROW: "Smaller hold", PROPOSE_FULL_FREEZE: "Freeze", UNMATCHED_NOTICE: "Near match", PROPOSE_RELEASE: "Release" };
+  const kindWord = { PROPOSE_NARROW: "Smaller hold", PROPOSE_FULL_FREEZE: "Freeze", UNMATCHED_NOTICE: "Near match", PROPOSE_RELEASE: "Release", PROPOSE_PRE_ALERT: "Pre-alert" };
   return (
     <main id="main" className="wrap" style={{ paddingTop: 18, paddingBottom: 40 }}>
       <nav className="note" aria-label="Breadcrumb" style={{ marginBottom: 8 }}><a href="#/holds">Holds</a> / {who}</nav>
@@ -157,8 +157,8 @@ function History({ r, who }) {
   for (const e of r.watch_events) items.push([e.event_at, "#2f7a5a", <b>{rs(e.sentence || "").replace(/^\d\d:\d\d: /, "")}</b>, `watch ${e.stmt_id ?? ""}`]);
   for (const c of r.cases) {
     for (const p of c.proposals.filter((p) => !["MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY", "KYC_PACKET", "LINK_DUPLICATE", "LINKED_HOLD", "WATCH_ADD", "RECORD_SPLIT", "SEND_BACK", "WATCH_HOLD"].includes(p.action_code)))
-      items.push([p.proposed_at, "#b07a1c", <><b>{{ PROPOSE_NARROW: "Smaller hold suggested", PROPOSE_FULL_FREEZE: "Freeze suggested", UNMATCHED_NOTICE: "Near match suggested", PROPOSE_RELEASE: "Release suggested" }[p.action_code] || "Suggested"} by the system</b>{p.proposed_by === "watch" ? ", after an attempt to move held money" : ""}. {p.proposal_status === "WAITING" ? "Waiting for a nodal officer." : ""}</>, `proposal ${p.proposal_id}`]);
-    for (const d of c.decisions) items.push([d.decided_at, "#17212b", <><b>{d.decision_outcome === "REJECTED" ? `Kept as it was by ${d.decided_by}` : { HOLD_AGAIN: "Held again", UNFREEZE: "Unfrozen", RELEASE: "Released" }[d.action_code] ? `${{ HOLD_AGAIN: "Held again", UNFREEZE: "Unfrozen", RELEASE: "Released" }[d.action_code]} by ${d.decided_by}` : `Approved by ${d.decided_by}`}</b>{d.reason_text ? `: "${rs(d.reason_text)}"` : "."}</>, `decision D-${String(d.decision_id).padStart(2, "0")}`]);
+      items.push([p.proposed_at, "#b07a1c", <><b>{{ PROPOSE_NARROW: "Smaller hold suggested", PROPOSE_FULL_FREEZE: "Freeze suggested", UNMATCHED_NOTICE: "Near match suggested", PROPOSE_RELEASE: "Release suggested", PROPOSE_PRE_ALERT: "Pre-alert prepared" }[p.action_code] || "Suggested"} by the system</b>{p.proposed_by === "watch" ? (p.action_code === "PROPOSE_PRE_ALERT" ? ", after a payment from a new payer" : ", after an attempt to move held money") : ""}. {p.proposal_status === "WAITING" ? "Waiting for a nodal officer." : ""}</>, `proposal ${p.proposal_id}`]);
+    for (const d of c.decisions) items.push([d.decided_at, "#17212b", <><b>{d.decision_outcome === "REJECTED" ? (d.action_code === "PROPOSE_PRE_ALERT" ? `Pre-alert not sent, by ${d.decided_by}` : `Kept as it was by ${d.decided_by}`) : d.action_code === "PROPOSE_PRE_ALERT" ? `Pre-alert sent by ${d.decided_by}` : { HOLD_AGAIN: "Held again", UNFREEZE: "Unfrozen", RELEASE: "Released" }[d.action_code] ? `${{ HOLD_AGAIN: "Held again", UNFREEZE: "Unfrozen", RELEASE: "Released" }[d.action_code]} by ${d.decided_by}` : `Approved by ${d.decided_by}`}</b>{d.reason_text ? `: "${rs(d.reason_text)}"` : "."}</>, `decision D-${String(d.decision_id).padStart(2, "0")}`]);
   }
   items.sort((x, y) => String(x[0]).localeCompare(String(y[0])));
   return (

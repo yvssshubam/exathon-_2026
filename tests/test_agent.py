@@ -84,6 +84,13 @@ def test_a_duplicate_is_linked_not_traced():
     assert "trace_money" not in b.calls
 
 
+@pytest.mark.parametrize("match", ["NO_MATCH", "INCOMPLETE"])
+def test_a_wrong_notice_about_an_already_ticketed_payment_is_sent_back_not_linked(match):
+    b = FakeBackend(match=match, related="DUPLICATE", candidates=[("ACC_M01", "SEND_BACK")])
+    assert Agent(b).run() == "SENT_BACK"
+    assert "trace_money" not in b.calls
+
+
 def test_proposals_wait_for_the_worded_reasons():
     s = State(match="EXACT", related="NEW", done=["read_ticket", "check_notice", "find_related_cases",
                                                   "trace_money", "attribute_victim_share", "get_account_evidence",

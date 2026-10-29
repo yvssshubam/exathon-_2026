@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { api, SNAPSHOT } from "../api.js";
 import DecisionCard, { attemptsOf, balanceChanged, clearCase, figures, matchCount, Undo } from "../components/DecisionCard.jsx";
 import { Failed, Loading, MoreButton } from "../components/bits.jsx";
-import { ageWords, clock, duration, inrR, joinAnd, plural, rs, shortName, victim } from "../format.js";
+import SidePanel from "../components/SidePanel.jsx";
+import { clock, dayTime, duration, inrR, joinAnd, plural, rs, shortName, victim } from "../format.js";
 import { useLoad } from "../hooks.js";
 
 // Review, the officer's home (design board "Review (home)" and "Decisions at volume"). The dark band answers
@@ -13,6 +14,9 @@ import { useLoad } from "../hooks.js";
 const GROUPS = [
   { id: "unmatched", code: "UNMATCHED_NOTICE", title: "No matching payment", jump: "No matching payment", tile: "Complaint with no matching payment",
     pill: ["Act first: nothing is held", "p-urgent"], badge: { background: "#f9e1df", color: "#7a211b" } },
+  { id: "prealert", code: "PROPOSE_PRE_ALERT", title: "Pre-alert a likely unreported victim", jump: "Pre-alert", tile: "Pre-alert a likely unreported victim",
+    pill: ["The money is already held", "p-wait"], badge: { background: "#fbf0dc", color: "#3d2600" },
+    desc: "A payer who had never paid these accounts sent money while they were held. The money is held under the existing notice; the payer may be a victim who has not reported yet, and may still be paying." },
   { id: "narrow", code: "PROPOSE_NARROW", title: "Reduce a genuine customer's hold", jump: "Reduce the hold", tile: "Reduce a genuine customer's hold",
     pill: ["Customers locked out of their own money", "p-wait"], badge: { background: "#fbf0dc", color: "#3d2600" },
     desc: "These accounts got fraud money in a payment that looks like an ordinary sale. The rules made the system hold the whole payment; only part of it is the victim's." },
@@ -33,6 +37,7 @@ export default function Review({ officer, onChange }) {
   const day = useLoad(() => api.day(), []);
   const clockNow = useLoad(() => api.clock(), []);
   const [justDone, setJustDone] = useState([]);       // decided this visit: rows stay in place as one grey line
+  const [panelId, setPanelId] = useState(null);       // the decision open in the side panel (one for the whole page)
 
   if (inbox.loading && !inbox.data) return <div className="wrap"><Loading what="Loading the morning" /></div>;
   if (inbox.error) return <div className="wrap"><Failed error={inbox.error} retry={inbox.reload} /></div>;
@@ -44,10 +49,12 @@ export default function Review({ officer, onChange }) {
   const items = [...d.waiting, ...justDone.filter((p) => !d.waiting.some((w) => w.proposal_id === p.proposal_id))];
   const groups = GROUPS.map((g) => ({ ...g, items: items.filter((p) => p.action_code === g.code), waiting: d.waiting.filter((p) => p.action_code === g.code) }));
   const total = d.waiting.length;
+  // every link to a group closes the side panel first, then scrolls there
+  const jump = (id) => { setPanelId(null); document.getElementById(`g-${id}`)?.scrollIntoView({ behavior: "smooth" }); };
 
   return (
     <>
-      <Band d={d} day={day.data} now={clockNow.data?.clock} groups={groups} total={total} />
+      <Band d={d} day={day.data} now={clockNow.data?.clock} groups={groups} total={total} jump={jump} />
       <main id="main" className="wrap" style={{ display: "flex", flexWrap: "wrap", gap: 28, alignItems: "flex-start", paddingTop: 24, paddingBottom: 40 }}>
         <section style={{ flex: "999 1 640px", minWidth: 0 }} aria-labelledby="dec-h">
           <div style={{ position: "sticky", top: 0, zIndex: 2, background: "#f3f5f7", padding: "4px 0 12px" }}>
@@ -55,18 +62,19 @@ export default function Review({ officer, onChange }) {
             <nav className="jump" aria-label="Jump to a group" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {groups.filter((g) => g.waiting.length).map((g) => {
                 const clear = g.id === "narrow" && g.waiting.length >= 4 ? g.waiting.filter((p) => clearCase(p)[0] && !balanceChanged(p)).length : 0;
-                return <a key={g.id} href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); document.getElementById(`g-${g.id}`)?.scrollIntoView({ behavior: "smooth" }); }}>
-                  {g.jump} <b style={g.badge}>{g.waiting.length}{clear ? ` · ${clear} clear` : ""}</b></a>;
+                return <a key={g.id} href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); jump(g.id); }}>
+                  {g.jump} <b style={g.badge}>{g.waiting.length}{clear ? ` · ${clear} ready` : ""}</b></a>;
               })}
             </nav>
           </div>
           {total === 0 && justDone.length === 0 && <p className="card" style={{ padding: "14px 18px", marginTop: 12 }}>Nothing is waiting for you.{d.done.length ? ` All ${plural(d.done.length, "complaint")} today are handled.` : " No complaints have come in yet."}</p>}
           {groups.filter((g) => g.items.length).map((g) => (
-            <Group key={g.id} g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById} />
+            <Group key={g.id} g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById}
+              openId={panelId} setOpenId={setPanelId} />
           ))}
         </section>
         <aside style={{ flex: "1 1 360px", minWidth: 0 }} aria-labelledby="today-h">
-          <TodayList d={d} groups={groups} />
+          <TodayList d={d} groups={groups} onJump={jump} />
           <SinceHolds watch={d.watch} />
           <Kyc d={d} />
         </aside>
@@ -76,7 +84,7 @@ export default function Review({ officer, onChange }) {
 }
 
 // ---------------------------------------------------------------- the band
-function Band({ d, day, now, groups, total }) {
+function Band({ d, day, now, groups, total, jump }) {
   const done = d.done || [];
   const failed = done.filter((t) => ["FAILED", "CHECK_FAILED"].includes(t.run_status));
   const night = done.filter((t) => t.after_hours);
@@ -128,7 +136,7 @@ function Band({ d, day, now, groups, total }) {
               <p style={{ fontSize: 14, color: "#6b4200" }}>Decisions for you</p>
               <p style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.2, marginBottom: 6 }}>{total}</p>
               {groups.filter((g) => g.waiting.length).map((g) => (
-                <a key={g.id} className="tile-link" href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); document.getElementById(`g-${g.id}`)?.scrollIntoView({ behavior: "smooth" }); }}><span>{g.tile}</span><b>{g.waiting.length}</b></a>
+                <a key={g.id} className="tile-link" href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); jump(g.id); }}><span>{g.tile}</span><b>{g.waiting.length}</b></a>
               ))}
               {failed.length > 0 && <a className="tile-link" href={`#/case/${encodeURIComponent(failed[0].case_id)}`}><span>Complaint the system could not complete</span><b>{failed.length}</b></a>}
             </div>
@@ -161,8 +169,8 @@ function Tile({ title, big, sub, manual, green }) {
 }
 
 // ---------------------------------------------------------------- a decision group: cards up to 3, a list from 4
-function Group({ g, d, officer, onDone, reload, decidedById }) {
-  const list = g.items.length >= 4;
+function Group({ g, d, officer, onDone, reload, decidedById, openId, setOpenId }) {
+  const list = g.items.length >= 4 && g.id !== "prealert";      // bulk signing is for smaller holds and freezes
   const one = g.items.length === 1 && g.id === "unmatched";
   const desc = g.id === "unmatched"
     ? one ? `The UTR on the notice is not a payment into this account, so nothing was held and the notice went back to the police at ${clock(g.items[0].proposed_at)}. A payment that fits everything else did arrive, and it is still in the account.`
@@ -183,7 +191,8 @@ function Group({ g, d, officer, onDone, reload, decidedById }) {
           })}
         </>
       )}
-      {list && <ListGroup g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById} />}
+      {list && <ListGroup g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById}
+        openId={openId} setOpenId={setOpenId} />}
     </div>
   );
 }
@@ -191,21 +200,21 @@ function Group({ g, d, officer, onDone, reload, decidedById }) {
 // one grey line for a row decided this visit: who decided and when, and the undo for that kind
 function DoneLine({ p, officer, onDone, card, cols }) {
   const outcome = p.decision_outcome || p.proposal_status;
-  const word = outcome === "REJECTED" ? (p.action_code === "UNMATCHED_NOTICE" ? "Left with the police" : `Kept at ${inrR(p.current_hold_inr || p.amount_inr)}`)
-    : { PROPOSE_NARROW: `Reduced to ${inrR(p.decided_amount_inr ?? p.amount_inr)}`, PROPOSE_FULL_FREEZE: "Frozen", UNMATCHED_NOTICE: `Accepted, ${inrR(p.amount_inr)} held`, PROPOSE_RELEASE: "Released" }[p.action_code];
+  const word = outcome === "REJECTED" ? (p.action_code === "UNMATCHED_NOTICE" ? "Left with the police" : p.action_code === "PROPOSE_PRE_ALERT" ? "Not sent" : `Kept at ${inrR(p.current_hold_inr || p.amount_inr)}`)
+    : { PROPOSE_NARROW: `Reduced to ${inrR(p.decided_amount_inr ?? p.amount_inr)}`, PROPOSE_FULL_FREEZE: "Frozen", UNMATCHED_NOTICE: `Accepted, ${inrR(p.amount_inr)} held`, PROPOSE_RELEASE: "Released", PROPOSE_PRE_ALERT: "Pre-alert sent" }[p.action_code];
   const body = <><span style={{ color: "#5b6675" }}>{word} by {p.decided_by}, {clock(p.decided_at)}</span><Undo p={p} officer={officer} onDone={onDone} compact /></>;
   if (cols) return <tr className="done"><td colSpan={cols - 1}><b style={{ color: "#5b6675" }}>{shortName(p.name)}</b> <span style={{ marginLeft: 16 }}>{word} by {p.decided_by}, {clock(p.decided_at)}</span></td><td className="r"><Undo p={p} officer={officer} onDone={onDone} compact /></td></tr>;
   return <div className={card ? "card" : ""} style={{ padding: "14px 18px", marginBottom: 14, display: "flex", flexWrap: "wrap", gap: "8px 16px", alignItems: "center", background: "#fafbfc" }}>
     <b style={{ color: "#5b6675" }}>{shortName(p.name)}</b>{body}</div>;
 }
 
-function ListGroup({ g, d, officer, onDone, reload, decidedById }) {
+function ListGroup({ g, d, officer, onDone, reload, decidedById, openId, setOpenId }) {
   const [filter, setFilter] = useState("all");
   const [complaint, setComplaint] = useState("all");
-  const [openId, setOpenId] = useState(null);
   const [more, setMore] = useState(false);
   const [picked, setPicked] = useState([]);
   const [signing, setSigning] = useState(false);
+  const listRef = useRef(null);                       // the side panel keeps clear of this list's Open buttons
   const rows = useMemo(() => {
     let r = [...g.items];
     if (g.id === "narrow") r.sort((a, b) => figures(b).release - figures(a).release);
@@ -218,8 +227,9 @@ function ListGroup({ g, d, officer, onDone, reload, decidedById }) {
   if (g.id === "narrow" && filter !== "all") shown = shown.filter((p) => (filter === "clear") === isClear(p));
   const limited = more ? shown : shown.slice(0, 10);
   const complaints = [...new Map(rows.map((p) => [p.case_id, p.label])).entries()];
-  const firstLook = rows.find((p) => !decidedById[p.proposal_id] && !isClear(p));
-  const open = openId ?? firstLook?.proposal_id ?? null;
+  // the side panel shows one waiting decision from this group, or none
+  const openP = rows.find((p) => p.proposal_id === openId && !decidedById[p.proposal_id]) || null;
+  const open = openP?.proposal_id ?? null;
   const waitingRows = rows.filter((p) => !decidedById[p.proposal_id]);
   const own = waitingRows.reduce((t, p) => t + figures(p).release, 0);
   const sel = picked.map((id) => rows.find((p) => p.proposal_id === id)).filter((p) => p && !decidedById[p.proposal_id] && isClear(p));
@@ -238,19 +248,19 @@ function ListGroup({ g, d, officer, onDone, reload, decidedById }) {
         </div>
         {g.id === "narrow" && (
           <div className="chips">
-            {[["all", "All", rows.length], ["clear", "Clear cases", rows.filter(isClear).length], ["look", "Need a look", rows.filter((p) => !isClear(p)).length]].map(([k, l, c]) => (
-              <button key={k} className={`chip${filter === k ? " on" : ""}`} type="button" onClick={() => setFilter(k)}>{l} <span>{c}</span></button>
+            {[["all", "All", rows.length], ["clear", "Ready to approve", rows.filter(isClear).length], ["look", "Needs review", rows.filter((p) => !isClear(p)).length]].map(([k, l, c]) => (
+              <button key={k} className={`chip${filter === k ? " on" : ""}`} type="button" onClick={() => { setOpenId(null); setFilter(k); }}>{l} <span>{c}</span></button>
             ))}
           </div>
         )}
         {rows.length > 10 && (
           <label className="note" style={{ display: "flex", alignItems: "center", gap: 8 }}>Complaint
-            <select value={complaint} onChange={(e) => setComplaint(e.target.value)}><option value="all">All</option>{complaints.map(([id, l]) => <option key={id} value={id}>{l}</option>)}</select></label>
+            <select value={complaint} onChange={(e) => { setOpenId(null); setComplaint(e.target.value); }}><option value="all">All</option>{complaints.map(([id, l]) => <option key={id} value={id}>{l}</option>)}</select></label>
         )}
       </div>
       {signing ? <SignStep list={sel} officer={officer} onBack={() => setSigning(false)} onSigned={() => { setSigning(false); setPicked([]); reload(); }} /> : (
         <>
-          <div className="tw">
+          <div className="tw" ref={listRef}>
             <table className="t">
               <thead><tr>
                 {g.id === "narrow" && <><th scope="col"><span className="sr">Select</span></th><th scope="col">Customer</th><th scope="col" className="r">Held</th><th scope="col" className="r">Victim's share</th><th scope="col" className="r">Would release</th><th scope="col">Complaint</th><th scope="col">Case</th><th /></>}
@@ -258,23 +268,26 @@ function ListGroup({ g, d, officer, onDone, reload, decidedById }) {
                 {(g.id === "unmatched" || g.id === "release") && <><th scope="col">Complaint</th><th scope="col" className="r">Still in the account</th><th scope="col">Details that match</th><th /></>}
               </tr></thead>
               <tbody>
-                {limited.map((p, i) => {
+                {limited.map((p) => {
                   const done = decidedById[p.proposal_id];
                   if (done) return <DoneLine key={p.proposal_id} p={done} officer={officer} onDone={reload} cols={cols} />;
                   const isOpen = open === p.proposal_id;
                   const f = figures(p);
                   const [clear, why] = clearCase(p);
                   const changed = balanceChanged(p);
-                  const btn = <button className="btn btn-s" type="button" onClick={() => setOpenId(isOpen ? -1 : p.proposal_id)}>{isOpen ? "Close" : "Open"}</button>;
-                  return [
-                    <tr key={p.proposal_id} className={isOpen ? "open" : ""}>
+                  const btn = <button className="btn btn-s" type="button" aria-expanded={isOpen}
+                    onClick={() => setOpenId(isOpen ? null : p.proposal_id)}>{isOpen ? "Close" : "Open"}</button>;
+                  // a click anywhere on the row opens it, except on its own controls (checkbox, buttons, links)
+                  const pick = (e) => { if (!e.target.closest("button, a, input, label, select")) setOpenId(p.proposal_id); };
+                  return (
+                    <tr key={p.proposal_id} className={`pick${isOpen ? " open" : ""}`} onClick={pick}>
                       {g.id === "narrow" && <>
-                        <td>{changed ? <span className="pill p-chg">New</span> : clear && officer && !SNAPSHOT ? <span className="cbw"><input className="cb" type="checkbox" aria-label={`Select ${p.name}`} checked={picked.includes(p.proposal_id)} onChange={(e) => setPicked((x) => e.target.checked ? [...x, p.proposal_id] : x.filter((y) => y !== p.proposal_id))} /></span> : null}</td>
-                        <td><b>{shortName(p.name)}</b><br /><span className="note">{p.account_type}, {ageWords(p.opened_on, p.held_since).replace(/ \d+ months?$/, "")}</span></td>
+                        <td>{!changed && clear && officer && !SNAPSHOT ? <span className="cbw"><input className="cb" type="checkbox" aria-label={`Select ${p.name}`} checked={picked.includes(p.proposal_id)} onChange={(e) => setPicked((x) => e.target.checked ? [...x, p.proposal_id] : x.filter((y) => y !== p.proposal_id))} /></span> : null}</td>
+                        <td><b>{shortName(p.name)}</b></td>
                         <td className="r">{inrR(f.held)}</td><td className="r vic">{inrR(f.target)}</td><td className="r own" style={{ fontWeight: 700 }}>{inrR(f.release)}</td>
-                        <td className="mono">{clock(p.received_at)}</td>
-                        <td>{changed ? <><span className="pill p-chg">Changed at {clock(p.proposed_at)}</span><br /><span className="note">Balance moved. Open to review again.</span></>
-                          : clear ? <span className="pill p-clear">Clear case</span> : <><span className="pill p-look">Need a look</span><br /><span className="note">{why}</span></>}</td>
+                        <td><span className="mono" style={{ whiteSpace: "nowrap" }}>{dayTime(p.received_at)}</span>{changed && <><br /><span className="pill p-chg" style={{ marginTop: 6 }}>Updated</span></>}</td>
+                        <td>{changed ? <><span className="pill p-look">Needs review</span><br /><span className="note">Balance changed {dayTime(p.proposed_at)}</span></>
+                          : clear ? <span className="pill p-clear">Ready to approve</span> : <><span className="pill p-look">Needs review</span><br /><span className="note">{why}</span></>}</td>
                         <td className="r">{btn}</td></>}
                       {g.id === "freeze" && <>
                         <td><b>{shortName(p.name)}</b></td><td className="r">{Math.round(n(p.complaint_links)) || 1}</td><td className="r">{inrR(f.held)}</td>
@@ -285,18 +298,20 @@ function ListGroup({ g, d, officer, onDone, reload, decidedById }) {
                         <td className="r">{n(p.balance_today_inr) ? <b>{inrR(p.balance_today_inr)}</b> : <span className="note">₹0</span>}</td>
                         <td>{(() => { const m = matchCount(p); return <>{m.same} of {m.total}<br /><span className="note">{joinAnd(m.differ)} differ{m.differ.length === 1 ? "s" : ""}</span></>; })()}</td>
                         <td className="r">{btn}</td></>}
-                    </tr>,
-                    isOpen && <tr key={`${p.proposal_id}-o`} className="open"><td colSpan={cols} style={{ padding: "0 14px 14px" }}>
-                      <DecisionCard p={p} officer={officer} onDone={decide} watch={d.watch} variant={g.id === "narrow" ? "inlist" : "panel"}
-                        position={`${{ narrow: "Smaller hold", freeze: "Freeze", unmatched: "Near match", release: "Release" }[g.id]} · ${i + 1} of ${rows.length}`} />
-                    </td></tr>,
-                  ];
+                    </tr>
+                  );
                 })}
               </tbody>
             </table>
           </div>
+          {openP && (
+            <SidePanel title={title} itemKey={openP.proposal_id} onClose={() => setOpenId(null)} beside={listRef}>
+              <DecisionCard key={openP.proposal_id} p={openP} officer={officer} onDone={decide} watch={d.watch} variant={g.id === "narrow" ? "inlist" : "panel"}
+                position={`${{ narrow: "Smaller hold", freeze: "Freeze", unmatched: "Near match", release: "Release" }[g.id]} · ${rows.indexOf(openP) + 1} of ${rows.length}`} />
+            </SidePanel>
+          )}
           {shown.length > 10 && <MoreButton open={more} setOpen={setMore} label={`Show ${shown.length - 10} more`} style={{ marginTop: 10 }} />}
-          <p className="note" style={{ marginTop: 8 }}>{g.id === "narrow" ? "Sorted by money to release, largest first, so the customers hurt most come up first. A clear case is an account older than 1 year, with no cash out in 90 days, where the victim's share is under 5% of the balance. Other rows say why they need a look."
+          <p className="note" style={{ marginTop: 8 }}>{g.id === "narrow" ? "Sorted by money to release, largest first, so the customers hurt most come up first. Ready to approve: the account is older than 1 year, took no cash out in 90 days, and the victim's share is under 5% of its balance. These can be ticked and approved together. Other rows say why they need review."
             : g.id === "freeze" ? "Sorted by attempts to move held money, then by number of complaints, then by amount held. An account that tried to empty itself during a hold is the strongest case for a freeze, so it comes first. No checkboxes: a full freeze needs reasons for each account."
               : "Sorted by money still in the account, because that is what can still be lost. A row with ₹0 left drops to the bottom. Its only remaining job is the police report."}</p>
           {sel.length > 0 && (
@@ -312,7 +327,7 @@ function ListGroup({ g, d, officer, onDone, reload, decidedById }) {
   );
 }
 
-// several clear-case smaller holds at once: each account still gets its own signed reason and audit entry
+// several ready-to-approve smaller holds at once: each account still gets its own signed reason and audit entry
 function SignStep({ list, officer, onBack, onSigned }) {
   const [texts, setTexts] = useState(() => Object.fromEntries(list.map((p) => [p.proposal_id, p.draft_text || ""])));
   const [editing, setEditing] = useState(null);
@@ -361,7 +376,7 @@ export function complaintText(t) {
   return parts.join(" ") || "Nothing to hold here.";
 }
 
-function TodayList({ d, groups }) {
+function TodayList({ d, groups, onJump }) {
   const done = d.done || [];
   const [all, setAll] = useState(false);
   const FIRST = 5;
@@ -385,7 +400,7 @@ function TodayList({ d, groups }) {
                 <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "4px 8px", alignItems: "center" }}>
                   <a href={`#/case/${encodeURIComponent(t.case_id)}`} style={{ fontWeight: 600 }}>{inrR(t.amount_inr)} · {victim(t.victim_tag)}</a>
                   {failed ? <a className="pill p-urgent" href={`#/case/${encodeURIComponent(t.case_id)}`} style={{ textDecoration: "none" }}>Not completed</a>
-                    : mine ? <a className="pill p-wait" href={`#g-${jump}`} style={{ textDecoration: "none" }} onClick={(e) => { e.preventDefault(); document.getElementById(`g-${jump}`)?.scrollIntoView({ behavior: "smooth" }); }}>{mine} for you</a>
+                    : mine ? <a className="pill p-wait" href={`#g-${jump}`} style={{ textDecoration: "none" }} onClick={(e) => { e.preventDefault(); onJump(jump); }}>{mine} for you</a>
                       : <span className="pill p-done">{t.run_status === "SENT_BACK" ? "Sent back" : "Done"}</span>}
                 </div>
                 <p style={{ fontSize: 13, color: "#44505e", marginTop: 2 }}>{complaintText(t)}</p>
@@ -409,6 +424,10 @@ function SinceHolds({ watch }) {
   const linked = new Set(pick(["LINKED_TO_VICTIM"]).map((e) => e.account_id));
   const watched = pick(["RECIPIENT_WATCHED"]);
   const honest = pick(["NEW_MONEY_HONEST"]);
+  const flagged = pick(["PRE_ALERT_READY"]);
+  const early = pick(["PRE_ALERT_NOT_NEEDED", "PRE_ALERT_ANSWERED"]);
+  const sent = pick(["PRE_ALERT_SENT"]);
+  const open = Math.max(0, flagged.length - pick(["PRE_ALERT_NOT_NEEDED"]).length - sent.length);
   const who = (e) => shortName(e.name || e.account_id);
   const sum = (xs) => inrR(xs.reduce((t, e) => t + n(e.amount_inr), 0));
   const names = (xs) => joinAnd([...new Set(xs.map(who))]);
@@ -424,6 +443,8 @@ function SinceHolds({ watch }) {
             : `${refused.length} attempts to move held money, ${sum(refused)} kept. The largest: ${what(largest(refused))}.`}</li>}
           {caught.length > 0 && <li><b>Caught.</b> {caught.length <= 2 ? `${joinAnd(caught.map((e) => `${inrR(e.amount_inr)} into ${who(e)} at ${clock(e.event_at)}`))}${caught.every((e) => linked.has(e.account_id)) ? `, ${caught.length === 1 ? "linked" : "each linked"} to a new complaint.` : "."}`
             : `${sum(caught)} of new money in ${caught.length} payments into ${names(caught)}${linked.size ? `; ${caught.filter((e) => linked.has(e.account_id)).length} linked to a new complaint` : ""}.`}</li>}
+          {flagged.length > 0 && <li><b>Flagged.</b> {flagged.length <= 2 ? `${joinAnd(flagged.map((e) => `${inrR(e.amount_inr)} into ${who(e)} at ${clock(e.event_at)} from a payer who had not paid it before`))}: a likely unreported victim.`
+            : `${flagged.length} payments from new payers into ${names(flagged)}, likely unreported victims.`}{early.length ? ` ${early.length === flagged.length ? (early.length === 1 ? "The payer" : "Each payer") : `${early.length} of them`} reported later, the complaint linked to the money already held.` : ""}{sent.length ? ` ${plural(sent.length, "pre-alert")} sent.` : ""}{open ? ` ${open === 1 ? "A pre-alert waits" : `${open} pre-alerts wait`} for you.` : ""}</li>}
           {watched.length > 0 && <li><b>Watched.</b> {watched.length <= 2 ? `${joinAnd(watched.map((e) => `${who(e)}, the account ${shortName(e.counterparty || "a held account")} tried to pay at ${clock(e.event_at)}`))}.`
             : `${names(watched)}, after held accounts tried to pay them.`}</li>}
           {honest.length > 0 && <li><b>Not held.</b> {honest.length <= 2 ? `${joinAnd(honest.map((e) => `${inrR(e.amount_inr)} a customer paid ${who(e)} at ${clock(e.event_at)}`))}.`

@@ -39,7 +39,7 @@ CREATE OR REPLACE TABLE ENTRY (
     from_bank_id      VARCHAR(20)   NOT NULL COMMENT IS 'Bank that filed it',
     bank_entry_id     DECIMAL(18,0) NOT NULL COMMENT IS 'Entry number in that bank''s outbox (PORTAL_ENTRY)',
     case_id           VARCHAR(40)   NOT NULL COMMENT IS 'Case at the filing bank',
-    entry_kind        VARCHAR(10)   NOT NULL COMMENT IS 'ONWARD, EXIT, KYC or SEND_BACK',
+    entry_kind        VARCHAR(10)   NOT NULL COMMENT IS 'ONWARD, EXIT, KYC, SEND_BACK or PRE_ALERT',
     from_account      VARCHAR(80)            COMMENT IS 'Account the money left from',
     account_id        VARCHAR(80)   NOT NULL COMMENT IS 'Receiving account, exit, KYC account, or the account a sent-back ticket names',
     bank_id           VARCHAR(20)            COMMENT IS 'Receiving bank (ONWARD)',

@@ -1,14 +1,16 @@
 -- 090_views.sql — read-only views over one bank's tables. Every view has a COMMENT so the MCP server can describe it.
 -- Created after OPEN SCHEMA <bank schema>, so unqualified names resolve in that bank's schema.
 
--- The bank's transactions as they really happened once holds were in place: TXN without the debits the bank refused.
+-- The bank's transactions as they really happened once holds were in place: TXN without the debits the bank refused,
+-- and without the credits another bank refused at its end (they never arrived).
 -- TXN itself is what would happen if nobody acted, which the Compare screen replays. Every step that runs after a
 -- hold could exist (a recalculation, the watch, the hold record) reads this view.
 CREATE OR REPLACE VIEW TXN_LIVE AS
 SELECT t.*
 FROM TXN t
 WHERE NOT EXISTS (SELECT 1 FROM DECLINED_ATTEMPT d WHERE d.txn_ref = t.txn_id)
-COMMENT IS 'Transactions that went through: TXN without the debits the bank refused because of a hold (DECLINED_ATTEMPT).';
+  AND NOT EXISTS (SELECT 1 FROM UNDELIVERED_CREDIT u WHERE u.txn_ref = t.txn_id)
+COMMENT IS 'Transactions that went through: TXN without the debits the bank refused because of a hold (DECLINED_ATTEMPT) and the credits another bank refused at its end (UNDELIVERED_CREDIT).';
 
 -- One row per reported payment: the payment a ticket names (the one intake matched it to, which for a near match the
 -- officer accepted is not the UTR typed on the ticket), whose victim it was, and how much of it the ticket reports.

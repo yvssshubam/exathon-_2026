@@ -3,7 +3,8 @@
 It is not part of the product: it stands in for the bank's core system and its card and UPI switch. Holds work the
 way the brief describes them: a lien blocks money going out above what is free; a full freeze blocks every debit;
 money coming in is never blocked. A refused payment is not a transaction (no money moved): it goes to the
-declined-attempts feed (DECLINED_ATTEMPT), which is where the agent's watch reads it (pipeline/watch.py).
+declined-attempts feed (DECLINED_ATTEMPT), which is where the agent's watch reads it (pipeline/watch.py). A refused
+transfer to another bank never arrives there either: that bank gets an UNDELIVERED_CREDIT row (the payment network).
 
 Payments come from two places in the synthetic data:
   TXN              what happens if nobody acts. Once a hold exists, a debit it covers is refused here, and every
@@ -18,7 +19,7 @@ import zlib
 from dataclasses import dataclass
 from decimal import Decimal
 
-from pipeline.db import schema_for
+from pipeline.db import BANKS, schema_for
 
 
 @dataclass
@@ -105,6 +106,20 @@ def holds_on(conn, bank: str, account: str, ts: str) -> tuple[Decimal, bool]:
     return (_d(row[0]), bool(int(row[1] or 0))) if row else (Decimal(0), False)
 
 
+def undelivered(conn, to_bank: str, p: Payment, refused_by: str) -> None:
+    """Record at the receiving bank that a payment refused at the sending bank never arrived (once)."""
+    t = schema_for(to_bank)
+    if conn.execute(f"SELECT COUNT(*) FROM {t}.UNDELIVERED_CREDIT WHERE txn_ref = {{r}}", {"r": p.ref}).fetchval():
+        return
+    conn.execute(f"""
+        INSERT INTO {t}.UNDELIVERED_CREDIT (txn_ref, from_account, to_account, amount_inr, refused_at, refused_by_bank,
+                                            stmt_id)
+        VALUES ({{r}}, {{f}}, {{to}}, {{amt!d}}, TO_TIMESTAMP({{ts}}, 'YYYY-MM-DD HH24:MI:SS'), {{b}},
+                CURRENT_STATEMENT)""",
+                 {"r": p.ref, "f": p.from_account, "to": p.to_account, "amt": str(p.amount), "ts": p.ts,
+                  "b": refused_by})
+
+
 def apply(conn, bank: str, p: Payment) -> dict | None:
     """Apply one debit as core banking would. Returns the declined attempt (a dict) when a hold refused it."""
     s = schema_for(bank)
@@ -130,6 +145,8 @@ def apply(conn, bank: str, p: Payment) -> dict | None:
                   "why": reason, "ref": p.ref})
     attempt_id = conn.execute(f"SELECT MAX(attempt_id) FROM {s}.DECLINED_ATTEMPT WHERE txn_ref = {{r}}",
                               {"r": p.ref}).fetchval()
+    if p.kind == "TXN" and not p.is_exit and p.to_bank_id and p.to_bank_id != bank and p.to_bank_id in BANKS:
+        undelivered(conn, p.to_bank_id, p, bank)    # the payment network: it never reaches the other bank either
     return {"attempt_id": int(attempt_id), "account_id": p.from_account, "at": p.ts, "amount": p.amount,
             "channel": p.channel, "exit_identifier": p.exit_identifier,
             "to_account": None if p.is_exit else p.to_account,

@@ -1,5 +1,5 @@
 """The morning log (write_morning_log): what the agent did overnight, which the officer reads at the start of the day.
-Only the four decisions need action; everything else is listed as done.
+Only the officer's decisions need action; everything else is listed as done.
 
 The facts are gathered by fixed code from the bank's own records of the night (the audit log, the holds, the
 filings, the watch events and the proposals), each with the statement IDs behind it. The fixed template words them.
@@ -17,7 +17,8 @@ SYSTEM = (
     "automatically, then exactly the decisions waiting for the officer. Use only the facts given; copy every figure "
     "exactly as written; add nothing, total nothing, round nothing; never call anyone fraudulent or a mule.")
 DECISION_WORDS = {"PROPOSE_NARROW": "narrow", "PROPOSE_FULL_FREEZE": "full freeze (widen)",
-                  "UNMATCHED_NOTICE": "unmatched notice", "PROPOSE_RELEASE": "release"}
+                  "UNMATCHED_NOTICE": "unmatched notice", "PROPOSE_RELEASE": "release",
+                  "PROPOSE_PRE_ALERT": "pre-alert"}
 
 
 def _d(v) -> Decimal:
@@ -74,7 +75,11 @@ def facts(conn, bank: str, period_from: str, period_to: str) -> dict:
         caught = conn.execute("SELECT MIN(h.placed_at), MIN(h.account_id) FROM HOLD_LEDGER h WHERE h.hold_tag = "
                               "'NOT_LINKED' AND h.replaced_by IN (SELECT hold_id FROM HOLD_LEDGER WHERE case_id = {c})",
                               {"c": case}).fetchone()
+        flagged = conn.execute("SELECT MIN(p.proposed_at) FROM WATCH_EVENT w JOIN PROPOSAL p ON p.proposal_id = "
+                               "w.proposal_id WHERE w.case_id = {c} AND w.event_kind IN ('PRE_ALERT_NOT_NEEDED', "
+                               "'PRE_ALERT_ANSWERED')", {"c": case}).fetchval()
         stories.append({"case_id": case, "received_at": str(received)[:19], "status": status,
+                        "flagged_at": str(flagged)[:19] if flagged else None,
                         "amount": c[0] if c else None, "victim_tag": c[1] if c else None,
                         "holds_at": str(run[0])[:19] if run and run[0] else None,
                         "held": [(a, amt, code) for a, amt, code in held],
@@ -160,6 +165,12 @@ def template(f: dict, bank_name: str, period_to: str) -> str:
         if st["caught"]:
             parts.append(f"Already held: it landed in {n.get(st['caught'][1], st['caught'][1])} at "
                          f"{at(st['caught'][0])}, while that account was watched.")
+            if st.get("flagged_at"):
+                from pipeline.prealert import duration
+                from pipeline.prealert import minutes as gap
+
+                parts.append(f"The watch had flagged the payer as a likely unreported victim "
+                             f"{duration(max(0, gap(st['flagged_at'], st['received_at'])))} before the complaint.")
         elif held:
             total = sum((amt for _, amt in held), Decimal(0))
             parts.append(f"{rupees(total)} held here in {_names([a for a, _ in held], n)}.")
@@ -209,6 +220,9 @@ def template(f: dict, bank_name: str, period_to: str) -> str:
                 lines.append(f"- Smaller hold: reduce {who}'s hold to {rupees(amount)}.")
             elif code == "PROPOSE_FULL_FREEZE":
                 lines.append(f"- Freeze: {who}{freeze_why(f, acc)}")
+            elif code == "PROPOSE_PRE_ALERT":
+                lines.append(f"- Pre-alert: {who} received {rupees(amount)} from a payer who had not paid it before, "
+                             f"while it was held. Send the pre-alert that they may be an unreported victim?")
             else:
                 lines.append(f"- Release: the hold on {who}, no police direction in 75 days.")
     else:

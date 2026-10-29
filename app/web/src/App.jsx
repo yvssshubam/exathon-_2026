@@ -7,13 +7,14 @@ import Case from "./pages/Case.jsx";
 import Compare from "./pages/Compare.jsx";
 import { Audit, Holds } from "./pages/Ledger.jsx";
 import Narrator from "./pages/Narrator.jsx";
+import Notices from "./pages/Notices.jsx";
 import Queue from "./pages/Queue.jsx";
 import Record from "./pages/Record.jsx";
 import Review from "./pages/Review.jsx";
 
-// The officer's app has four tabs. The demo views (manual vs system, the whole night) and the replay controls live
+// The officer's app has five tabs. The demo views (manual vs system, the whole night) and the replay controls live
 // in the dark Demo mode bar above it: judges see that bar, officers never do.
-const TABS = [["review", "Review"], ["queue", "Complaints"], ["holds", "Holds"], ["audit", "Audit log"]];
+const TABS = [["review", "Review"], ["queue", "Complaints"], ["notices", "Notices"], ["holds", "Holds"], ["audit", "Audit log"]];
 const MORNING = "2026-10-18 09:00:00";
 const DAY_END = "2026-10-18 23:59:00";
 const CAPTION = {
@@ -98,6 +99,7 @@ export default function App() {
   else if (page === "compare") body = <Compare key={`${a || ""}-${version}`} caseId={a} />;
   else if (page === "queue") body = <Queue key={version} onChange={bump} />;
   else if (page === "holds") body = <Holds key={version} />;
+  else if (page === "notices") body = <Notices key={version} officer={officer} onChange={bump} />;
   else if (page === "audit") body = <Audit key={`${a || ""}-${version}`} caseId={a} officer={officer} onChange={bump} />;
   else if (page === "narrator") body = <Narrator key={version} victim={a} />;
   else body = <Review key={version} officer={officer} onChange={bump} />;

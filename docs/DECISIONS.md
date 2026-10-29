@@ -176,9 +176,11 @@ written there. The trace is therefore two statements, both in Exasol:
 All over the 90 days before the hold time, from `PH.TXN`, in `sql/steps/060_score.sql`; a Python copy in
 `tests/score_oracle.py` checks the numbers.
 - **Median dwell:** for each credit, minutes until the account's next debit (or until the hold time); the median.
+  Automatic payments are not counted as debits here (D-54).
 - **Pass-through:** for each credit, the part of it matched by debits in the next 60 minutes, capped at the credit;
   summed and divided by all credits. (A plain "outflow within 60 min / inflow" would score a shop's evening sweep as
-  pass-through, because some small payment always arrived in the hour before it.)
+  pass-through, because some small payment always arrived in the hour before it.) Automatic payments are left out
+  (D-54).
 - **Complaint-linked credits:** distinct complaints whose victim paid straight into the account in the last 7 days.
   Second-layer links are left for later.
 - **Large-payer share:** share of credit value from the top three payers.
@@ -186,6 +188,7 @@ All over the 90 days before the hold time, from `PH.TXN`, in `sql/steps/060_scor
   a proxy for "lowest balance after the tainted credit".
 - **Cash or crypto exits:** count of ATM, cash or crypto withdrawals.
 - **Credit vs profile:** credits in the last 30 days divided by the declared band's expected monthly credits.
+  Money paid in through NACH is left out (D-55).
 Dwell's honest threshold is 6 hours, not "days or weeks" as section 9 suggests, because real shops sweep takings
 daily; mules forward within minutes either way.
 
@@ -455,3 +458,75 @@ The coefficients are loaded into each bank's LEARNED_COEF and scored in Exasol b
 the smallest weight (0.05 of 1.05), so it can move a score a little but cannot flip a demo band on its own (tested),
 and its sentence says it was trained on synthetic data. The AMLworld lab test leaves it out, since it was trained on
 the same data. No model file: the eight signals alone, as before.
+## D-52 · DEFAULT · Notices by e-mail or letter are read into tickets (reverses the letter part of D-49)
+
+Not every notice comes through the portal: officers still e-mail a bank's nodal desk or send a letter as a PDF.
+`pipeline/notices.py` reads one (an .eml, a PDF's text layer, a scan through OCR when pytesseract is installed, or
+pasted text) with fixed patterns for the UTR, amount, date and time, account, legal provision, authority, reference,
+acknowledgement and FIR. A local model may read it too, but a value it gives is kept only if it is found in the text,
+so it can confirm a field and never invent one. The notice becomes an ordinary IO_NOTICE ticket in the bank's queue
+(the maker may now insert COMPLAINT and TICKET rows, nothing else new) and is worked like any other: intake matches
+every field against the payment in Exasol, a payment already in a case is linked, never held twice, and any mismatch
+sends a letter back to the officer that names each wrong field with both figures ("the notice says Rs 1,25,800; the
+payment with that UTR is Rs 1,52,800"). A date without a time is compared by the day. A demand to freeze the whole
+account is noted for the officer and answered in the letter; the bank holds only the amount traced. Nothing is held
+on a notice alone, and the text as received is kept in NOTICE_INBOX.
+
+## D-53 · DEFAULT · A new payer into a held account is flagged as a likely unreported victim (a fifth decision)
+
+When new money reaches an account already held as mule-like (D-47), it is still held under the existing notice. If
+the payer has not paid the account in the 90 days before, is not on a trail, is not a reported victim, no complaint
+names the payment yet and it is Rs 1,000 or more, the payer may be a victim who has not reported yet, and may still
+be paying. The watch prepares a pre-alert for CFCFRMS, for the police and the payer's bank: the payment and its UTR,
+and where the account is on hold (every complaint and notice behind the hold, since when, and this payment held
+under the same notice, not linked to a reported victim yet), with the case against (a new payer can be a genuine
+customer, or part of the scheme). It says nothing against the payer and holds nothing more. Sending it is the
+officer's decision, one click with the text editable, because it names someone as a likely victim; nothing goes
+out at night on the agent's own judgment. The checker refuses a second pre-alert for the same payment. When the
+payer's own complaint names the payment, an unsent pre-alert is closed and a sent one answered, with the time
+between the flag and the complaint recorded. In the demo Ravi is flagged at 05:45 and reports at 06:00, so nothing
+waits at 9 a.m. and the three decisions are unchanged. It adds a fifth decision to the officer's four.
+
+## D-54 · DEFAULT · Automatic payments do not count as money moving on
+
+A salaried customer's loan EMI, SIP or insurance premium often leaves minutes after the salary lands. Counted as
+ordinary debits, those payments make the two speed signals (median dwell, pass-through) read like a mule forwarding
+money. Automatic payments are set up in advance and recorded by the bank (who is paid, how much, how often), and they
+go to registered companies (lenders, mutual funds, insurers, billers), so they are not money being passed on to the
+next account. Debits whose channel is `NACH` (EMIs, SIPs, insurance) or `AUTOPAY` (UPI AutoPay) are therefore left
+out of dwell and pass-through, in `sql/steps/060_score.sql`, in the learned model's inputs (`sql/learn/010_features.sql`,
+so training and the bank measure the same thing) and in `tests/score_oracle.py`. They still count everywhere else:
+the trace follows them, and they still count as money out for the model's connection inputs.
+
+Standing instructions are not left out: a customer can set one up to pay any account, so a mule could use one to
+forward money. The demo cases and AMLworld have no automatic payments, so no current number or band changes; the
+saved model needs no retraining.
+
+## D-55 · DEFAULT · Money paid in by companies through NACH does not count as a jump in income
+
+Credit vs profile looks for an account that suddenly receives far more than its holder declared, the pattern of a
+rented account. Money that arrives through NACH is paid by registered companies: salary, pension, dividends,
+interest, refunds and mutual fund payouts. A one-off mutual fund redemption or a bonus can be several times a month's
+declared income and still be the customer's own money, and a fraudster cannot send money through NACH without being
+a registered company. So NACH credits are left out of credit vs profile, in `sql/steps/060_score.sql`, the learned
+model's inputs (`sql/learn/010_features.sql`) and `tests/score_oracle.py`. Leaving money out can only lower the
+ratio, so this can never make an account look worse.
+
+UPI AutoPay coming in is not left out: for a merchant it is customers paying a subscription, which is the business's
+real income and belongs in the comparison. NACH credits still count everywhere else (dwell, pass-through, payer
+share, the trace). The demo cases and AMLworld have no NACH payments, so no current number or band changes.
+
+## D-56 · DEFAULT · A payment refused by the sending bank never arrives; a pre-alert on a complaint's trail closes
+
+Each simulated bank has its own copy of the day's payments. When Bank X's hold refused a transfer to Bank Y, Bank Y
+still saw the credit in its own feed, so its watch held money that never came and drafted pre-alerts for payers who
+were themselves held mules (M07 and M04 into M14). In a real payment network a payment refused at the sending end is
+never delivered. So `pipeline/core.py` now records a refused transfer to another simulated bank in that bank's
+`UNDELIVERED_CREDIT` table, `TXN_LIVE` leaves those payments out, and the night (`pipeline/night.py`) lets the sending
+bank decide first whenever a bank is about to handle a credit from another bank. A credit refused at the other end is
+never watched, held or flagged. Writing `UNDELIVERED_CREDIT` is the payment network's job, never the agent's.
+
+The pre-alert (D-53) closed only when a new complaint named the flagged payment itself. A complaint whose trail shows
+the flagged payment was the fraud's own money moving on (for example V_X10's money passing from M07 to M10) is now
+also enough: an unsent pre-alert on a payment found in the complaint's `TRACE_EDGE` rows is closed as not needed, with
+a watch event saying why. A pre-alert already sent stays as it was.

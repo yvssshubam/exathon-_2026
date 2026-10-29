@@ -26,10 +26,12 @@ signals:
   median_dwell_minutes:
     weight: 0.20
     honest_at: 360           # 6 hours: shops sweep takings daily; mules forward within minutes
+                             # automatic payments (channel NACH or AUTOPAY: EMIs, SIPs, bills) are not counted (D-54)
     mule_at: 30
     mule_sentence: "Money it receives usually leaves within {v} minutes."
     honest_sentence: "Money it receives usually stays for hours or days (median {v} minutes)."
-  pass_through_ratio:        # share of each credit sent on within 60 minutes of arriving, over all credits
+  pass_through_ratio:        # share of each credit sent on within 60 minutes of arriving, over all credits;
+                             # automatic payments (channel NACH or AUTOPAY) are not counted (D-54)
     weight: 0.20
     honest_at: 0.2
     mule_at: 0.8
@@ -59,7 +61,8 @@ signals:
     mule_at: 1
     mule_sentence: "Money left it through {v} cash or crypto withdrawals."
     honest_sentence: "No money left it through cash or crypto withdrawals."
-  credit_vs_profile:         # credits in the last 30 days / the declared profile band's expected monthly credits
+  credit_vs_profile:         # credits in the last 30 days / the declared profile band's expected monthly credits;
+                             # money paid in through NACH (salary, dividends, refunds from companies) left out (D-55)
     weight: 0.05
     honest_at: 1.0
     mule_at: 5.0

@@ -47,7 +47,8 @@ SELECT s.account_id, s.label,
        cx.distinct_payers, cx.distinct_payees, cx.out_in_ratio, cx.payment_count, cx.reciprocal_share
 FROM PH_LEARN.SAMPLE s
 LEFT JOIN (
-    -- median minutes from a credit to the next debit (or to as_of if nothing has left yet)
+    -- median minutes from a credit to the next debit (or to as_of if nothing has left yet),
+    -- automatic payments (NACH, UPI AutoPay) left out, as in sql/steps/060_score.sql (D-54)
     SELECT x.account_id, CAST(MEDIAN(x.dwell) AS DOUBLE) AS v
     FROM (
         SELECT c.to_account AS account_id, c.txn_id,
@@ -57,6 +58,7 @@ LEFT JOIN (
                ON d.from_account = c.to_account
               AND d.ts >= c.ts
               AND d.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+              AND d.channel NOT IN ('NACH', 'AUTOPAY')  -- automatic payments to registered companies (D-54)
         WHERE c.to_account IN (SELECT account_id FROM PH_LEARN.SAMPLE)
           AND c.ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
           AND c.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
@@ -65,7 +67,7 @@ LEFT JOIN (
     GROUP BY x.account_id
 ) dw ON dw.account_id = s.account_id
 LEFT JOIN (
-    -- share of each credit sent on within 60 minutes, over all credits
+    -- share of each credit sent on within 60 minutes, over all credits (automatic payments left out, D-54)
     SELECT y.account_id, CAST(SUM(y.passed) / NULLIF(SUM(y.amount), 0) AS DOUBLE) AS v
     FROM (
         SELECT c.to_account AS account_id, c.txn_id, c.amount_inr AS amount,
@@ -75,6 +77,7 @@ LEFT JOIN (
                ON d.from_account = c.to_account
               AND d.ts >= c.ts
               AND d.ts <= ADD_MINUTES(c.ts, 60)
+              AND d.channel NOT IN ('NACH', 'AUTOPAY')  -- automatic payments to registered companies (D-54)
               AND d.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
         WHERE c.to_account IN (SELECT account_id FROM PH_LEARN.SAMPLE)
           AND c.ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -90)
@@ -113,7 +116,8 @@ LEFT JOIN (
     GROUP BY a.account_id
 ) ex ON ex.account_id = s.account_id
 LEFT JOIN (
-    -- credits in the last 30 days / what the declared profile band expects in a month
+    -- credits in the last 30 days / what the declared profile band expects in a month, leaving out money paid in
+    -- through NACH, as in sql/steps/060_score.sql (D-55)
     SELECT a.account_id,
            CAST(COALESCE(SUM(t.amount_inr), 0) /
                 MAX(CASE acc.profile_band WHEN 'low' THEN {low!d} WHEN 'high' THEN {high!d} ELSE {medium!d} END)
@@ -124,6 +128,7 @@ LEFT JOIN (
            ON t.to_account = a.account_id
           AND t.ts >  ADD_DAYS(TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS'), -30)
           AND t.ts <= TO_TIMESTAMP({as_of}, 'YYYY-MM-DD HH24:MI:SS')
+          AND t.channel <> 'NACH'  -- money paid in by registered companies through NACH (D-55)
     GROUP BY a.account_id
 ) cp ON cp.account_id = s.account_id
 LEFT JOIN (

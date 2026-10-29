@@ -16,8 +16,9 @@ def test_rules_split_automatic_and_officer():
     assert not any("FREEZE" in name or "RELEASE" in name or "NARROW" in name for name in rules["automatic"])
 
 
-def test_the_officer_decides_four_things_only():
-    assert set(rules["officer"]) == {"PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE"}
+def test_the_officer_decides_five_things_only():
+    assert set(rules["officer"]) == {"PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE",
+                                     "PROPOSE_PRE_ALERT"}
 
 
 def test_full_freeze_evidence_and_legal_bases():

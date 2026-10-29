@@ -118,6 +118,14 @@ def test_a_s_transfer_to_bank_z_is_refused_and_recorded(db):
                    "AND event_kind = 'RECIPIENT_OTHER_BANK'") == 1
 
 
+def test_the_refused_transfer_never_arrives_at_bank_z(db):
+    rows = q(db, "SELECT txn_ref, from_account, to_account, amount_inr, refused_by_bank FROM PH_Z.UNDELIVERED_CREDIT")
+    assert [(r, f, t, d(v), b) for r, f, t, v, b in rows] == [("T_DEMO_07", "ACC_A", "ACC_F", Decimal("50000"),
+                                                                "BANK_X")]
+    assert one(db, "SELECT COUNT(*) FROM PH_Z.TXN_LIVE WHERE txn_id = 'T_DEMO_07'") == 0
+    assert one(db, "SELECT COUNT(*) FROM PH_Z.TXN WHERE txn_id = 'T_DEMO_07'") == 1     # the bank's raw feed keeps it
+
+
 def test_b_s_atm_try_at_bank_y_is_refused_there(db):
     rows = q(db, "SELECT attempted_at, channel FROM PH_Y.DECLINED_ATTEMPT WHERE account_id = 'ACC_B'")
     assert [(ts(a), c) for a, c in rows] == [("2026-10-18 07:00:00", "ATM")]
@@ -141,6 +149,25 @@ def test_victim_two_s_money_is_caught_then_linked_and_the_total_held_never_chang
     assert held(db, "PH_X", "ACC_A") == Decimal("90000")
     assert one(db, "SELECT COUNT(*) FROM PH_X.WATCH_EVENT WHERE account_id = 'ACC_A' "
                    "AND event_kind = 'LINKED_TO_VICTIM'") == 1
+
+
+def test_victim_two_was_flagged_before_he_reported_and_the_pre_alert_closed_unsent(db):
+    """D-53: Ravi's 05:45 payment came from a new payer into A, already held: a pre-alert waited for the officer, with
+    where A is on hold. His own complaint at 06:00 closed it unsent, 15 minutes after the flag."""
+    rows = q(db, "SELECT proposed_at, proposal_status, amount_inr, draft_text FROM PH_X.PROPOSAL "
+                 "WHERE account_id = 'ACC_A' AND action_code = 'PROPOSE_PRE_ALERT'")
+    assert [(ts(t), st, d(v)) for t, st, v, _ in rows] == [("2026-10-18 05:45:00", "CANCELLED", Decimal("40000"))]
+    text = rows[0][3]
+    assert "Where account ACC_A is on hold at Bank X:" in text and "IMPS2026101805450021" in text
+    assert "this payment, held under the same notice, not linked to a reported victim yet" in text
+    kinds = q(db, "SELECT event_kind, event_at, sentence FROM PH_X.WATCH_EVENT WHERE account_id = 'ACC_A' "
+                  "AND event_kind LIKE 'PRE_ALERT%' ORDER BY event_at, event_id")
+    assert [(k, ts(t)) for k, t, _ in kinds] == [("PRE_ALERT_READY", "2026-10-18 05:45:00"),
+                                                 ("PRE_ALERT_NOT_NEEDED", "2026-10-18 06:03:00")]
+    assert "15 minutes earlier" in kinds[1][2]
+    assert one(db, "SELECT COUNT(*) FROM PH_X.PORTAL_ENTRY WHERE entry_kind = 'PRE_ALERT'") == 0     # never sent
+    log = q(db, "SELECT log_text FROM PH_X.MORNING_LOG ORDER BY log_id DESC LIMIT 1")[0][0]
+    assert "flagged the payer as a likely unreported victim 15 minutes before the complaint" in log
 
 
 def test_the_split_between_victims_is_versioned(db):

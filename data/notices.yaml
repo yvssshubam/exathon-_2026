@@ -1,0 +1,48 @@
+# Police notices that reach Bank X's nodal desk outside the portal: by e-mail or as a letter (PDF). Synthetic.
+# The agent reads each into a ticket, then works it like any other: intake checks every field against the payment in
+# Exasol; the same payment as an earlier ticket is linked, never held twice; any mismatch sends it back with a letter
+# that names it (pipeline/notices.py, DECISIONS D-52). Nothing is held on a notice alone.
+#
+#   NTC_01  e-mail, after an FIR: every field right, the day but no time   -> linked to the 13:48 complaint
+#   NTC_02  letter (PDF): the amount is wrong (Rs 1,25,800; the payment is Rs 1,52,800)  -> sent back
+#   NTC_03  e-mail: the UTR has two digits swapped                         -> sent back; the near match to the officer
+#   NTC_04  e-mail: cites no legal provision, and asks for a whole-account freeze  -> sent back
+notices:
+  - notice_id: NTC_01
+    to_bank: BANK_X
+    received_at: "2026-10-18 20:05:00"
+    channel: e-mail
+    sender: "SI K. Arun, Cyber Crime Police Station, Madurai"
+    file: data/notices/NTC_01.eml
+
+  - notice_id: NTC_02
+    to_bank: BANK_X
+    received_at: "2026-10-18 20:40:00"
+    channel: letter (PDF)
+    sender: "Inspector of Police, Cyber Crime Police Station, Coimbatore"
+    file: data/notices/NTC_02.pdf
+
+  - notice_id: NTC_03
+    to_bank: BANK_X
+    received_at: "2026-10-18 21:10:00"
+    channel: e-mail
+    sender: "HC 2214, Cyber Crime PS Chennai South"
+    text: |
+      respected nodal officer,
+      pls put lien on amt Rs 48,100/- recd in yr bank a/c no. ACC_M04 on 18.10.2026 at 16:31 hrs vide
+      UTR no. IMPS202610181631000065. complnt ack 34646522879626 on 1930. notice u/s 94 BNSS.
+      pls reply with stmt of a/c.
+      regards, HC 2214, Cyber Crime PS Chennai South, ref CCPS/CHS/2026/7731
+      (Synthetic notice for the Proportionate Holds demo. Not a real case.)
+
+  - notice_id: NTC_04
+    to_bank: BANK_X
+    received_at: "2026-10-18 21:35:00"
+    channel: e-mail
+    sender: "Cyber Cell, Tiruchirappalli"
+    text: |
+      Sir,
+      Freeze the entire account a/c no. ACC_M07 which received Rs. 1,43,000 through UTR IMPS202610181640000084
+      on 18-10-2026 at 16:40 hrs, complaint ack no. 37143823183130. Urgent.
+      Cyber Cell, Tiruchirappalli. Ref No. TRY/CC/2026/5502
+      (Synthetic notice for the Proportionate Holds demo. Not a real case.)

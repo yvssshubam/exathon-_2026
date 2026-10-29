@@ -45,8 +45,9 @@ BANK_TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "PAYMENT_REQUEST", 
 EMPTIED = ["COMPLAINT", "TICKET", "INTAKE_CHECK", "CASE_LINK", "TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT",
            "ATTRIBUTION", "ATTRIBUTION_RAW", "ATTRIBUTION_FLOW", "VICTIM_SPLIT", "SCORE_TARGET", "ACCOUNT_SIGNALS",
            "ACCOUNT_SCORE", "CASE_ACCOUNT", "CASE_ACTION", "PROPOSAL", "CHECK_RESULT", "HOLD_LEDGER",
-           "PORTAL_ENTRY", "HOLDER_MESSAGE", "DECISION", "WATCH_LIST", "DECLINED_ATTEMPT", "WATCH_EVENT",
-           "AGENT_RUN", "AGENT_STEP", "MORNING_LOG", "TODAY_RAW", "TODAY_OUTCOME", "LEARNED_INPUT"]
+           "PORTAL_ENTRY", "HOLDER_MESSAGE", "DECISION", "WATCH_LIST", "DECLINED_ATTEMPT", "UNDELIVERED_CREDIT",
+           "WATCH_EVENT",
+           "AGENT_RUN", "AGENT_STEP", "MORNING_LOG", "TODAY_RAW", "TODAY_OUTCOME", "LEARNED_INPUT", "NOTICE_INBOX"]
 PORTAL_TABLES = ["TICKET", "ENTRY", "ROUTE_LOG", "SIM_CLOCK"]
 PORTAL_TICKET_COLUMNS = ["case_id", "to_bank_id", "origin", "parent_case_id", "source_entry_id", "ack_no",
                          "complaint_source", "ticket_kind", "victim_account", "victim_tag", "utr", "amount_inr",
@@ -254,7 +255,14 @@ def load(conn, world: dict[str, list], amlworld: bool = True) -> dict[str, int]:
             else:
                 conn.execute(f"TRUNCATE TABLE {s}.{table}")
             conn.import_from_iterable(mine[table], (s, table))
-        print(f"loaded {s}: " + ", ".join(f"{t} {len(mine[t])}" for t in ("ACCOUNT", "TXN", "PAYMENT_REQUEST")))
+        from pipeline.notices import inbox_rows
+
+        notices = inbox_rows().get(bank, [])        # police notices that reach this desk by e-mail or letter (D-52)
+        if notices:
+            conn.import_from_iterable(notices, (s, "NOTICE_INBOX"), import_params={"columns": [
+                "notice_id", "received_at", "channel", "sender", "source_file", "raw_text", "notice_status"]})
+        print(f"loaded {s}: " + ", ".join(f"{t} {len(mine[t])}" for t in ("ACCOUNT", "TXN", "PAYMENT_REQUEST"))
+              + (f", NOTICE_INBOX {len(notices)}" if notices else ""))
         if keep_aml:
             copied[bank] = copy_amlworld(conn, bank)
     if amlworld and not keep_aml:

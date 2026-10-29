@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from pipeline.db import BANKS, PORTAL_SCHEMA, schema_for
 
@@ -92,6 +93,7 @@ class Night:
         for bank in BANKS:
             s = schema_for(bank)
             for (ref,) in self.admin.execute(f"SELECT txn_ref FROM {s}.DECLINED_ATTEMPT UNION "
+                                             f"SELECT txn_ref FROM {s}.UNDELIVERED_CREDIT UNION "
                                              f"SELECT txn_ref FROM {s}.WATCH_EVENT "
                                              "WHERE txn_ref IS NOT NULL").fetchall():
                 for kind in ("TXN", "REQUEST"):
@@ -119,6 +121,11 @@ class Night:
                 pickup = max(pickup, self.clock() or pickup)      # a re-queued ticket is worked now, not in the past
                 if pickup <= until:
                     out.append((pickup, 1, "ticket", (bank, case_id)))
+            if not is_desk(bank):
+                from pipeline.notices import pending as notices_pending
+
+                for nid, at in notices_pending(self.makers[bank], until)[:1]:   # e-mailed notices, one at a time
+                    out.append((max(at, self.clock() or at), 1, "notice", (bank, nid)))
             for p in core.pending(self.admin, bank, NIGHT_START, until):
                 if (bank, p.kind, p.ref) not in self.processed:
                     out.append((p.ts, 2, "payment", (bank, p)))
@@ -160,6 +167,8 @@ class Night:
                     self.say(at, None, f"ticket {case_id} reaches {BANKS[bank]['name']}")
             elif kind == "ticket":
                 self.work(obj[0], obj[1], t)
+            elif kind == "notice":
+                self.notice(obj[0], obj[1], t)
             else:
                 self.payment(obj[0], obj[1])
             if t > (self.clock() or NIGHT_START):
@@ -178,6 +187,20 @@ class Night:
         return {"from": start, "until": until, "events": steps, "lines": self.lines, "morning": logs}
 
     # ------------------------------------------------------------ handlers
+    def notice(self, bank: str, notice_id: str, at: str) -> None:
+        """A police notice in the bank's e-mail: the agent reads it into a ticket, which is then worked as any other."""
+        from pipeline.notices import register
+
+        r = register(self.makers[bank], bank, notice_id, at, self.llm)
+        if r["status"] != "READ":
+            self.say(at, bank, f"could not read notice {notice_id}: {r['text']}. It waits for the officer.")
+            return
+        f = r["fields"]
+        got = ", ".join(x for x in (f["utr"] and f"UTR {f['utr']}", f["amount_inr"] is not None and
+                                    f"Rs {Decimal(str(f['amount_inr'])):,.2f}", f["legal_basis"]) if x)
+        self.say(at, bank, f"read the notice {notice_id} ({'by the model' if r['read_by'] == 'model' else 'parser'}): "
+                           f"{got or 'no UTR, amount or provision found'}; it joins the queue as a ticket")
+
     def work(self, bank: str, case_id: str, at: str) -> None:
         from pipeline import portal, recalc
         from pipeline.agent import work_ticket
@@ -208,11 +231,34 @@ class Night:
             res = recalc.recalculate(self.makers[bank], self.checkers[bank], bank, case_id, r["placed_at"])
             self.say(r["placed_at"], bank, res["text"])
 
+    def refused_at_sender(self, bank: str, p) -> bool:
+        """A credit from an account at another bank: that bank's core banking decides first, and if its hold refused
+        the payment, the money never arrives here (no watch, no hold, no pre-alert). True when it was refused."""
+        sender = self.makers[bank].execute("SELECT bank_id FROM ACCOUNT WHERE account_id = {a}",
+                                           {"a": p.from_account}).fetchval()
+        if not sender or sender == bank or sender not in BANKS:
+            return False
+        if (sender, p.kind, p.ref) not in self.processed and sender in self.banks:
+            from pipeline import core
+
+            for q in core.pending(self.admin, sender, NIGHT_START, p.ts):   # the payment as the sending bank sees it
+                if q.key == p.key:
+                    self.payment(sender, q)                  # the sending bank handles its side first
+                    break
+        if not self.admin.execute(f"SELECT COUNT(*) FROM {schema_for(bank)}.UNDELIVERED_CREDIT WHERE txn_ref = {{r}}",
+                                  {"r": p.ref}).fetchval():
+            return False
+        self.say(p.ts, bank, f"{p.from_account}'s payment of Rs {p.amount:,.2f} never arrived: "
+                             f"{BANKS[sender]['name']} refused it (held)")
+        return True
+
     def payment(self, bank: str, p) -> None:
         from pipeline import core
         from pipeline.watch import Watch
 
         self.processed.add((bank, p.kind, p.ref))
+        if p.kind == "TXN" and self.refused_at_sender(bank, p):
+            return
         attempt = core.apply(self.admin, bank, p)
         desk = is_desk(bank)
         w = None if desk else Watch(self.makers[bank], self.checkers[bank], bank)

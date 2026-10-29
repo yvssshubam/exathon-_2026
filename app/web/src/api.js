@@ -59,4 +59,8 @@ export const api = {
   holds: () => call("GET", "/holds"),
   decisions: () => call("GET", "/decisions"),
   audit: () => call("GET", "/audit"),
+  // police notices by e-mail or letter (D-52) and pre-alerts for likely unreported victims (D-53)
+  notices: () => call("GET", "/notices"),
+  readNotice: (body) => call("POST", "/notices", body),
+  prealerts: () => call("GET", "/prealerts"),
 };

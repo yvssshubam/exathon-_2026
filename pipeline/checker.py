@@ -8,7 +8,8 @@ For every proposal the maker (or the watch, or a recalculation) wrote to PROPOSA
      only). Anything else is REFUSED, with the reason written down
   2. carries out the automatic ones: holds up to the reported amount, the filings (exits, onward entries, KYC
      packets, send-backs), links, the split record, the watch list
-  3. routes the four judgment calls (narrow, widen, an unmatched notice, a release) to the officer (WAITING)
+  3. routes the five judgment calls (narrow, widen, an unmatched notice, a release, a pre-alert) to the officer
+     (WAITING)
 and, once the officer decides, applies the decision (apply_decision): the officer approves, the checker acts.
 
 There is no full-freeze action an automatic proposal can reach: a freeze is only ever placed by apply_decision,
@@ -161,7 +162,7 @@ class Checker:
         if mode == "AUTOMATIC" and code not in AUTOMATIC:
             return f"{code} is not an automatic action (config/rules.yaml)"
         if mode == "OFFICER" and code not in OFFICER:
-            return f"{code} is not one of the officer's four decisions"
+            return f"{code} is not one of the officer's decisions"
         if mode not in ("AUTOMATIC", "OFFICER"):
             return f"unknown mode {mode}"
         acc, case = p["account_id"], p["case_id"]
@@ -223,7 +224,89 @@ class Checker:
                 return "the account is not on the watch for this case"
             days = (datetime.strptime(_ts(p["proposed_at"]), FMT) - datetime.strptime(_ts(w[0]), FMT)).days
             return None if days >= RULES["watch"]["release_review_days"] else f"only {days} days on the watch"
+        if code == "PROPOSE_PRE_ALERT":
+            return self._validate_pre_alert(p, own)
         return f"no rule for {code}"
+
+    def _validate_pre_alert(self, p: dict, own) -> str | None:
+        """A pre-alert (D-53): new money from a new sender on a held, mule-like watched account, that no complaint
+        names yet, alerted once."""
+        from pipeline import prealert
+
+        acc, r = p["account_id"], p["reasons"]
+        if own is None:
+            return "not this bank's account"
+        txn = r.get("source_txn_id")
+        credit = self._q("SELECT amount_inr, ts, from_account FROM TXN_LIVE WHERE txn_id = {t} AND to_account = {a}",
+                         t=txn, a=acc).fetchone()
+        if credit is None:
+            return "no such payment into the account"
+        mule = self._q("SELECT COUNT(*) FROM WATCH_LIST WHERE account_id = {a} AND first_pass = 'MULE_LIKE' "
+                       "AND left_at IS NULL AND added_at < TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS')",
+                       a=acc, t=_ts(credit[1])).fetchval()
+        if not int(mule or 0):
+            return "a pre-alert is only for new money on a mule-like watched account"
+        if _d(p["amount_inr"]) != _d(credit[0]):
+            return "the amount differs from the payment"
+        why = prealert.is_new_sender(self.conn, acc, credit[2], txn, _ts(credit[1]), credit[0])
+        if why:
+            return f"not a likely unreported victim: {why}"
+        for other in self.proposals(status="WAITING") + self.proposals(status="APPROVED") + \
+                self.proposals(status="EDITED"):
+            if other["action_code"] == "PROPOSE_PRE_ALERT" and other["reasons"].get("source_txn_id") == txn:
+                return "a pre-alert for this payment already exists"
+        return None
+
+    def close_pre_alerts(self, case_id: str, now: str) -> None:
+        """A complaint now names a payment the watch flagged: an unsent pre-alert is no longer needed (closed, with the
+        minutes it came early); a sent one is answered."""
+        from pipeline import prealert
+
+        matched = self.intake(case_id).get("matched_txn_id")
+        if not matched:
+            return
+        # the payments on this complaint's trail: a flagged payment found there is the fraud's own money moving on
+        trail = {t for (t,) in self._q("SELECT DISTINCT txn_id FROM TRACE_EDGE WHERE case_id = {c}",
+                                      c=case_id).fetchall()}
+        received = self._q("SELECT received_at FROM TICKET WHERE case_id = {c}", c=case_id).fetchval()
+        came = _ts(received) if received else now          # when the complaint reached the bank
+        for status in ("WAITING", "APPROVED", "EDITED"):
+            for p in self.proposals(status=status):
+                src = p["reasons"].get("source_txn_id")
+                if p["action_code"] != "PROPOSE_PRE_ALERT" or src not in ({matched} | trail):
+                    continue
+                if src != matched:                       # on the trail, not the complaint's own payment
+                    if status != "WAITING":
+                        continue                         # a sent pre-alert stays as it was
+                    self._set(p, "CANCELLED", f"not needed: the payment is on the trail of complaint {case_id}", now)
+                    s = (f"{now[11:16]}: complaint {case_id}'s trail shows the payment flagged at "
+                         f"{_ts(p['proposed_at'])[11:16]} was the fraud's own money moving on, not a new victim, so "
+                         "the pre-alert was not needed and was not sent.")
+                    self._q("INSERT INTO WATCH_EVENT (viewing_bank_id, account_id, case_id, event_at, event_kind, "
+                            "amount_inr, txn_ref, proposal_id, sentence, stmt_id) VALUES ({b}, {a}, {c}, "
+                            "TO_TIMESTAMP({n}, 'YYYY-MM-DD HH24:MI:SS'), 'PRE_ALERT_NOT_NEEDED', {amt!d}, {t}, {p!d}, "
+                            "{s}, CURRENT_STATEMENT)", a=p["account_id"], c=case_id, n=now,
+                            amt=str(_d(p["amount_inr"])), t=src, p=str(int(p["proposal_id"])), s=s)
+                    self._audit("pre_alert_closed", case_id, f"pre-alert {int(p['proposal_id'])} on "
+                                f"{p['account_id']}: on the trail", now, p["account_id"])
+                    continue
+                gap = prealert.duration(max(0, prealert.minutes(_ts(p["proposed_at"]), came)))
+                if status == "WAITING":
+                    self._set(p, "CANCELLED", f"not needed: complaint {case_id} names the payment", now)
+                    kind, s = "PRE_ALERT_NOT_NEEDED", (f"{now[11:16]}: a complaint now names the payment flagged "
+                                                       f"{gap} earlier, so the pre-alert was not needed and was not "
+                                                       f"sent.")
+                else:
+                    kind, s = "PRE_ALERT_ANSWERED", (f"{now[11:16]}: the payer's complaint arrived {gap} after the "
+                                                     f"payment was flagged; the money held is linked to them.")
+                self._q("INSERT INTO WATCH_EVENT (viewing_bank_id, account_id, case_id, event_at, event_kind, "
+                        "amount_inr, txn_ref, proposal_id, sentence, stmt_id) VALUES ({b}, {a}, {c}, "
+                        "TO_TIMESTAMP({n}, 'YYYY-MM-DD HH24:MI:SS'), {k}, {amt!d}, {t}, {p!d}, {s}, "
+                        "CURRENT_STATEMENT)", a=p["account_id"], c=case_id, n=now, k=kind,
+                        amt=str(_d(p["amount_inr"])), t=matched, p=str(int(p["proposal_id"])), s=s)
+                self._audit("pre_alert_closed" if status == "WAITING" else "pre_alert_answered", case_id,
+                            f"pre-alert {int(p['proposal_id'])} on {p['account_id']}: {kind.lower()}", now,
+                            p["account_id"])
 
     def _validate_watch_hold(self, p: dict, own) -> str | None:
         acc, case, r = p["account_id"], p["case_id"], p["reasons"]
@@ -486,6 +569,8 @@ class Checker:
             done += 1
         for case in cases:
             self._finish_ticket(case, now, bool(failed))
+            if not proposal_ids:
+                self.close_pre_alerts(case, now)     # a new ticket may name a payment the watch flagged (D-53)
         status = None
         if case_id:
             status = self._q("SELECT ticket_status FROM TICKET WHERE case_id = {c}", c=case_id).fetchval()
@@ -518,7 +603,7 @@ class Checker:
     # ------------------------------------------------------------ the officer's decisions
     def apply_decision(self, proposal_id: int, outcome: str, officer: str, now: str, comment: str | None = None,
                        amount=None, signed_text: str | None = None) -> int:
-        """The officer approves or rejects one of the four decisions; the checker carries it out."""
+        """The officer approves or rejects one of the five decisions; the checker carries it out."""
         officer, comment = (officer or "").strip(), (comment or "").strip() or None
         if not officer:
             raise DecisionError("An officer name is required: nothing is decided anonymously.")
@@ -575,6 +660,8 @@ class Checker:
             self._holder_message(case, acc, balance, "ACCOUNT_FREEZE", new_id, now)
         elif code == "UNMATCHED_NOTICE":
             self._q("UPDATE TICKET SET ticket_status = 'QUEUED' WHERE case_id = {c}", c=case)
+        elif code == "PROPOSE_PRE_ALERT":
+            self._file_pre_alert(p, signed_text or p["draft_text"], officer, now)
         elif code == "PROPOSE_RELEASE":
             self._q("UPDATE HOLD_LEDGER SET hold_status = 'RELEASED' WHERE case_id = {c} AND account_id = {a} "
                     "AND hold_status = 'ACTIVE'", c=case, a=acc)
@@ -585,6 +672,28 @@ class Checker:
         self._audit(f"officer_{outcome.lower()}", case, f"{code} on {acc}, decision {decision}, amount {final}", now,
                     acc, actor=officer)
         return decision
+
+    def _file_pre_alert(self, p: dict, text: str | None, officer: str, now: str) -> None:
+        """File the pre-alert with CFCFRMS, for the police and the payer's bank. Nothing is held on it."""
+        from pipeline.db import BANKS
+
+        r = p["reasons"]
+        payer_bank = BANKS.get(r.get("payer_bank_id") or "", {}).get("name") or "the payer's bank"
+        self._q("INSERT INTO PORTAL_ENTRY (case_id, viewing_bank_id, entry_kind, from_account, account_id, bank_id, "
+                "txn_id, utr, channel, amount_inr, moved_at, detail, entry_status, filed_at, filed_by, proposal_id, "
+                "stmt_id) VALUES ({c}, {b}, 'PRE_ALERT', {fa}, {a}, {pb}, {t}, {u}, {ch}, {amt!d}, "
+                "TO_TIMESTAMP({m}, 'YYYY-MM-DD HH24:MI:SS'), {d}, 'FILED', TO_TIMESTAMP({n}, 'YYYY-MM-DD HH24:MI:SS'), "
+                "{o}, {p!d}, CURRENT_STATEMENT)",
+                c=p["case_id"], fa=r.get("payer_account"), a=p["account_id"], pb=r.get("payer_bank_id"),
+                t=r.get("source_txn_id"), u=r.get("utr"), ch=r.get("channel"), amt=str(_d(p["amount_inr"])),
+                m=_ts(r.get("paid_at")), d=(text or "")[:4000], n=now, o=officer[:60], p=str(int(p["proposal_id"])))
+        self._q("INSERT INTO WATCH_EVENT (viewing_bank_id, account_id, case_id, event_at, event_kind, amount_inr, "
+                "counterparty, txn_ref, proposal_id, sentence, stmt_id) VALUES ({b}, {a}, {c}, "
+                "TO_TIMESTAMP({n}, 'YYYY-MM-DD HH24:MI:SS'), 'PRE_ALERT_SENT', {amt!d}, {cp}, {t}, {p!d}, {s}, "
+                "CURRENT_STATEMENT)", a=p["account_id"], c=p["case_id"], n=now, amt=str(_d(p["amount_inr"])),
+                cp=r.get("payer_where"), t=r.get("source_txn_id"), p=str(int(p["proposal_id"])),
+                s=f"{now[11:16]}: {officer} sent the pre-alert to CFCFRMS, for the police and "
+                  f"{payer_bank}.")
 
     # What "undo" means for each kind of decision, after the officer has decided (each needs a written reason and
     # is its own DECISION row, so the audit shows the decision and its reversal side by side):

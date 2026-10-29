@@ -21,6 +21,12 @@ export function when(ts) {
   return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}, ${m[4]}:${m[5]}`;
 }
 
+// "2026-10-18 02:13:00" -> "18 Oct, 02:13": date and time without the year, for table rows
+export function dayTime(ts) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(ts || ""));
+  return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]}, ${m[4]}:${m[5]}` : "–";
+}
+
 // "2026-10-18 02:13:00" -> "02:13"
 export function clock(ts) {
   const m = /[ T](\d{2}):(\d{2})/.exec(String(ts || ""));

@@ -3,9 +3,9 @@
 The agent works every cyber-fraud ticket the moment it lands, at any hour: it checks the ticket against the bank's
 transactions, traces the money through the bank, works out how much of each account is the victim's, has the holds
 the rules require placed, files the onward entries, exits and KYC packets, and keeps watching the accounts it
-touched. The bank nodal officer handles four kinds of exception only.
+touched. The bank nodal officer handles five kinds of exception only.
 
-> **The agent proposes, the checker acts, the database calculates, the officer decides four things.**
+> **The agent proposes, the checker acts, the database calculates, the officer decides five things.**
 
 Why this and not something else is in [PROBLEM_DISCOVERY.md](PROBLEM_DISCOVERY.md): the money is decided at the
 first bank inside the golden hour, and the nodal officer's ticket work is a fixed script (find, hold, report onward,
@@ -14,9 +14,10 @@ much should we hold here, and can we defend it?"
 
 ## Ground rules
 
-1. The officer decides four things only: **narrow** a hold to the victims' share, **widen** to a whole-account
-   freeze, an **unmatched notice** (accept the near match or leave it with the police), and a **release** after 75
-   days on the watch with no police direction. Everything else is automatic.
+1. The officer decides five things only: **narrow** a hold to the victims' share, **widen** to a whole-account
+   freeze, an **unmatched notice** (accept the near match or leave it with the police), a **release** after 75
+   days on the watch with no police direction, and a **pre-alert** when a new payer sends money into a held account
+   and may be a victim who has not reported yet (D-53). Everything else is automatic.
 2. The maker proposes; the checker acts. The agent (optionally led by a local model) has no tool that changes data.
    Deterministic code with its own database user validates each proposal and carries it out.
 3. Each bank sees only its own data: its own schema and its own users. The simulated portal is the only link.
@@ -55,7 +56,8 @@ its accounts on either side, and its share of the AMLworld background. The polic
   fixed mode ("same agent, different settings");
 - the portal collects each bank's filings, and an onward entry becomes the next bank's ticket a minute later;
 - payments on held or watched accounts go through simulated core banking (`pipeline/core.py`): a debit a hold
-  covers is refused into `DECLINED_ATTEMPT`, and the watch reacts;
+  covers is refused into `DECLINED_ATTEMPT`, and the watch reacts; a refused transfer to another bank never
+  arrives there (`UNDELIVERED_CREDIT`, D-56), so that bank's watch never holds or flags money that did not come;
 - when a ticket's trail shares an account with an earlier case, only those cases are recalculated;
 - at the end, each agent bank's morning log is written.
 
@@ -167,7 +169,7 @@ comparing amounts. Every result row carries the statement that wrote it.
 | A chat that answers questions about the data | No pain behind it in the journey; the hold record answers "why" from the records |
 | Reading emailed police letters | Tickets come through the portal; only the investigating officer's repeat notice is modelled, as a ticket |
 | Deadline countdowns | Phase 3 machinery; the 75-day release review and same-run KYC are kept |
-| Confirming borderline holds, sending KYC by hand | Not one of the four decisions: mandatory holds stand, KYC is filed in the same run |
+| Confirming borderline holds, sending KYC by hand | Not one of the officer's decisions: mandatory holds stand, KYC is filed in the same run |
 | Lane B (bank-initiated holds), notices in Indian languages, refunds | Outside Phase 1 at the bank |
 
 The assumptions behind all of this are listed in the [README](../README.md#assumptions).

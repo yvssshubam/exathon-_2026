@@ -3,8 +3,8 @@
 A bank-side agent that works every cyber-fraud ticket the moment it lands, at any hour: it checks the ticket against
 the bank's transactions, follows the victim's money through the bank, works out how much of each account is really
 the victim's, has the holds the rules require placed (amount only), files the onward entries, exits and KYC packets,
-and keeps watching the accounts it touched. The bank nodal officer handles four kinds of exception only, each sized
-to the victim's share and written up with its reasons and the case against.
+and keeps watching the accounts it touched. The bank nodal officer handles five kinds of exception only, each written
+up with its reasons and the case against.
 
 Built for **ExaThon India 2026** (Track 01: Money, Risk & Regulation). Every number is computed in
 **Exasol Personal**: the trace (`CONNECT BY NOCYCLE`), the victim's share (a Python UDF), the account evidence, the
@@ -139,7 +139,7 @@ cd app/web && npm install && npm run dev              # console on http://localh
 ```
 
 The console is Bank X's nodal desk. **This morning** has the two lists: done automatically overnight (the morning
-log, every ticket worked, what the watch saw) and waiting for you (the four decisions only, each with its reasons,
+log, every ticket worked, what the watch saw) and waiting for you (the five decisions only, each with its reasons,
 the case against, its fixed legal citation and the agent's draft for you to sign). The demo controls at the bottom
 replay the night to 09:00, continue it to 10:30 so Bank Z's desk opens, or reset. Every account opens a **hold
 record**: the notice, the path, the lowest-balance steps, the rule, who decided, every change and the Exasol
@@ -164,7 +164,7 @@ repeat no number it was not given, or the fixed template is used. The holds come
 ## Repository
 
 ```
-config/      rules.yaml (automatic actions, the four officer decisions, legal bases), scoring.yaml, banks.yaml
+config/      rules.yaml (automatic actions, the five officer decisions, legal bases), scoring.yaml, banks.yaml
 data/        demo_case.yaml (the night), extra_cases.yaml (generated, seed 42), loop_case.yaml
 sql/bank/    one bank's schema and views (run once per bank); sql/portal/ the simulated CFCFRMS;
              sql/steps/ the agent's analysis tools and the checker's actions, run inside Exasol;
@@ -189,8 +189,14 @@ Stated as assumptions, not as how banks work. Each one is a question for anyone 
   the fraud-monitoring system.
 - A hold larger than the balance catches later credits until it is filled (bank practice varies). Here the watch
   holds new money on a mule-like account up to the amount the notice reported.
+- New money from a payer who never paid a held, mule-like account before is held under the existing notice, and
+  the payer is flagged as a likely unreported victim: a pre-alert, with where the account is on hold, waits for the
+  officer to send to the portal ([D-53](docs/DECISIONS.md)). In the demo, Ravi is flagged at 05:45, 15 minutes
+  before his own complaint, which closes the pre-alert unsent.
 - An investigating officer's notice after an FIR can repeat a transaction already ticketed on the portal; it is
-  linked to the first case, not held twice.
+  linked to the first case, not held twice. Notices also arrive by e-mail or as PDF letters (four synthetic ones in
+  `data/notices/` and `data/notices.yaml`); `python -m pipeline.notices read FILE` shows what is read from one
+  ([D-52](docs/DECISIONS.md)). A scanned letter needs `pytesseract` and `pdf2image` (optional).
 - The split between several victims is a record for the refund stage. The investigating officer decides the actual
   payout.
 - Every referral between banks is signed with a SHA-256 hash chain (DECISIONS D-17); `python -m pipeline.chain`

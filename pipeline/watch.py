@@ -8,6 +8,8 @@ After the first pass, every own account a case touched is on the watch list with
   new money, mule-like account   hold it up to the ticket's reported amount, tagged "not linked to a reported victim
                                  yet" (under LIBR it is not the first victim's money). Above that amount: one line for
                                  the officer, no hold. A later ticket for that payment links the money to its victim
+                                 If the payer has not paid it before, they may be a victim who has not reported yet:
+                                 a pre-alert, with where the account is on hold, waits for the officer (D-53)
   new money, honest receiver     let it through and say why: it arrived after the victim's money left
   refused cash-out, mule-like    record it as evidence and propose a full freeze (the officer decides)
   refused transfer               the recipient is at this bank: check its evidence, put it on the watch, no hold
@@ -116,6 +118,7 @@ class Watch:
                     self.event(account, w["case_id"], at, "NEW_MONEY_ABOVE_NOTICE", sentence, amount - take,
                                self.counterparty(payer), ref=txn_id)
                     out.append(sentence)
+                out += self.pre_alert(account, w["case_id"], txn_id, at, amount, payer)
                 break                              # one case's notice catches it; the next case's would double it
             if w["first_pass"] == "HONEST":
                 sentence = (f"{when}: {name} received {inr(amount)}: not held. It arrived after the victim's money "
@@ -125,6 +128,35 @@ class Watch:
                 out.append(sentence)
                 break
         return out
+
+    def pre_alert(self, account: str, case_id: str, txn_id: str, at: str, amount: Decimal, payer: str) -> list[str]:
+        """A new sender paid a held mule-like account: they may be a victim who has not reported yet (D-53). The
+        pre-alert, with where the account is on hold, waits for the officer to send; nothing more is held."""
+        from pipeline import prealert
+        from pipeline.db import BANKS
+
+        if prealert.is_new_sender(self.maker, account, payer, txn_id, at, amount):
+            return []
+        row = self._q("SELECT utr, channel FROM TXN_LIVE WHERE txn_id = {t}", t=txn_id).fetchone() or (None, None)
+        payer_bank = self._q("SELECT bank_id FROM ACCOUNT WHERE account_id = {p}", p=payer).fetchval()
+        where = self.counterparty(payer)
+        c = {"account": account, "name": self.name(account), "bank_name": BANKS[self.bank]["name"], "payer": payer,
+             "payer_bank_id": payer_bank, "payer_bank_name": BANKS.get(payer_bank or "", {}).get("name"),
+             "payer_where": where, "txn_id": txn_id, "utr": row[0], "channel": row[1], "amount": amount, "at": at,
+             "holds": prealert.holds_on(self.maker, account), "case_id": case_id}
+        reasons, text = prealert.draft(c)
+        pid = propose(self.maker, case_id, account, "PROPOSE_PRE_ALERT", "OFFICER", amount, "watch", at, reasons,
+                      text)
+        r = self.checker.process(None, at, [pid])
+        if not r["waiting"]:
+            return [f"{at[11:16]}: no pre-alert for the payment into {c['name']} ({r['text']})."]
+        held = sum((Decimal(h["amount_inr"]) for h in c["holds"]), Decimal(0))
+        sentence = (f"{at[11:16]}: the {inr(amount)} came from {where}, which had not paid {c['name']} before: it may "
+                    f"be a victim who has not reported yet. A pre-alert is ready for the officer, with where "
+                    f"{c['name']} is on hold ({inr(held)} under {len({h['case_id'] for h in c['holds']})} "
+                    f"{'notice' if len({h['case_id'] for h in c['holds']}) == 1 else 'notices'}).")
+        self.event(account, case_id, at, "PRE_ALERT_READY", sentence, amount, where, row[1], txn_id, proposal_id=pid)
+        return [sentence]
 
     def on_debit(self, account: str, txn_id: str, at: str, amount: Decimal, to_account: str, channel: str,
                  exit_identifier: str | None) -> list[str]:

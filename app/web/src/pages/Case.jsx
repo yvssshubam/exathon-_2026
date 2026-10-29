@@ -47,7 +47,7 @@ export default function Case({ caseId, officer, onChange }) {
         <div>
           <h1 style={{ fontSize: 26, lineHeight: 1.2 }}>{inrR(c.amount_inr)} reported at {clock(received)} · {v}</h1>
           <p style={{ fontSize: 14, color: "#44505e", marginTop: 6 }}>
-            {[c.txn_at && `Paid ${clock(c.txn_at)}${c.paid_channel ? ` by ${c.paid_channel}` : ""}`, c.utr && <span key="u" className="mono">UTR {c.utr}</span>,
+            {[c.txn_at && `Paid ${c.txn_time_known === false ? `on ${when(String(c.txn_at).slice(0, 10) + " 00:00").replace(/, 00:00$/, "")}` : clock(c.txn_at)}${c.paid_channel ? ` by ${c.paid_channel}` : ""}`, c.utr && <span key="u" className="mono">UTR {c.utr}</span>,
               [c.ordering_authority, c.ordering_reference].filter(Boolean).join(", "), c.notice_legal_basis].filter(Boolean).flatMap((x, i) => (i ? [" · ", x] : [x]))}
           </p>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
@@ -74,7 +74,8 @@ export default function Case({ caseId, officer, onChange }) {
             <p style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "#8f5400" }}>Your action</p>
             <h2 style={{ fontSize: 22, lineHeight: 1.25, marginTop: 2 }}>{waiting.length === 1 ? "1 decision is waiting for you" : `${waiting.length} decisions are waiting for you`}</h2>
             <p style={{ fontSize: 14, color: "#5a3a00", marginTop: 4 }}>
-              {waiting.every((p) => p.action_code !== "UNMATCHED_NOTICE") ? "The money is already held. You only decide how much stays held. " : "Nothing is held yet. "}
+              {waiting.every((p) => p.action_code === "PROPOSE_PRE_ALERT") ? "The money is already held. You decide whether to send the pre-alert. "
+                : waiting.every((p) => p.action_code !== "UNMATCHED_NOTICE") ? "The money is already held. You only decide how much stays held. " : "Nothing is held yet. "}
               {waiting.length > 1 ? `Make ${waiting.length === 2 ? "both decisions" : "the decisions"} in the card on the right, one at a time. ${orderNames[0]} comes first, then ${joinAnd(orderNames.slice(1))}.` : "Decide in the card on the right."}
             </p>
           </div>
@@ -102,7 +103,7 @@ export default function Case({ caseId, officer, onChange }) {
               <div style={{ borderTop: "6px solid #b07a1c", borderRadius: 10, boxShadow: "0 8px 24px rgba(143,84,0,0.18)" }}>
                 <DecisionCard key={cur.proposal_id} p={cur} officer={officer} watch={events} variant="panel" onDone={() => { setPos(0); reload(); }} />
               </div>
-              {waiting[pos + 1] && <p className="note" style={{ marginTop: 12 }}>Next: <button className="linkbtn" type="button" onClick={() => setPos(pos + 1)}>{shortName(waiting[pos + 1].name)}, {waiting[pos + 1].action_code === "PROPOSE_FULL_FREEZE" ? "freeze the account?" : waiting[pos + 1].action_code === "PROPOSE_NARROW" ? "a smaller hold?" : "the near match?"}</button></p>}
+              {waiting[pos + 1] && <p className="note" style={{ marginTop: 12 }}>Next: <button className="linkbtn" type="button" onClick={() => setPos(pos + 1)}>{shortName(waiting[pos + 1].name)}, {waiting[pos + 1].action_code === "PROPOSE_FULL_FREEZE" ? "freeze the account?" : waiting[pos + 1].action_code === "PROPOSE_NARROW" ? "a smaller hold?" : waiting[pos + 1].action_code === "PROPOSE_PRE_ALERT" ? "the pre-alert?" : "the near match?"}</button></p>}
             </>
           ) : decided.length ? (
             <div style={{ display: "grid", gap: 12 }}>{decided.map((p) => <Decided key={p.proposal_id} p={p} officer={officer} onDone={reload} />)}</div>
@@ -114,6 +115,7 @@ export default function Case({ caseId, officer, onChange }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 16, marginTop: 24 }}>
+        {c.notice && <Notice x={c.notice} intake={c.intake} />}
         <Steps runs={log.data || []} checks={c.checks || []} />
         <Filed list={paper.data || []} holdsAt={holdsAt} v={v} />
       </div>
@@ -246,6 +248,45 @@ function Trail({ c, t, acts, events, watchList, holds, waiting, v, caseId, curre
   );
 }
 
+// ---------------------------------------------------------------- a police notice, as it came and as it was read
+// [field, label, the intake line that says it does not match, the intake line that says it is missing]
+const NOTICE_FIELDS = [["utr", "UTR", "utr:", "no utr"], ["amount_inr", "Amount", "amount:", "no amount"], ["txn_date", "Date", "date:"],
+  ["txn_time", "Time", "time:"], ["beneficiary_account", "Account", "utr:", "no receiving account"], ["legal_basis", "Legal provision", null, "no legal basis"],
+  ["authority", "Authority"], ["notice_ref", "Reference"], ["ack_no", "Acknowledgement", null, "acknowledgement number"], ["fir_reference", "FIR"]];
+
+function Notice({ x, intake }) {
+  const [raw, setRaw] = useState(false);
+  const flagged = `${intake?.mismatched || ""}\n${intake?.problems || ""}`.toLowerCase();
+  const show = (k, v) => (v == null ? null : k === "amount_inr" ? inrR(v) : k === "txn_date" ? when(v + " 00:00").replace(/, 00:00$/, "") : v);
+  const matched = ["EXACT", "ACCEPTED"].includes(intake?.match_status);   // only then was every field compared
+  const seen = NOTICE_FIELDS.filter(([k]) => k !== "txn_time" || x.fields?.txn_time);
+  return (
+    <section className="card" style={{ padding: "18px 20px", gridColumn: "1 / -1" }} aria-labelledby="notice-h">
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "6px 12px", marginBottom: 8 }}>
+        <h2 id="notice-h" style={{ fontSize: 17 }}>The notice as received</h2>
+        <span className="note">{x.channel} from {x.sender} at {clock(x.received_at)} · read by {x.read_by === "model" ? "the local model, every value found in the text" : "the parser"}</span>
+      </div>
+      <table className="t"><tbody>
+        {seen.map(([k, label, wrong, absent]) => {
+          const v = show(k, x.fields?.[k]);
+          const lines = flagged.split("\n");
+          const missing = absent && lines.some((l) => l.startsWith(absent));
+          const bad = !missing && wrong && lines.some((l) => l.startsWith(wrong));
+          const key = wrong || absent;
+          return <tr key={k}><td style={{ width: 170 }}>{label}</td>
+            <td>{v == null ? <span className="note">{missing ? "Not in the notice" : k === "txn_time" ? "" : "Not given"}</span> : <span className={["utr", "beneficiary_account", "ack_no", "notice_ref"].includes(k) ? "mono" : ""}>{v}</span>}
+              {k === "txn_date" && !x.fields?.txn_time && v && <span className="note"> · no time given, so the day is compared</span>}</td>
+            <td style={{ width: 120, textAlign: "right" }}>{(bad || missing) ? <span className="pill p-urgent">{missing ? "Missing" : "Does not match"}</span> : matched && v != null && key ? <span className="pill p-honest">Matches</span> : null}</td></tr>;
+        })}
+      </tbody></table>
+      {x.read_note && <p style={{ fontSize: 14, marginTop: 10, padding: "8px 12px", background: "#fbf0dc", borderLeft: "4px solid #b07a1c", borderRadius: 6 }}>{x.read_note}</p>}
+      <p className="note" style={{ marginTop: 8 }}>Every field is checked against the payment in the bank's own records; nothing is held on the notice alone.{x.stmt_id ? <> <span className="stmt">stmt {x.stmt_id}</span></> : null}</p>
+      <button className="linkbtn" type="button" style={{ marginTop: 8 }} onClick={() => setRaw(!raw)}>{raw ? "Hide the text" : "Show the text as received"}</button>
+      {raw && <pre className="mono" style={{ whiteSpace: "pre-wrap", fontSize: 13, marginTop: 8, padding: "12px 14px", background: "#f5f7f9", border: "1px solid #e8ecf0", borderRadius: 8, maxHeight: 320, overflow: "auto" }}>{x.raw_text}</pre>}
+    </section>
+  );
+}
+
 // ---------------------------------------------------------------- what the system did, what it filed
 function Steps({ runs, checks }) {
   const run = runs[0];
@@ -272,8 +313,8 @@ function Steps({ runs, checks }) {
 function Filed({ list, holdsAt, v }) {
   const count = (k) => list.filter((e) => e.entry_kind === k).length;
   const sum = [count("ONWARD") && plural(count("ONWARD"), "onward entry", "onward entries"), count("EXIT") && plural(count("EXIT"), "cash withdrawal"),
-    count("KYC") && plural(count("KYC"), "KYC packet"), count("SEND_BACK") && "sent back to the police"].filter(Boolean).join(" · ");
-  const pill = { ONWARD: ["Onward", "p-other"], EXIT: ["Cash", "p-done"], KYC: ["KYC", "p-plain"], SEND_BACK: ["Sent back", "p-urgent"] };
+    count("KYC") && plural(count("KYC"), "KYC packet"), count("SEND_BACK") && "sent back to the police", count("PRE_ALERT") && plural(count("PRE_ALERT"), "pre-alert")].filter(Boolean).join(" · ");
+  const pill = { ONWARD: ["Onward", "p-other"], EXIT: ["Cash", "p-done"], KYC: ["KYC", "p-plain"], SEND_BACK: ["Sent back", "p-urgent"], PRE_ALERT: ["Pre-alert", "p-wait"] };
   return (
     <section className="card" style={{ padding: "18px 20px" }} aria-labelledby="filed-h">
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "6px 12px", marginBottom: 8 }}>
@@ -292,6 +333,7 @@ function Filed({ list, holdsAt, v }) {
               const opened = f["account opened"];
               text = [f.name || shortName(e.account_name || ""), opened && `opened ${when(opened + " 00:00").replace(/, 00:00$/, "")}`, f.type].filter(Boolean).join(", ");
             }
+            else if (e.entry_kind === "PRE_ALERT") text = <>{inrR(e.amount_inr)} into {shortName(e.account_name || accountName(e.account_id))} at {clock(e.moved_at)} from a new payer, who may be an unreported victim. Sent by {e.filed_by || "the officer"}. {e.utr && <span className="mono note">UTR {e.utr}</span>}</>;
             else text = rs(e.detail || "");
             return <tr key={e.entry_id}><td><span className={`pill ${pill[e.entry_kind]?.[1] || "p-plain"}`}>{pill[e.entry_kind]?.[0] || e.entry_kind}</span></td><td>{text}</td></tr>;
           })}

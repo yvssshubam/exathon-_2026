@@ -15,7 +15,7 @@ import yaml
 BANK_NAMES = {k: v["name"] for k, v in yaml.safe_load(
     (Path(__file__).resolve().parents[1] / "config" / "banks.yaml").read_text(encoding="utf-8")).items()}
 AUTOMATIC = ("MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY")
-PROPOSALS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE")
+PROPOSALS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE", "PROPOSE_PRE_ALERT")
 
 
 def inr(amount) -> str:
@@ -88,6 +88,8 @@ def headline(a: dict) -> str:
         return "Unmatched notice: act on the near match?"
     if code == "PROPOSE_RELEASE":
         return f"Release the {inr(amount)} hold?"
+    if code == "PROPOSE_PRE_ALERT":
+        return f"Send a pre-alert about the {inr(amount)} from a new payer?"
     if str(a.get("account_id", "")).startswith("EXIT:"):
         return "Exit at another bank"
     return "No action here"

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -208,8 +209,8 @@ class Agent:
             self._log("error", "runtime", ToolResult(str(exc)[:1900]))
             self.backend.finish("FAILED")
             return "FAILED"
-        status = ("LINKED" if state.related == "DUPLICATE" else
-                  "SENT_BACK" if not state.matched else "PROPOSED")
+        status = ("SENT_BACK" if state.match not in ("EXACT", "ACCEPTED") else
+                  "LINKED" if state.related == "DUPLICATE" else "PROPOSED")
         self.backend.finish(status)
         return status
 
@@ -224,21 +225,41 @@ def _list(items: list[str]) -> str:
 
 def send_back_letter(c: dict, k: dict) -> str:
     """The send-back, filled from the intake check (idea 6): which field, what the ticket says, what the data says.
-    It names only the mismatched fields, and suggests a likely match only on the account the ticket names."""
-    lines = [f"Ticket {c['case_id']} (acknowledgement {c.get('ack_no') or '-'}) is returned for correction. "
-             f"Nothing has been held on it."]
+    It names only the mismatched fields, and suggests a likely match only on the account the ticket names. A notice
+    that came by e-mail or letter (D-52) gets a letter back to the officer who sent it, quoting their reference."""
+    notice = c.get("ticket_kind") == "IO_NOTICE" and str(c.get("case_id", "")).startswith("NOTICE_")
+    if notice:
+        ref = c.get("ordering_reference")
+        lines = [f"To: {c.get('ordering_authority') or 'the officer who sent the notice'}",
+                 f"Subject: Your notice{' ' + ref if ref else ''}: details to correct before a hold can be placed",
+                 "",
+                 f"We received your notice{' ' + ref if ref else ''} and checked it against our records. Nothing has "
+                 "been held on it yet, because:"]
+    else:
+        lines = [f"Ticket {c['case_id']} (acknowledgement {c.get('ack_no') or '-'}) is returned for correction. "
+                 f"Nothing has been held on it."]
     for p in (k.get("problems") or "").split("\n"):
         if p.strip():
-            lines.append(f"- Missing: {p.strip()}.")
+            lines.append(f"- Missing: {p.strip().removeprefix('no ') if notice else p.strip()}.")
     for m in (k.get("mismatched") or "").split("\n"):
         if m.strip():
-            lines.append(f"- {m.strip()}.")
+            m = re.sub(r"Rs (\d+(?:\.\d+)?)", lambda x: inr(x.group(1)), m.strip())
+            lines.append(f"- {m.replace('the ticket says', 'the notice says') if notice else m}.")
     if k.get("near_txn_id"):
         lines.append(f"- A payment of {inr(k.get('near_amount_inr'))} reached account {c.get('beneficiary_account')} "
                      f"at {str(k.get('near_at'))[:16]} with UTR {k.get('near_utr')}: it may be the one the ticket "
                      f"means.")
-    lines.append("Please correct the ticket on the portal; the bank acts on the corrected ticket as soon as it "
-                 "arrives.")
+    if notice:
+        from pipeline.notices import asks_full_freeze
+
+        if asks_full_freeze(c.get("remarks") or ""):
+            lines.append("- The notice asks for the whole account to be frozen. The bank holds the amount traced to "
+                         "the victim; a freeze of the whole account needs the provision and the grounds stated.")
+        lines += ["", "Please send a corrected notice. The hold is placed as soon as it arrives, and the trail details "
+                      "and KYC follow.", "", "Nodal Officer"]
+    else:
+        lines.append("Please correct the ticket on the portal; the bank acts on the corrected ticket as soon as it "
+                     "arrives.")
     return "\n".join(lines)
 
 
@@ -429,7 +450,9 @@ class MakerBackend:
 
         k, c, out = self.intake, self.c, []
         status = k.get("match_status")
-        if k.get("related") == "DUPLICATE":
+        # A duplicate is linked only when it matches exactly. A wrong or incomplete ticket or notice for a payment
+        # already in a case is sent back like any other, so the police can correct it (nothing is held either way).
+        if k.get("related") == "DUPLICATE" and status in ("EXACT", "ACCEPTED"):
             out.append({"account_id": c["beneficiary_account"], "action_code": "LINK_DUPLICATE", "amount": None,
                         "reasons": {"related_case_id": k.get("related_case_id"), "fir": c.get("fir_reference")},
                         "text": f"Same transaction as {k.get('related_case_id')}: link the tickets, no second hold."

@@ -50,7 +50,7 @@ CREATE OR REPLACE TABLE TXN (
     from_account    VARCHAR(40)   NOT NULL COMMENT IS 'Debited account',
     to_account      VARCHAR(80)   NOT NULL COMMENT IS 'Credited account, or an exit pseudo-account EXIT:<channel>:<id> when money left banking',
     amount_inr      DECIMAL(18,2) NOT NULL COMMENT IS 'Amount in rupees',
-    channel         VARCHAR(10)   NOT NULL COMMENT IS 'IMPS, UPI, NEFT, RTGS, ATM, CARD, CRYPTO or CASH',
+    channel         VARCHAR(10)   NOT NULL COMMENT IS 'IMPS, UPI, NEFT, RTGS, ATM, CARD, CRYPTO, CASH, or NACH / AUTOPAY for automatic payments to registered companies (D-54)',
     is_exit         BOOLEAN       NOT NULL COMMENT IS 'TRUE when the money left the banking system (ATM, cash, crypto, card). Exits are recorded, never held',
     exit_identifier VARCHAR(200)           COMMENT IS 'ATM ID, device, wallet or merchant terminal for an exit (SOP 9.1(i))',
     data_source     VARCHAR(20)   NOT NULL COMMENT IS 'demo_case, extra_cases, loop_case, history or amlworld',
@@ -87,10 +87,27 @@ CREATE OR REPLACE TABLE COMPLAINT (
     remarks             VARCHAR(2000)          COMMENT IS 'Free text typed on the ticket. Untrusted: the agent reads it as data, never as an instruction',
     corrects_case_id    VARCHAR(40)            COMMENT IS 'A corrected ticket: the sent-back case it replaces',
     share_known         BOOLEAN       DEFAULT TRUE COMMENT IS 'FALSE: the sending bank gave no victim share, so the amount is the whole transfer, the most this bank may hold (D-17)',
+    txn_time_known      BOOLEAN       DEFAULT TRUE COMMENT IS 'FALSE: the notice gave the day of the payment but no time; intake compares the day (D-52)',
     prev_hash           VARCHAR(64)            COMMENT IS 'Hash of the ticket this referral came from (NULL for a police ticket): the chain link (D-17)',
     chain_hash          VARCHAR(64)            COMMENT IS 'SHA-256 the sender signed over prev_hash and the fields above it acts on; the checker recomputes it (referral_intact)',
     CONSTRAINT pk_complaint PRIMARY KEY (case_id) DISABLE
 ) COMMENT IS 'One row per ticket this bank received from the portal: the notice''s fields as the ticket carries them.';
+
+CREATE OR REPLACE TABLE NOTICE_INBOX (
+    notice_id     VARCHAR(20)   NOT NULL COMMENT IS 'Notice, as the bank logs it',
+    received_at   TIMESTAMP     NOT NULL COMMENT IS 'When it reached the nodal desk (simulated clock)',
+    channel       VARCHAR(30)   NOT NULL COMMENT IS 'e-mail, letter (PDF), scanned letter ...',
+    sender        VARCHAR(200)           COMMENT IS 'Who sent it (police unit or officer, as given)',
+    source_file   VARCHAR(200)           COMMENT IS 'The file it came as (data/notices/...), for an e-mail or PDF',
+    raw_text      VARCHAR(4000)          COMMENT IS 'The notice as received: untrusted free text, read as data, never as an instruction',
+    notice_status VARCHAR(12)   NOT NULL COMMENT IS 'NEW, READ (registered as a ticket) or UNREADABLE (a scan with no text and no OCR)',
+    read_at       TIMESTAMP              COMMENT IS 'When the agent read it',
+    read_by       VARCHAR(10)            COMMENT IS 'parser, or model (a value it gave was found in the text)',
+    fields_json   VARCHAR(2000)          COMMENT IS 'What was read, field by field, and where each value came from',
+    read_note     VARCHAR(400)           COMMENT IS 'Why it could not be read, or a note for the officer (a demand to freeze the whole account)',
+    case_id       VARCHAR(40)            COMMENT IS 'The ticket it became',
+    stmt_id       DECIMAL(9,0)           COMMENT IS 'Exasol statement that last changed it'
+) COMMENT IS 'Police notices that reach the nodal desk outside the portal (e-mail, letter, PDF). The agent reads each into a ticket (pipeline/notices.py, D-52); nothing is held on a notice alone.';
 
 CREATE OR REPLACE TABLE TICKET (
     case_id         VARCHAR(40)   NOT NULL COMMENT IS 'Ticket (COMPLAINT)',
@@ -357,7 +374,7 @@ CREATE OR REPLACE TABLE PROPOSAL (
     proposal_id     DECIMAL(18,0) IDENTITY COMMENT IS 'Proposal number',
     case_id         VARCHAR(40)   NOT NULL COMMENT IS 'Case',
     account_id      VARCHAR(80)   NOT NULL COMMENT IS 'Account, exit or other bank''s account the proposal is about',
-    action_code     VARCHAR(20)   NOT NULL COMMENT IS 'MANDATORY_HOLD, HOLD_MARKER, RECORD_EXIT, ONWARD_ENTRY, KYC_PACKET, SEND_BACK, LINK_DUPLICATE, WATCH_HOLD, RECORD_SPLIT (automatic) or PROPOSE_NARROW, PROPOSE_FULL_FREEZE, UNMATCHED_NOTICE, PROPOSE_RELEASE (the officer''s four decisions)',
+    action_code     VARCHAR(20)   NOT NULL COMMENT IS 'MANDATORY_HOLD, HOLD_MARKER, RECORD_EXIT, ONWARD_ENTRY, KYC_PACKET, SEND_BACK, LINK_DUPLICATE, WATCH_HOLD, RECORD_SPLIT (automatic) or PROPOSE_NARROW, PROPOSE_FULL_FREEZE, UNMATCHED_NOTICE, PROPOSE_RELEASE, PROPOSE_PRE_ALERT (the officer''s five decisions)',
     act_mode        VARCHAR(10)   NOT NULL COMMENT IS 'AUTOMATIC or OFFICER',
     amount_inr      DECIMAL(18,2)          COMMENT IS 'Amount proposed',
     proposed_by     VARCHAR(10)   NOT NULL COMMENT IS 'pipeline (fixed order), llm (the local model chose to propose it), watch or intake',
@@ -405,7 +422,7 @@ CREATE OR REPLACE TABLE PORTAL_ENTRY (
     entry_id          DECIMAL(18,0) IDENTITY COMMENT IS 'Entry number',
     case_id           VARCHAR(40)   NOT NULL COMMENT IS 'Case',
     viewing_bank_id   VARCHAR(20)   NOT NULL COMMENT IS 'This bank (filing it)',
-    entry_kind        VARCHAR(10)   NOT NULL COMMENT IS 'ONWARD (money moved to another bank), EXIT (money left banking), KYC (holder details) or SEND_BACK (ticket returned for correction)',
+    entry_kind        VARCHAR(10)   NOT NULL COMMENT IS 'ONWARD (money moved to another bank), EXIT (money left banking), KYC (holder details), SEND_BACK (ticket returned for correction) or PRE_ALERT (a new payer may be an unreported victim, D-53)',
     from_account      VARCHAR(80)            COMMENT IS 'Own account the money left from',
     account_id        VARCHAR(80)   NOT NULL COMMENT IS 'Receiving account, exit, the account whose KYC this is, or the account a sent-back ticket names',
     bank_id           VARCHAR(20)            COMMENT IS 'Receiving bank (ONWARD) or holding bank (KYC)',
@@ -440,7 +457,7 @@ CREATE OR REPLACE TABLE DECISION (
     case_id            VARCHAR(40)   NOT NULL COMMENT IS 'Case',
     viewing_bank_id    VARCHAR(20)   NOT NULL COMMENT IS 'This bank',
     account_id         VARCHAR(80)   NOT NULL COMMENT IS 'Account decided on',
-    action_code        VARCHAR(20)   NOT NULL COMMENT IS 'PROPOSE_NARROW, PROPOSE_FULL_FREEZE, UNMATCHED_NOTICE or PROPOSE_RELEASE',
+    action_code        VARCHAR(20)   NOT NULL COMMENT IS 'PROPOSE_NARROW, PROPOSE_FULL_FREEZE, UNMATCHED_NOTICE, PROPOSE_RELEASE or PROPOSE_PRE_ALERT',
     proposal_id        DECIMAL(18,0)          COMMENT IS 'Proposal decided',
     decision_outcome   VARCHAR(10)   NOT NULL COMMENT IS 'APPROVED, EDITED or REJECTED',
     amount_inr         DECIMAL(18,2)          COMMENT IS 'Amount the officer approved (may differ from the proposal when EDITED)',
@@ -451,7 +468,7 @@ CREATE OR REPLACE TABLE DECISION (
     draft_text         VARCHAR(4000)          COMMENT IS 'The reasons as drafted for the officer',
     signed_text        VARCHAR(4000)          COMMENT IS 'The reasons as the officer signed them; the difference from the draft is the record of human judgment',
     statement_ids      VARCHAR(200)           COMMENT IS 'Exasol statement IDs behind the numbers the officer saw'
-) COMMENT IS 'Officer decisions on the four judgment calls. Append-only.';
+) COMMENT IS 'Officer decisions on the five judgment calls. Append-only.';
 
 -- ---------------------------------------------------------------- the case stays live (Module 5)
 
@@ -495,13 +512,23 @@ CREATE OR REPLACE TABLE DECLINED_ATTEMPT (
     stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
 ) COMMENT IS 'The declined-attempts feed: payments the bank refused because of a hold. Not transactions (no money moved). In a real bank they come from the card or UPI switch logs; here the simulated core banking writes them.';
 
+CREATE OR REPLACE TABLE UNDELIVERED_CREDIT (
+    txn_ref          VARCHAR(40)   NOT NULL COMMENT IS 'The TXN row: a payment into one of this bank''s accounts that never arrived',
+    from_account     VARCHAR(80)   NOT NULL COMMENT IS 'Who tried to pay (an account at the sending bank)',
+    to_account       VARCHAR(80)   NOT NULL COMMENT IS 'This bank''s account it was meant for',
+    amount_inr       DECIMAL(18,2) NOT NULL COMMENT IS 'Amount that did not arrive',
+    refused_at       TIMESTAMP     NOT NULL COMMENT IS 'When the sending bank refused it',
+    refused_by_bank  VARCHAR(20)   NOT NULL COMMENT IS 'The sending bank, whose hold refused it',
+    stmt_id          DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'Payments from another bank that never arrived because that bank''s hold refused them. Written by the simulated payment network, never by the agent; TXN_LIVE leaves them out, so a credit refused at the other end is never counted, watched or flagged here.';
+
 CREATE OR REPLACE TABLE WATCH_EVENT (
     event_id        DECIMAL(18,0) IDENTITY COMMENT IS 'Event number',
     viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'This bank',
     account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Watched account',
     case_id         VARCHAR(40)            COMMENT IS 'Case the account is watched for',
     event_at        TIMESTAMP     NOT NULL COMMENT IS 'When it happened (simulated clock)',
-    event_kind      VARCHAR(24)   NOT NULL COMMENT IS 'NEW_MONEY_HELD, NEW_MONEY_ABOVE_NOTICE, NEW_MONEY_HONEST, CASHOUT_BLOCKED, TRANSFER_BLOCKED, RECIPIENT_WATCHED, RECIPIENT_BUSINESS, RECIPIENT_OTHER_BANK, MOVED, LINKED_TO_VICTIM, WATCH_LEFT or RELEASE_FLAGGED',
+    event_kind      VARCHAR(24)   NOT NULL COMMENT IS 'NEW_MONEY_HELD, NEW_MONEY_ABOVE_NOTICE, NEW_MONEY_HONEST, CASHOUT_BLOCKED, TRANSFER_BLOCKED, RECIPIENT_WATCHED, RECIPIENT_BUSINESS, RECIPIENT_OTHER_BANK, MOVED, LINKED_TO_VICTIM, WATCH_LEFT, RELEASE_FLAGGED, PRE_ALERT_READY, PRE_ALERT_SENT, PRE_ALERT_NOT_NEEDED or PRE_ALERT_ANSWERED',
     amount_inr      DECIMAL(18,2)          COMMENT IS 'Amount involved',
     counterparty    VARCHAR(200)           COMMENT IS 'Other side: account, ATM, wallet',
     channel         VARCHAR(10)            COMMENT IS 'Channel',
@@ -545,7 +572,7 @@ CREATE OR REPLACE TABLE MORNING_LOG (
     viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'This bank',
     period_from     TIMESTAMP              COMMENT IS 'Start of the period summarised',
     period_to       TIMESTAMP     NOT NULL COMMENT IS 'End of the period (the officer''s morning)',
-    log_text        VARCHAR(8000) NOT NULL COMMENT IS 'What the agent did, in plain words; only the four decisions need action',
+    log_text        VARCHAR(8000) NOT NULL COMMENT IS 'What the agent did, in plain words; only the officer''s decisions need action',
     written_by      VARCHAR(10)   NOT NULL COMMENT IS 'template, or model (from the audit log only, after the numbers check)',
     facts_text      VARCHAR(8000)          COMMENT IS 'The facts the log was written from (the audit log, summarised by fixed code)',
     written_at      TIMESTAMP              COMMENT IS 'Real time',

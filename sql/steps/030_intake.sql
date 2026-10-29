@@ -2,7 +2,8 @@
 -- Runs inside the bank's schema the moment a ticket lands, before anything else. Run by the maker (tool read_ticket,
 -- check_notice and find_related_cases); it changes nothing outside INTAKE_CHECK. Parameters: case_id, checked_at.
 --
---   EXACT       UTR, amount, time (within 15 minutes) and the receiving account all match one payment. An onward
+--   EXACT       UTR, amount, time (within 15 minutes; the day, for a notice that gives no time) and the receiving
+--               account all match one payment. An onward
 --               ticket reports the victim's share, which may be less than the payment it names.
 --   NEAR_MATCH  no exact match, but a payment of the same amount reached the same account within two hours (likely
 --               a typo in the UTR). Nothing is held: the ticket is sent back and the near match goes to the officer.
@@ -40,9 +41,13 @@ SELECT {case_id},
                           || '; the payment with that UTR is Rs ' || CAST(m.utr_amount AS VARCHAR(30)) || CHR(10)
                      ELSE '' END ||
                 CASE WHEN m.utr_account = m.beneficiary_account AND m.txn_at IS NOT NULL
-                          AND ABS(MINUTES_BETWEEN(m.utr_ts, m.txn_at)) > 15
+                          AND COALESCE(m.txn_time_known, TRUE) AND ABS(MINUTES_BETWEEN(m.utr_ts, m.txn_at)) > 15
                      THEN 'Time: the ticket says ' || TO_CHAR(m.txn_at, 'YYYY-MM-DD HH24:MI')
                           || '; the payment with that UTR was at ' || TO_CHAR(m.utr_ts, 'YYYY-MM-DD HH24:MI') || CHR(10)
+                     WHEN m.utr_account = m.beneficiary_account AND m.txn_at IS NOT NULL
+                          AND m.txn_time_known = FALSE AND CAST(m.utr_ts AS DATE) <> CAST(m.txn_at AS DATE)
+                     THEN 'Date: the ticket says ' || TO_CHAR(m.txn_at, 'YYYY-MM-DD')
+                          || '; the payment with that UTR was on ' || TO_CHAR(m.utr_ts, 'YYYY-MM-DD') || CHR(10)
                      ELSE '' END, CHR(10)) END,
        m.problems,
        m.near_txn,
@@ -57,11 +62,11 @@ SELECT {case_id},
        TO_TIMESTAMP({checked_at}, 'YYYY-MM-DD HH24:MI:SS'),
        CURRENT_STATEMENT
 FROM (
-    SELECT c.utr, c.amount_inr, c.txn_at, c.beneficiary_account, c.corrects_case_id AS corrects,
+    SELECT c.utr, c.amount_inr, c.txn_at, c.txn_time_known, c.beneficiary_account, c.corrects_case_id AS corrects,
            RTRIM(
                CASE WHEN c.amount_inr IS NULL OR NOT c.notice_has_amount THEN 'no amount' || CHR(10) ELSE '' END ||
                CASE WHEN c.lane = 'A' AND c.notice_legal_basis IS NULL THEN 'no legal basis' || CHR(10) ELSE '' END ||
-               CASE WHEN c.utr IS NULL THEN 'no UTR' || CHR(10) ELSE '' END ||
+               CASE WHEN c.utr IS NULL OR c.utr = '-' THEN 'no UTR' || CHR(10) ELSE '' END ||
                CASE WHEN c.beneficiary_account IS NULL THEN 'no receiving account' || CHR(10) ELSE '' END ||
                CASE WHEN LENGTH(c.ack_no) <> 14 THEN 'acknowledgement number is not 14 digits' || CHR(10)
                     ELSE '' END ||
@@ -79,7 +84,9 @@ FROM (
                 FROM TXN t JOIN COMPLAINT k ON k.case_id = {case_id}
                                            AND t.utr = k.utr AND t.to_account = k.beneficiary_account
                 WHERE (t.amount_inr = k.amount_inr OR (k.ticket_kind = 'ONWARD' AND k.amount_inr <= t.amount_inr))
-                  AND (k.txn_at IS NULL OR ABS(MINUTES_BETWEEN(t.ts, k.txn_at)) <= 15)) ex
+                  AND (k.txn_at IS NULL
+                       OR (k.txn_time_known = FALSE AND CAST(t.ts AS DATE) = CAST(k.txn_at AS DATE))
+                       OR (COALESCE(k.txn_time_known, TRUE) AND ABS(MINUTES_BETWEEN(t.ts, k.txn_at)) <= 15))) ex
     CROSS JOIN (SELECT MIN(t.to_account) AS utr_account, MIN(t.amount_inr) AS utr_amount, MIN(t.ts) AS utr_ts
                 FROM TXN t JOIN COMPLAINT k ON k.case_id = {case_id} AND t.utr = k.utr) u
     CROSS JOIN (SELECT COUNT(*) AS accepted FROM DECISION d
@@ -105,8 +112,10 @@ FROM (
                             AND t.to_account = k.beneficiary_account
                             AND t.amount_inr = k.amount_inr
             WHERE t.utr <> k.utr
-              AND t.ts BETWEEN ADD_MINUTES(COALESCE(k.txn_at, k.reported_at), -120)
-                           AND ADD_MINUTES(COALESCE(k.txn_at, k.reported_at), 120)
+              AND ((COALESCE(k.txn_time_known, TRUE)
+                    AND t.ts BETWEEN ADD_MINUTES(COALESCE(k.txn_at, k.reported_at), -120)
+                                 AND ADD_MINUTES(COALESCE(k.txn_at, k.reported_at), 120))
+                   OR (k.txn_time_known = FALSE AND CAST(t.ts AS DATE) = CAST(k.txn_at AS DATE)))
         ) x
         WHERE x.rn = 1
     ) n ON 1 = 1

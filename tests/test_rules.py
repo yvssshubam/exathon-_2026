@@ -109,7 +109,8 @@ def test_extra_cases_pass_the_checker(rows):
 def test_rules_config_names_every_action():
     assert set(RULES["automatic"]) == {"MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY", "KYC_PACKET",
                                        "SEND_BACK", "LINK_DUPLICATE", "RECORD_SPLIT", "WATCH_HOLD", "WATCH_ADD"}
-    assert set(RULES["officer"]) == {"PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE"}
+    assert set(RULES["officer"]) == {"PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE",
+                                     "PROPOSE_PRE_ALERT"}
 
 
 def test_holds_never_exceed_the_reported_amount(demo_actions):

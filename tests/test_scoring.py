@@ -1,13 +1,14 @@
 """AT-07 (no database): the signals, computed in Python on the same data, give the bands the requirements expect,
 and the generated history has the shape each account needs."""
 from collections import Counter
+from datetime import datetime
 
 import pytest
 
 from pipeline.cases import DEMO_CASE, load_case
 from pipeline.gen_history import END, generate
 from pipeline.load_cases import CASE_FILES, rows_for
-from tests.score_oracle import CONFIG, score, signals
+from tests.score_oracle import CONFIG, declared_ratio, score, signals, speed
 
 cases = {k: load_case(v) for k, v in CASE_FILES.items()}
 demo = load_case(DEMO_CASE)
@@ -53,3 +54,52 @@ def test_config_signals_are_the_eight_in_the_requirements():
     for s in CONFIG["signals"].values():
         assert "{" not in s["mule_sentence"].replace("{v}", "").replace("{v1}", "").replace("{pct}", "").replace(
             "{years}", "")
+
+
+def _pay(ts, frm, to, amt, ch):
+    return dict(ts=datetime.strptime(ts, "%Y-%m-%d %H:%M:%S"), f=frm, t=to, amt=float(amt), ch=ch)
+
+
+def test_automatic_payments_do_not_count_as_money_moving_on():                  # D-54
+    """A salary lands and the EMI and SIP leave by NACH within minutes: that is not a mule forwarding money."""
+    now = datetime(2026, 10, 18)
+    credits, debits = [], []
+    for month in (7, 8, 9):
+        credits.append(_pay(f"2026-{month:02d}-01 09:00:00", "EXT_EMPLOYER", "ACC_SAL", 50000, "NEFT"))
+        debits.append(_pay(f"2026-{month:02d}-01 09:05:00", "ACC_SAL", "EXT_HOME_LOAN", 20000, "NACH"))
+        debits.append(_pay(f"2026-{month:02d}-01 09:10:00", "ACC_SAL", "EXT_MUTUAL_FUND", 5000, "AUTOPAY"))
+        debits.append(_pay(f"2026-{month:02d}-20 19:00:00", "ACC_SAL", "EXT_GROCER", 8000, "UPI"))
+    dwell, passed = speed(credits, debits, now)
+    assert passed == 0                                   # the EMI and SIP are not counted as passed on
+    assert dwell > 6 * 60                                # money stays until the grocery bill, days later
+    # the same payments sent by hand (IMPS) to other accounts would look like forwarding
+    by_hand = [{**d, "ch": "IMPS"} for d in debits]
+    dwell2, passed2 = speed(credits, by_hand, now)
+    assert passed2 == 0.5 and dwell2 == 5
+
+
+def test_automatic_channels_match_the_sql():                                    # D-54
+    from tests.score_oracle import AUTOMATIC_CHANNELS, ROOT
+    clause = "d.channel NOT IN (" + ", ".join(f"'{c}'" for c in AUTOMATIC_CHANNELS) + ")"
+    for f in ("sql/steps/060_score.sql", "sql/learn/010_features.sql"):
+        assert (ROOT / f).read_text(encoding="utf-8").count(clause) == 2, f   # dwell and pass-through
+
+
+
+def test_money_from_companies_by_nach_does_not_count_as_a_jump():              # D-55
+    """A salaried customer declared low (Rs 50,000 a month). A mutual fund pays out Rs 3,00,000 by NACH:
+    that is not the sudden jump a rented account shows. The same money sent by UPI from people would be."""
+    now = datetime(2026, 10, 18)
+    expected = CONFIG["profile_band_expected_monthly_credit_inr"]["low"]
+    credits = [_pay("2026-10-01 09:00:00", "EXT_EMPLOYER", "ACC_SAL", 45000, "NACH"),
+               _pay("2026-10-10 11:00:00", "EXT_MUTUAL_FUND", "ACC_SAL", 300000, "NACH"),
+               _pay("2026-10-12 18:00:00", "EXT_FRIEND", "ACC_SAL", 2000, "UPI")]
+    assert declared_ratio(credits, now, expected) == 2000 / expected
+    from_people = [{**c, "ch": "UPI"} for c in credits]
+    assert declared_ratio(from_people, now, expected) == 347000 / expected     # almost 7 times: a fraud sign
+
+
+def test_nach_credits_left_out_in_the_sql():                                   # D-55
+    from tests.score_oracle import ROOT
+    for f in ("sql/steps/060_score.sql", "sql/learn/010_features.sql"):
+        assert (ROOT / f).read_text(encoding="utf-8").count("AND t.channel <> 'NACH'") == 1, f

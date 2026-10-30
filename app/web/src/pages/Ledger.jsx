@@ -188,8 +188,8 @@ export function Audit({ caseId, officer, onChange }) {
     return (!onlyCase || e.case_id === onlyCase) && (!decidedOnly || decided[e.ref]) && byWhom(e) && (!date || day === date)
       && (!from || (hm && hm >= from)) && (!to || (hm && hm <= to)) && words.every((w) => hay(e).includes(w));
   });
-  const filtered = q || whom !== "all" || date || from || to || onlyCase || decidedOnly;
-  const clear = () => { setQ(""); setWhom("all"); setDate(""); setFrom(""); setTo(""); setOnlyCase(null); setDecidedOnly(false); };
+  const filtered = q || whom !== "all" || date || from || to || onlyCase;
+  const clear = () => { setQ(""); setWhom("all"); setDate(""); setFrom(""); setTo(""); setOnlyCase(null); };
   const decidedCount = all.filter((e) => decided[e.ref]).length;
   const caseName = onlyCase && (all.find((e) => e.case_id === onlyCase) || {});
   const log = inbox.data?.morning_log;
@@ -198,7 +198,15 @@ export function Audit({ caseId, officer, onChange }) {
       <h1 style={{ fontSize: 30 }}>Audit log</h1>
       <p style={{ fontSize: 15, color: "#44505e", marginTop: 4, marginBottom: 22 }}>Every step the system took and every decision an officer signed, in order. Nothing here can be edited.</p>
       {log && <HandoverNote log={log} />}
-      <h2 style={{ fontSize: 20, marginBottom: 10 }}>Every event</h2>
+      <div role="tablist" aria-label="Which events" style={{ display: "flex", gap: 8, borderBottom: "1px solid #d9dfe5", marginBottom: 16 }}>
+        {[[false, "Every event", all.length], [true, "Decided today", decidedCount]].map(([on, label, n]) => (
+          <button key={label} type="button" role="tab" aria-selected={decidedOnly === on} onClick={() => { setDecidedOnly(on); setShowAll(false); }}
+            style={{ font: "inherit", fontSize: 17, fontWeight: decidedOnly === on ? 700 : 600, color: decidedOnly === on ? "#17212b" : "#44505e", background: "none",
+              border: 0, borderBottom: `3px solid ${decidedOnly === on ? "#17212b" : "transparent"}`, marginBottom: -1, padding: "10px 16px", minHeight: 48, cursor: "pointer" }}>
+            {label} <span style={{ marginLeft: 6, fontWeight: 400, color: "#5b6675" }}>{n}</span>
+          </button>
+        ))}
+      </div>
       <div className="filters" role="search" aria-label="Filter the audit log">
         <label className="f-search">Search
           <input type="search" value={q} onChange={(e) => { setQ(e.target.value); setShowAll(false); }} placeholder="A name, a complaint, an amount or a reference" /></label>
@@ -213,8 +221,6 @@ export function Audit({ caseId, officer, onChange }) {
           <input type="time" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
         <label>To
           <input type="time" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-        <button type="button" className={`chip${decidedOnly ? " on" : ""}`} aria-pressed={decidedOnly} style={{ alignSelf: "flex-end", minHeight: 44 }}
-          onClick={() => { setDecidedOnly(!decidedOnly); setShowAll(false); }}>Decided today <span>{decidedCount}</span></button>
         {filtered && <button type="button" className="linkbtn" style={{ alignSelf: "center", marginTop: 20 }} onClick={clear}>Clear filters</button>}
       </div>
       {onlyCase && <p className="note" style={{ marginBottom: 10 }}>Only {caseName.label || onlyCase}{caseName.victim ? `, ${caseName.victim}` : ""}. <button type="button" className="linkbtn" onClick={() => setOnlyCase(null)}>Show every complaint</button></p>}
@@ -246,7 +252,7 @@ export function Audit({ caseId, officer, onChange }) {
                 </tr>
               );
             })}
-            {!rows.length && <tr><td colSpan={5} className="note">Nothing matches these filters.</td></tr>}
+            {!rows.length && <tr><td colSpan={5} className="note">{decidedOnly && !decidedCount ? "No officer has decided anything yet today." : "Nothing matches these filters."}</td></tr>}
           </tbody>
         </table>
       </div>

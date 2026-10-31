@@ -13,7 +13,7 @@ computed in **Exasol Personal** and every number on screen traces to the Exasol 
 
 ## Problem statement
 
-![The problem at a glance. Who: the bank nodal officer. Can't: night-time complaints wait for the desk to open. Because: every hop is traced and held by hand. If this worked: only the victim's share is held, before it is withdrawn, and honest customers keep their accounts.](docs/images/problem-at-a-glance.svg)
+![The problem at a glance. Who: the bank nodal officer. Can't: night-time complaints wait for the desk to open. Because: every hop is traced and held by hand. If this worked: only the victim's share is held, before it is withdrawn, and honest customers keep their accounts.](docs/images/problem-at-a-glance.png)
 
 > A bank nodal officer can't act on a cyber-fraud complaint within the golden hour, while the money is still in the
 > first account, because night-time complaints wait for the desk to open and every hop is then traced and held by

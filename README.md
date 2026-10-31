@@ -11,8 +11,7 @@ computed in **Exasol Personal** and every number on screen traces to the Exasol 
 
 **Demo video:** [Watch on Google Drive](https://drive.google.com/file/d/1B0AotBv9ShRvmwmEPaquk9ePxzQUFhd1/view?usp=drivesdk)
 
-**Pitch deck:** [docs/Proportionate_Holds_deck.pdf](docs/Proportionate_Holds_deck.pdf)
-
+**Pitch deck:** [docs/Proportionate_Holds_pitch_deck.pdf](docs/Proportionate_Holds_pitch_deck.pdf)
 ## Problem statement
 
 ![The problem at a glance. Who: the bank nodal officer. Can't: night-time complaints wait for the desk to open. Because: every hop is traced and held by hand. If this worked: only the victim's share is held, before it is withdrawn, and honest customers keep their accounts.](docs/images/problem-at-a-glance.png)

@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { api } from "../api.js";
 import DecisionCard, { Decided } from "../components/DecisionCard.jsx";
 import { Failed, Loading } from "../components/bits.jsx";
-import { accountName, clock, inrR, inrSigned, joinAnd, rs, shortName, victim, when } from "../format.js";
+import { accountName, clock, inrR, inrSigned, joinAnd, plural, rs, shortName, victim, when } from "../format.js";
 import { useLoad } from "../hooks.js";
 
 // The hold record for one account (design board "Hold record: C"): how the held amount was worked out, row by row
@@ -10,6 +11,43 @@ import { useLoad } from "../hooks.js";
 const n = (v) => Number(v || 0);
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const date = (d) => (d ? `${Number(String(d).slice(8, 10))} ${MONTHS[Number(String(d).slice(5, 7)) - 1]} ${String(d).slice(0, 4)}` : "");
+
+// The complaints behind this account, as ticket chips in time order: first the ones money is held for here (with
+// the amount), then the rest, five at a time behind "Show more".
+const TICKET = (
+  <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" style={{ flex: "none" }}>
+    <path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v2.5a2.5 2.5 0 0 0 0 5V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-2.5a2.5 2.5 0 0 0 0-5z" />
+    <path d="M14 5v2M14 11v2M14 17v2" />
+  </svg>
+);
+function ComplaintChips({ cases, liens, perVictim }) {
+  const [all, setAll] = useState(false);
+  const sorted = [...cases].sort((x, y) => String(x.notice.reported_at).localeCompare(String(y.notice.reported_at)));
+  const tagHere = (c) => liens.find((h) => h.case_id === c.case_id && h.hold_tag !== "NOT_LINKED")?.hold_tag;
+  const held = sorted.filter((c) => tagHere(c)), rest = sorted.filter((c) => !tagHere(c));
+  const shown = all ? rest : rest.slice(0, 5);
+  const notice = (c) => c.notice.ordering_reference ? <span className="amt">police notice {c.notice.ordering_reference}</span> : null;
+  if (!held.length && !rest.length) return null;
+  return (
+    <div className="card" style={{ flex: "1 1 560px", minWidth: 0, padding: "12px 16px" }}>
+      {held.length > 0 && <>
+        <p className="note" style={{ margin: "0 0 6px" }}>Money held here for {plural(held.length, "complaint")}</p>
+        <div className="tchips">{held.map((c) => (
+          <a key={c.case_id} className="tchip m" href={`#/case/${encodeURIComponent(c.case_id)}`}>{TICKET}{victim(tagHere(c))} · {clock(c.notice.reported_at)}
+            <span className="amt">{inrR(perVictim[tagHere(c)])} held</span>{notice(c)}</a>
+        ))}</div>
+      </>}
+      {rest.length > 0 && <>
+        <p className="note" style={{ margin: held.length ? "12px 0 6px" : "0 0 6px" }}>{held.length ? `${plural(rest.length, "other complaint")}` : plural(rest.length, "complaint")}, nothing held for them here</p>
+        <div className="tchips">{shown.map((c) => (
+          <a key={c.case_id} className="tchip" href={`#/case/${encodeURIComponent(c.case_id)}`}>{TICKET}{c.label}{notice(c)}</a>
+        ))}
+          {rest.length > 5 && <button className="linkbtn" type="button" onClick={() => setAll(!all)}>{all ? "Show fewer" : `Show ${rest.length - 5} more`}</button>}
+        </div>
+      </>}
+    </div>
+  );
+}
 
 export default function Record({ accountId, officer, onChange }) {
   const { data: r, error, loading, reload } = useLoad(() => api.record(accountId), [accountId]);
@@ -33,7 +71,7 @@ export default function Record({ accountId, officer, onChange }) {
   return (
     <main id="main" className="wrap" style={{ paddingTop: 18, paddingBottom: 40 }}>
       <nav className="note" aria-label="Breadcrumb" style={{ marginBottom: 8 }}><a href="#/holds">Holds</a> / {who}</nav>
-      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-start", gap: "16px 24px", marginBottom: 18 }}>
+      <div style={{ marginBottom: 18 }}>
         <div>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px 12px" }}>
             <h1 style={{ fontSize: 30, lineHeight: 1.2 }}>{who} · {inrR(held)} {freeze ? "frozen" : "held"}</h1>
@@ -41,17 +79,17 @@ export default function Record({ accountId, officer, onChange }) {
             {waiting.map((p) => <span key={p.proposal_id} className="pill p-wait">{kindWord[p.action_code]} waiting for you</span>)}
           </div>
           <p style={{ fontSize: 14, color: "#44505e", marginTop: 6 }}>{a.account_type ? `${a.account_type[0].toUpperCase()}${a.account_type.slice(1)} account` : "Account"} at {a.bank_name || "Bank X"}{a.opened_on ? `, opened ${date(a.opened_on)}` : ""} · <span className="id">{a.account_id}</span>{active[0] && <> · <span className="id">hold PH-H{active[0].hold_id}</span></>}</p>
-          {r.cases.map((c) => (
-            <p key={c.case_id} style={{ fontSize: 14, marginTop: 2 }}>For <a href={`#/case/${encodeURIComponent(c.case_id)}`}>{victim(tagOf(c.case_id)) || "the"}'s complaint, {clock(c.notice.reported_at)}</a>{c.notice.ordering_reference ? ` · police notice ${c.notice.ordering_reference}` : ""}</p>
-          ))}
         </div>
-        <div className="card" style={{ padding: "14px 20px", display: "flex", flexWrap: "wrap", gap: "8px 32px" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: "16px 24px", marginTop: 12 }}>
+        <ComplaintChips cases={r.cases} liens={liens} perVictim={perVictim} />
+        <div className="card" style={{ flex: "0 0 auto", marginLeft: "auto", padding: "14px 20px", display: "flex", flexWrap: "wrap", gap: "8px 32px" }}>
           <div><p className="label">Balance</p><p style={{ fontSize: 22, fontWeight: 700 }}>{inrR(balance)}</p></div>
           {Object.entries(perVictim).map(([tag, amt]) => (
             <div key={tag}><p className="label">Held, {tag === "NOT_LINKED" ? "not linked yet" : victim(tag) + "'s"}</p><p className="v" style={{ fontSize: 22, fontWeight: 700 }}>{inrR(amt)}</p></div>
           ))}
           {freeze && <div><p className="label">Frozen</p><p style={{ fontSize: 22, fontWeight: 700 }}>{inrR(freeze.amount_inr)}</p></div>}
           <div><p className="label">{who} can use</p><p style={{ fontSize: 22, fontWeight: 700 }}>{inrR(freeze ? 0 : Math.max(0, n(balance) - held))}</p></div>
+        </div>
         </div>
       </div>
 

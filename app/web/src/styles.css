@@ -74,6 +74,13 @@ table.t { width: 100%; border-collapse: collapse; font-size: 14px; }
 .chip.on { background: #17212b; border-color: #17212b; color: #fff; }
 .chip span { font-weight: 400; opacity: 0.8; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.tchips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; max-width: 860px; }
+.tchip { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; border-radius: 8px; padding: 5px 10px; border: 1px solid #d3dae2;
+  background: #fff; color: #2b3a4a; text-decoration: none; }
+.tchip:hover { border-color: #9aa6b4; }
+.tchip.m { background: #f4f0fb; border-color: #d6c9ef; color: #4a2f8f; font-weight: 700; }
+.tchip .amt { font-weight: 400; border-left: 1px solid #d3dae2; padding-left: 8px; margin-left: 2px; }
+.tchip.m .amt { color: #4a2f8f; border-color: #d6c9ef; }
 .jump a { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 14px; border-radius: 999px;
           border: 1px solid #d9dfe5; background: #fff; color: #17212b; text-decoration: none; font-weight: 600; font-size: 14px; }
 .jump a:hover { border-color: #5b6675; }

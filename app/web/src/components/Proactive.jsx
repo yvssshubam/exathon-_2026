@@ -38,6 +38,36 @@ const ALERT = {
   answered: ["The payer's complaint arrived", "p-clear"], confirmed: ["The payer says it was fraud", "p-held"],
   genuine: ["The payer says it was genuine", "p-wait"], not_needed: ["Not needed", "p-done"],
 };
+// The account's type in plain words, for the note on its side panel
+const ABOUT = {
+  PIPE_FOR_FRAUD: "Money leaves this account soon after it arrives, and much of what it receives comes from payments people have reported as fraud. That's how accounts used to pass on stolen money behave.",
+  FAST_MOVER: "Money leaves this account soon after it arrives, but little of it is linked to reported fraud yet. It could be an account just starting to pass on stolen money, or a busy genuine one, so check before you confirm.",
+};
+// The note explaining an account's type on a side panel: an icon for the behaviour, a colour for how worrying it is
+const NOTE_STYLE = {
+  PIPE_FOR_FRAUD: { bg: "#fdf0ef", border: "#efc4c0", ink: "#a3271d",
+    icon: <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01" /> },
+  FAST_MOVER: { bg: "#fff6e6", border: "#f0d29a", ink: "#9a5a00",
+    icon: <><circle cx="12" cy="13" r="8" /><path d="M12 9v4l2.5 2.5M10 2h4M12 2v3" /></> },
+  GREY_ZONE: { bg: "#f1f3f6", border: "#d6dce3", ink: "#4d5966",
+    icon: <><circle cx="12" cy="12" r="9" /><path d="M12 3v18" /><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" /></> },
+  EXPOSED_BUSINESS: { bg: "#eef4fb", border: "#c5d8ee", ink: "#2c5683",
+    icon: <path d="M3 9l1.5-5h15L21 9M3 9h18M3 9a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0M5 12v8h14v-8M10 20v-5h4v5" /> },
+};
+function TypeNote({ type, text }) {
+  const st = NOTE_STYLE[type];
+  if (!text || !st) return null;
+  return (
+    <div style={{ fontSize: 14, marginBottom: 12, padding: "10px 14px", background: st.bg, border: `1px solid ${st.border}`, borderRadius: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" style={{ flex: "none", color: st.ink }} fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{st.icon}</svg>
+        <b>{typeName(type)}</b>
+      </div>
+      <p style={{ margin: "4px 0 0 28px" }}>{text}</p>
+    </div>
+  );
+}
 const BASIS = { rbi_draft: "RBI draft: temporary debit hold", police_notice: "Under the existing police notice" };
 
 function Badge({ h }) {
@@ -127,18 +157,20 @@ export function ProactiveCard({ h, officer, onDone, position }) {
   const ref = `PH-H${h.hold_id}`;
   return (
     <article className="card dc narrowcard">
-      {position && <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}><span className="kind">{position}</span><span className="pill p-wait">Waiting</span></div>}
+      {position && <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}><span className="kind">{position}</span>
+        {!h.item_title && <span className={`pill ${actionNeeded(h)[1]}`}>{actionNeeded(h)[0]}</span>}</div>}
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "8px 16px", marginBottom: 10 }}>
         <div>
           <p style={{ fontSize: 17, fontWeight: 700 }}>{accountName(h.name)} <span className="id">{h.account_id}</span></p>
           <p className="note">{h.case_id.startsWith("REGISTRY:") ? "In the Suspect Registry" : <>Named by <a href={`#/case/${encodeURIComponent(h.case_id)}`}>{h.label}</a></>} · hold <a href={`#/record/${encodeURIComponent(h.account_id)}`}>{ref}</a></p>
         </div>
-        <span style={{ alignSelf: "flex-start" }}><span className={`pill ${h.account_pattern === "PIPE_FOR_FRAUD" ? "p-held" : "p-wait"}`}>{typeName(h.account_pattern)}</span><Badge h={h} /></span>
+        <span style={{ alignSelf: "flex-start" }}><Badge h={h} /></span>
       </div>
       <h4 style={{ fontSize: 19, marginBottom: 6 }}>{inrR(h.amount_inr)} held at {clock(h.placed_at)}, before anyone complained</h4>
       <p style={{ fontSize: 14, marginBottom: 12 }}>
         {inrR(h.amount_inr)} {h.channel ? `by ${h.channel} ` : ""}from {PAYER[h.payer_type] || "a payer"}{h.payer_bank && h.payer_type === "other_bank" ? ` (${h.payer_bank}, ending ${h.payer_ending})` : h.payer_ending ? ` (ending ${h.payer_ending})` : ""}, who had not paid {who} before. UTR <span className="mono" style={{ fontSize: 13 }}>{h.utr || "–"}</span>.
       </p>
+      <TypeNote type={h.account_pattern} text={ABOUT[h.account_pattern]} />
       <EvidenceTable rows={rows} sections={PRO_SECTIONS} statusOf={statusOf}
         score={{ pass_through: h.pass_through, fraud_exposure: h.fraud_exposure, account_pattern: h.account_pattern }} />
       <div className="facts" style={{ marginBottom: 12 }}>
@@ -209,38 +241,29 @@ function HoldRows({ list, cols, row, openId, setOpenId, title, officer, onDone, 
   );
 }
 
-function alertCell(h) {
-  const a = h.pre_alert;
-  if (!a) return h.payer_type === "flagged" ? <span className="pill p-plain">Layering</span> : <span className="note">–</span>;
-  const [label, cls] = ALERT[a.status] || [a.status, "p-plain"];
-  return <span className={`pill ${cls}`}>{label}</span>;
+// What the officer has to do with the hold, in one tag and one line
+function actionNeeded(h) {
+  const status = h.pre_alert?.status;
+  return status === "waiting_for_officer" ? ["Send the pre-alert first", "p-urgent", "The payer hasn't been asked whether they meant to pay. Send it, then confirm or release."]
+    : status === "genuine" ? ["Payer says genuine", "p-wait", "Read their answer, then confirm or release."]
+    : status === "confirmed" ? ["Ready to confirm", "p-clear", "The payer says this payment was fraud."]
+    : h.clear_case ? ["Ready to confirm", "p-clear", "Every check points to fraud and the payer hasn't said it was genuine."]
+    : ["Check before confirming", "p-wait", "Not every check clearly points to fraud. Open it to see which."];
+}
+function actionCell(h) {
+  const [label, cls, line] = actionNeeded(h);
+  return <><span className={`pill ${cls}`}>{label}</span><br /><span className="note" style={{ display: "inline-block", marginTop: 6 }}>{line}</span></>;
 }
 
 export function HeldOvernight({ data, officer, onDone, openId, setOpenId }) {
   const list = data?.held_overnight || [];
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState(null);
   const listRef = useRef(null);
   if (!list.length) return null;
   const clear = list.filter((h) => h.clear_case);
   const rows = [...list.filter((h) => !h.clear_case), ...clear];      // the ones to look at first
-  async function confirmAll() {
-    setBusy(true);
-    setNote(null);
-    try {
-      const r = await api.confirmClear({ officer, reason: "Clear case: Pipe for fraud, both scores outside the grey zone, no answer from the payer yet.", proactive_ids: clear.map((h) => h.hold_id) });
-      setNote(`${plural(r.confirmed.length, "hold")} confirmed, each recorded on its own${r.refused.length ? `; ${r.refused.length} not clear, open it to confirm` : ""}.`);
-      setOpenId(null);
-      onDone?.();
-    } catch (e) {
-      setNote(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
   const total = list.reduce((t, h) => t + n(h.amount_inr), 0);
   return (
-    <div id="g-overnight" style={{ marginTop: 12, scrollMarginTop: 110 }}>
+    <div id="g-overnight" style={{ marginTop: 26, scrollMarginTop: 110 }}>
       <section className="card" style={{ padding: "18px 20px" }} aria-labelledby="lg-overnight">
         <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "10px 16px", marginBottom: 12 }}>
           <div>
@@ -249,27 +272,16 @@ export function HeldOvernight({ data, officer, onDone, openId, setOpenId }) {
           </div>
         </div>
         <HoldRows list={rows} openId={openId} setOpenId={setOpenId} officer={officer} onDone={onDone} listRef={listRef} title="Held overnight"
-          cols={[["Account"], ["Complaint"], ["Held", true], ["Paid at"], ["Payer"], ["Type"], ["Pre-alert"]]}
+          cols={[["Account"], ["Complaint"], ["Held", true], ["Paid at"], ["Payer"], ["Action needed"]]}
           row={(h) => <>
             <td><b>{shortName(h.name)}</b>{h.with_department_head && <><br /><span className="pill p-urgent" style={{ marginTop: 6 }}>With department head</span></>}</td>
             <td><ComplaintLink caseId={h.case_id} fallback={h.label} /></td>
             <td className="r" style={{ fontWeight: 700 }}>{inrR(h.amount_inr)}</td>
             <td><span className="mono" style={{ whiteSpace: "nowrap" }}>{dayTime(h.placed_at)}</span></td>
             <td>{h.payer_type === "own_customer" ? "Our customer" : h.payer_type === "other_bank" ? (h.payer_bank || "Another bank") : "Flagged account"}</td>
-            <td>{typeName(h.account_pattern)}{h.clear_case && <><br /><span className="pill p-clear" style={{ marginTop: 6 }}>Ready to confirm</span></>}</td>
-            <td>{alertCell(h)}</td>
+            <td style={{ minWidth: 220 }}>{actionCell(h)}</td>
           </>} />
-        <p className="note" style={{ marginTop: 8 }}>A first-time payer's money into an account a victim had already named, held the minute it landed. Confirm or release each one; the holder can explain within 20 days and you decide then. Ready to confirm: Pipe for fraud, both scores outside the grey zone, no answer from the payer yet.</p>
-        {clear.length > 0 && (
-          <div className="selbar">
-            <span><b>{plural(clear.length, "hold")} ready to confirm</b> · {inrR(clear.reduce((t, h) => t + n(h.amount_inr), 0))}</span>
-            <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              {!officer && <span className="note">Sign in to confirm.</span>}
-              <button className="btn btn-p" type="button" disabled={busy || !officer || !!SNAPSHOT} onClick={confirmAll}>{busy ? "Confirming…" : `Confirm all ${clear.length}`}</button>
-            </span>
-          </div>
-        )}
-        {note && <p role="status" style={{ fontSize: 14, marginTop: 8 }}>{note}</p>}
+        <p className="note" style={{ marginTop: 8 }}>Each row is money from someone paying this account for the first time. It was held the moment it arrived because a fraud victim had already reported the account. Open each one to confirm or release the hold. The account holder then has 20 days to explain, and you make the final decision after that.</p>
       </section>
     </div>
   );
@@ -307,8 +319,8 @@ export function ProactiveQueue({ data, officer, onDone, openId, setOpenId }) {
 // the rules suggest nothing, so each is a decision of its own. Same list and side panel as the other groups.
 const reviewKey = (r) => `rev-${r.case_id}-${r.account_id}`;
 const WHY_REVIEW = {
-  GREY_ZONE: "One of its two scores is between 0.40 and 0.60, so the rules suggest nothing. You decide whether the hold stays as it is.",
-  EXPOSED_BUSINESS: "It receives fraud money but keeps its own money, so the rules never suggest a larger hold or a freeze. You decide whether the hold stays as it is.",
+  GREY_ZONE: "Some of this account's activity looks like an account passing on stolen money and some doesn't, so the rules can't tell which it is and suggest nothing. You decide whether the hold stays as it is.",
+  EXPOSED_BUSINESS: "This account receives money from payments people have reported as fraud, but keeps its own money instead of passing it on, like a genuine business with some fraudsters among its customers. The rules never suggest a larger hold or a freeze for it. You decide whether the hold stays as it is.",
 };
 
 export function ReviewCard({ r, officer, onDone, position, onComplaint }) {
@@ -317,16 +329,15 @@ export function ReviewCard({ r, officer, onDone, position, onComplaint }) {
   const rows = evidence({ action_code: "REVIEW", opened_on: r.opened_on, held_since: null }, pd, pd?.inflows, [], true);
   return (
     <article className="card dc narrowcard">
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}><span className="kind">{position}</span><span className="pill p-wait">Waiting</span></div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}><span className="kind">{position}</span><span className="pill p-wait">Keep, or change from the complaint</span></div>
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "8px 16px", marginBottom: 10 }}>
         <div>
           <p style={{ fontSize: 17, fontWeight: 700 }}>{accountName(r.holder_name || r.account_id)} <span className="id">{r.account_id}</span></p>
           <p className="note">{r.account_type ? `${r.account_type} account · ` : ""}<a href={`#/case/${encodeURIComponent(r.case_id)}`}>{r.label}</a> · <a href={`#/record/${encodeURIComponent(r.account_id)}`}>hold record</a></p>
         </div>
-        <span style={{ alignSelf: "flex-start" }}><span className={`pill ${r.account_pattern === "GREY_ZONE" ? "p-wait" : "p-plain"}`}>{typeName(r.account_pattern)}</span></span>
       </div>
       <h4 style={{ fontSize: 19, marginBottom: 6 }}>Keep the {inrR(r.held_inr)} hold on {shortName(r.holder_name || r.account_id)} as it is?</h4>
-      <p style={{ fontSize: 14, marginBottom: 12 }}>{WHY_REVIEW[r.account_pattern]}</p>
+      <TypeNote type={r.account_pattern} text={WHY_REVIEW[r.account_pattern]} />
       <EvidenceTable rows={rows} score={pd?.evidence || { pass_through: r.pass_through, fraud_exposure: r.fraud_exposure, account_pattern: r.account_pattern }} />
       {(
         <Pinned><div className="acts" style={{ flexWrap: "wrap", alignItems: "center" }}>

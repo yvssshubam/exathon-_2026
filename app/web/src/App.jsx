@@ -22,15 +22,11 @@ const CAPTION = {
   narrator: "Shows three banks at once, which no single bank's officer can see.",
 };
 
-const LATER = "2026-12-18 00:00:00";      // day 61 of the overnight holds: the draft's clocks run out
-
 function DemoBar({ page, onRan }) {
   const [busy, setBusy] = useState(null);
   const [note, setNote] = useState(null);
   const cfg = useLoad(() => api.config().catch(() => null), [note]);
   const mode = cfg.data?.proactive_hold_mode || "rbi_draft";
-  const other = mode === "rbi_draft" ? "current_sop" : "rbi_draft";
-  const MODE = { rbi_draft: "Draft mode (RBI draft)", current_sop: "Current SOP mode" };
   const view = page === "compare" ? "compare" : page === "narrator" ? "narrator" : "console";
   const manual = useShowManual();
   async function run(key, fn, say) {
@@ -57,21 +53,12 @@ function DemoBar({ page, onRan }) {
           </button>
           {page === "review" || page === "" ? (
             <span style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-              <span className="db-note" title="Proactive holds: the RBI draft's temporary debit hold, or only the room under the existing notice (today's SOP)">{MODE[mode]}</span>
-              <button className="db-act" type="button" disabled={!!busy} onClick={() => run("mode", () => api.night(MORNING, true, "pipeline", other),
-                (r) => `Switched to ${MODE[other].toLowerCase()} and reran the night to ${clock(r.until)} (${plural(r.events, "event")}, ${r.seconds} s).`)}>
-                {busy === "mode" ? "Rerunning…" : `Switch to ${MODE[other].replace(" mode", "").replace(" (RBI draft)", "")}`}</button>
               <button className="db-act" type="button" disabled={!!busy} onClick={() => run("night", () => api.night(MORNING, true, "pipeline", mode),
                 (r) => `The night ran from ${clock(r.from)} to ${clock(r.until)}: ${plural(r.events, "event")} across the three banks, in ${r.seconds} s.`)}>
                 {busy === "night" ? "Running the night…" : "Replay the night to 09:00"}</button>
               <button className="db-act" type="button" disabled={!!busy} onClick={() => run("day", () => api.night(DAY_END, false),
                 (r) => `Ran on to ${clock(r.until)}: every complaint of 18 Oct arrived and was handled (${plural(r.events, "event")}, ${r.seconds} s).`)}>
                 {busy === "day" ? "Running the rest of the day…" : "Run the rest of the day"}</button>
-              <button className="db-act" type="button" disabled={!!busy} onClick={() => run("later", () => api.night(LATER, false),
-                (r) => `Jumped ahead to ${String(r.until).slice(0, 10)}: the overnight holds' clocks ran (${plural(r.events, "event")}, ${r.seconds} s).`)}>
-                {busy === "later" ? "Jumping ahead…" : "Jump ahead 60 days"}</button>
-              <button className="db-act" type="button" disabled={!!busy} onClick={() => run("reset", () => api.reset(), () => "Reset: every complaint waits on the portal again.")}>
-                {busy === "reset" ? "Resetting…" : "Reset"}</button>
             </span>
           ) : <span>{CAPTION[view] || "Judges see this bar. Officers never do."}</span>}
         </div>

@@ -64,6 +64,16 @@ export default function Review({ officer, onChange }) {
   const total = d.waiting.length + overnight + due + review + failedRuns.length;
   // every link to a group closes the side panel first, then scrolls there
   const jump = (id, caseId = null) => { setPanelId(null); setFocus(caseId); document.getElementById(`g-${id}`)?.scrollIntoView({ behavior: "smooth" }); };
+  // the tables in urgency order: no matching payment (nothing held), held overnight (next-day check), decisions due
+  // (dated deadlines), reduce the hold, freeze, review an account; hold more, release and other decisions after them
+  const groupLinks = (ids) => groups.filter((g) => ids.includes(g.id) && g.waiting.length).map((g) => (
+    <a key={g.id} href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); jump(g.id); }}>
+      {g.jump} <b style={g.badge}>{g.waiting.length}</b></a>
+  ));
+  const groupTables = (ids) => groups.filter((g) => ids.includes(g.id) && g.items.length).map((g) => (
+    <Group key={g.id} g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById}
+      openId={panelId} setOpenId={setPanelId} />
+  ));
 
   return (
     <Complaints.Provider value={{ who, focus }}>
@@ -74,26 +84,24 @@ export default function Review({ officer, onChange }) {
             <h2 id="dec-h" style={{ fontSize: 20, marginBottom: 10 }}>Decisions for you <span style={{ color: "#5b6675", fontWeight: 400 }}>{total}</span></h2>
             <nav className="jump" aria-label="Jump to a group" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {failedRuns.length > 0 && <a href="#g-failed" onClick={(e) => { e.preventDefault(); jump("failed"); }}>Not completed <b style={{ background: "#f9e1df", color: "#7a211b" }}>{failedRuns.length}</b></a>}
+              {groupLinks(["unmatched"])}
               {overnight > 0 && <a href="#g-overnight" onClick={(e) => { e.preventDefault(); jump("overnight"); }}>Held overnight <b style={{ background: "#e3eefa", color: "#16406b" }}>{overnight}</b></a>}
-              {review > 0 && <a href="#g-review" onClick={(e) => { e.preventDefault(); jump("review"); }}>Review an account <b style={{ background: "#fbf0dc", color: "#3d2600" }}>{review}</b></a>}
-              {groups.filter((g) => g.waiting.length).map((g) => (
-                <a key={g.id} href={`#g-${g.id}`} onClick={(e) => { e.preventDefault(); jump(g.id); }}>
-                  {g.jump} <b style={g.badge}>{g.waiting.length}</b></a>
-              ))}
-              {others.length > 0 && <a href="#g-other" onClick={(e) => { e.preventDefault(); jump("other"); }}>Other decisions <b style={{ background: "#e8ecf0", color: "#44505e" }}>{others.length}</b></a>}
               {due > 0 && <a href="#g-clock" onClick={(e) => { e.preventDefault(); jump("clock"); }}>Decisions due <b style={{ background: "#fbf0dc", color: "#3d2600" }}>{due}</b></a>}
+              {groupLinks(["narrow", "freeze"])}
+              {review > 0 && <a href="#g-review" onClick={(e) => { e.preventDefault(); jump("review"); }}>Review an account <b style={{ background: "#fbf0dc", color: "#3d2600" }}>{review}</b></a>}
+              {groupLinks(["larger", "release"])}
+              {others.length > 0 && <a href="#g-other" onClick={(e) => { e.preventDefault(); jump("other"); }}>Other decisions <b style={{ background: "#e8ecf0", color: "#44505e" }}>{others.length}</b></a>}
             </nav>
           </div>
           {total === 0 && justDone.length === 0 && <p className="card" style={{ padding: "14px 18px", marginTop: 12 }}>Nothing is waiting for you.{d.done.length ? ` All ${plural(d.done.length, "complaint")} today are handled.` : " No complaints have come in yet."}</p>}
           <FailedRuns list={failedRuns} onDone={reload} openId={panelId} setOpenId={setPanelId} />
+          {groupTables(["unmatched"])}
           <HeldOvernight data={pro.data} officer={officer} onDone={reload} openId={panelId} setOpenId={setPanelId} />
-          <ReviewAccounts data={pro.data} officer={officer} onDone={reload} openId={panelId} setOpenId={setPanelId} />
-          {groups.filter((g) => g.items.length).map((g) => (
-            <Group key={g.id} g={g} d={d} officer={officer} onDone={onDone} reload={reload} decidedById={decidedById}
-              openId={panelId} setOpenId={setPanelId} />
-          ))}
-          <OtherDecisions items={others} d={d} officer={officer} onDone={onDone} openId={panelId} setOpenId={setPanelId} />
           <ProactiveQueue data={pro.data} officer={officer} onDone={reload} openId={panelId} setOpenId={setPanelId} />
+          {groupTables(["narrow", "freeze"])}
+          <ReviewAccounts data={pro.data} officer={officer} onDone={reload} openId={panelId} setOpenId={setPanelId} />
+          {groupTables(["larger", "release"])}
+          <OtherDecisions items={others} d={d} officer={officer} onDone={onDone} openId={panelId} setOpenId={setPanelId} />
         </section>
         <aside style={{ flex: "1 1 360px", minWidth: 0 }} aria-labelledby="today-h">
           <TodayList d={d} groups={groups} onJump={jump} pro={pro.data} />

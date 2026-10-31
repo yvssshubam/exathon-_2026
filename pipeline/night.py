@@ -67,6 +67,7 @@ class Night:
         self.checkers = {b: connect("checker", b) for b in BANKS}
         self.lines: list[dict] = []
         self.processed: set[tuple[str, str, str]] = set()
+        self.rescored_day: dict[str, str] = {}
         self._load_processed()
 
     def close(self) -> None:
@@ -130,6 +131,12 @@ class Night:
                 if (bank, p.kind, p.ref) not in self.processed:
                     out.append((p.ts, 2, "payment", (bank, p)))
                     break
+            if not is_desk(bank):
+                from pipeline.proactive import next_due
+
+                due = next_due(self.makers[bank], self.clock() or NIGHT_START)
+                if due and due <= until:                 # the proactive holds' clocks (D-63)
+                    out.append((due, 3, "clock", bank))
         return out
 
     def run(self, until: str = MORNING) -> dict:
@@ -138,6 +145,13 @@ class Night:
         start = self.clock() or NIGHT_START
         if not self.clock():
             self.set_clock(NIGHT_START)
+        for bank in self.banks:
+            if not is_desk(bank):
+                from pipeline.checker import Checker
+                from pipeline.proactive import sync_registry
+
+                for line in sync_registry(self.makers[bank], Checker(self.checkers[bank], bank), bank, start):
+                    self.say(start, bank, line)
         steps = 0
         logs = {}
         # the handover note for the morning desk is written as the clock passes 09:00, so it is the night as it
@@ -151,6 +165,10 @@ class Night:
                 if not is_desk(bank):
                     logs[bank] = write(self.makers[bank], bank, frm, to, self.llm)
 
+        import sys
+        import time
+
+        last, repeats = None, 0
         while True:
             cand = self.candidates(until)
             if not cand:
@@ -160,8 +178,16 @@ class Night:
                 write_logs(start, MORNING)
                 handover = False
             steps += 1
+            # the same event coming back at the same moment means nothing it did changed the state: say so at once,
+            # rather than repeating it until the 5000-event limit
+            key = (t, kind, repr(obj))
+            repeats = repeats + 1 if key == last else 0
+            last = key
+            if repeats >= 20:
+                raise RuntimeError(f"the night is stuck: the same event repeats at {t}: {kind} {obj!r}")
             if steps > 5000:
                 raise RuntimeError("the night did not settle (more than 5000 events)")
+            began = time.monotonic()
             if kind == "deliver":
                 for bank, case_id, at in portal.deliver(self.portal, t):
                     self.say(at, None, f"ticket {case_id} reaches {BANKS[bank]['name']}")
@@ -169,8 +195,13 @@ class Night:
                 self.work(obj[0], obj[1], t)
             elif kind == "notice":
                 self.notice(obj[0], obj[1], t)
+            elif kind == "clock":
+                self.clock_tick(obj, t)
             else:
                 self.payment(obj[0], obj[1])
+            took = time.monotonic() - began
+            if took > 20:                     # shown even in quiet runs (the tests), so a slow step names itself
+                print(f"[night] slow event at {t}: {kind} {obj!r} took {took:.0f}s", file=sys.stderr, flush=True)
             if t > (self.clock() or NIGHT_START):
                 self.set_clock(t)
         for bank in self.banks:
@@ -179,6 +210,7 @@ class Night:
 
                 for line in Watch(self.makers[bank], self.checkers[bank], bank).tick(until):
                     self.say(until, bank, line)
+                self.clock_tick(bank, until)
         self.set_clock(max(until, self.clock() or until))
         if handover:
             write_logs(start, MORNING)
@@ -187,6 +219,26 @@ class Night:
         return {"from": start, "until": until, "events": steps, "lines": self.lines, "morning": logs}
 
     # ------------------------------------------------------------ handlers
+    def clock_tick(self, bank: str, at: str) -> None:
+        """The proactive holds' clocks and the simulated answers that arrived (explanations, payers, police)."""
+        from pipeline.checker import Checker
+
+        for line in Checker(self.checkers[bank], bank).sweep(at):
+            self.say(at, bank, line)
+
+    def daily(self, bank: str, at: str) -> None:
+        """Once a day, before the day's first payment: every watched account scored again (D-57)."""
+        day = at[:10]
+        if self.rescored_day.get(bank) == day or is_desk(bank):
+            return
+        self.rescored_day[bank] = day
+        from pipeline.checker import Checker
+        from pipeline.proactive import daily_rescore
+
+        n = daily_rescore(self.makers[bank], Checker(self.checkers[bank], bank), bank, f"{day} 00:00:00")
+        if n:
+            self.say(f"{day} 00:00:00", bank, f"daily rescoring: {n} watched accounts scored again")
+
     def notice(self, bank: str, notice_id: str, at: str) -> None:
         """A police notice in the bank's e-mail: the agent reads it into a ticket, which is then worked as any other."""
         from pipeline.notices import register
@@ -259,6 +311,8 @@ class Night:
         self.processed.add((bank, p.kind, p.ref))
         if p.kind == "TXN" and self.refused_at_sender(bank, p):
             return
+        if p.ts[:10] > NIGHT_START[:10]:
+            self.daily(bank, p.ts)                        # a new simulated day: rescore the watch first
         attempt = core.apply(self.admin, bank, p)
         desk = is_desk(bank)
         w = None if desk else Watch(self.makers[bank], self.checkers[bank], bank)
@@ -282,8 +336,9 @@ class Night:
 
 
 def run_night(until: str = MORNING, mode: str = "pipeline", reset: bool = True, banks: list[str] | None = None,
-              quiet: bool = False, amlworld: bool = True) -> dict:
-    """Reset (optional) and run the night to `until`. The console's Replay button calls this."""
+              quiet: bool = False, amlworld: bool = True, hold_mode: str | None = None) -> dict:
+    """Reset (optional) and run the night to `until`. The console's Replay button calls this. hold_mode: rbi_draft or
+    current_sop for the proactive holds (D-62); only takes effect with a reset."""
     from pipeline.db import connect
 
     if reset:
@@ -291,7 +346,7 @@ def run_night(until: str = MORNING, mode: str = "pipeline", reset: bool = True, 
 
         conn = connect()
         try:
-            reload(conn, amlworld=amlworld)
+            reload(conn, amlworld=amlworld, mode=hold_mode)
         finally:
             conn.close()
     night = Night(mode, banks=banks, quiet=quiet)
@@ -308,12 +363,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-reset", action="store_true", help="continue from where the clock stopped")
     ap.add_argument("--bank", action="append", help="only these banks (repeatable), e.g. --bank BANK_Z")
     ap.add_argument("--no-amlworld", action="store_true", help="on reset, leave the AMLworld background out")
+    ap.add_argument("--hold-mode", choices=["rbi_draft", "current_sop"],
+                    help="proactive holds under the RBI draft or today's SOP (default: config/rules.yaml)")
     args = ap.parse_args(argv)
     try:
         datetime.strptime(args.until, FMT)
     except ValueError:
         ap.error('--until must look like "2026-10-18 09:00:00"')
-    r = run_night(args.until, args.mode, not args.no_reset, args.bank, amlworld=not args.no_amlworld)
+    r = run_night(args.until, args.mode, not args.no_reset, args.bank, amlworld=not args.no_amlworld,
+                  hold_mode=args.hold_mode)
     print(f"\nran {r['events']} events from {r['from']} to {r['until']}")
     for bank, log in r["morning"].items():
         print(f"\nMorning log, {BANKS[bank]['name']} ({log['written_by']}):\n{log['text']}")

@@ -63,9 +63,9 @@ lab: ## AMLworld trace and scoring tests in PH_LAB (needs `make data`); writes d
 bench: ## Scale benchmark: a burst of tickets against AMLworld in PH_BENCH_* (TICKETS=..., WORKERS=...)
 	$(PY) -m pipeline.bench --tickets $(or $(TICKETS),100) --workers $(or $(WORKERS),3)
 
-learn: ## Train the learned signal on AMLworld (needs `make data`), then reload the banks with it
-	$(PY) -m pipeline.learned
-	$(PY) -m pipeline.load_cases --verify
+learn: ## Propose new scoring weights, trained in Exasol on AMLworld (needs `make data`), and run the gate (D-58)
+	$(PY) -m pipeline.weights train
+	$(PY) -m pipeline.weights check
 
 night: ## Reset, then run the demo night across the three banks to 09:00 (UNTIL=..., MODE=llm)
 	$(PY) -m pipeline.night --until "$(UNTIL)" --mode $(or $(MODE),pipeline)

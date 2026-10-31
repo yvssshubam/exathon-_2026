@@ -53,5 +53,5 @@ def test_a_freeze_says_why_even_when_the_tries_were_in_an_earlier_period():
 
     f = {"attempts": [], "tries": {"ACC_B": 1}, "links": {"ACC_M13": 3.0}}
     assert freeze_why(f, "ACC_B") == ", after 1 try to move held money."
-    assert freeze_why(f, "ACC_M13") == ", money from 3 fraud complaints in 7 days."
+    assert freeze_why(f, "ACC_M13") == ": fraud money leaves it faster than its other money, in 3 fraud cases."
     assert freeze_why(f, "ACC_Q") == "."

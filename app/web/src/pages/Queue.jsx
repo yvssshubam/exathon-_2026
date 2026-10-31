@@ -55,7 +55,6 @@ const FILTERS = [
   ["all", "All", () => true],
   ["waiting", "Decision waiting", (t) => n(t.waiting) > 0],
   ["none", "Nothing held", (t) => !n(t.held_inr) && t.ticket_status !== "QUEUED"],
-  ["night", "After office hours", (t) => t.after_hours],
   ["done", "Done", (t) => !n(t.waiting) && t.ticket_status === "DONE" && !["FAILED", "CHECK_FAILED"].includes(t.run_status)],
 ];
 
@@ -127,7 +126,7 @@ export default function Queue({ onChange }) {
               const [word, cls] = status(t);
               return (
                 <tr key={t.case_id}>
-                  <td><a className="mono" href={`#/case/${encodeURIComponent(t.case_id)}`} style={{ fontWeight: 600, fontSize: 15 }}>{clock(t.received_at)}</a>{t.after_hours && <><br /><span className="pill p-night">After hours</span></>}</td>
+                  <td><a className="mono" href={`#/case/${encodeURIComponent(t.case_id)}`} style={{ fontWeight: 600, fontSize: 15 }}>{clock(t.received_at)}</a></td>
                   <td><b>{victim(t.victim_tag)}</b>{t.from_bank && <><br /><span className="note">onward from {t.from_bank}</span></>}</td>
                   <td className="r">{inrR(t.amount_inr)}</td>
                   <td style={{ maxWidth: 320 }}>{notice(t)}</td>

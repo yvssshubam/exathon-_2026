@@ -20,7 +20,11 @@ legal_basis:
   trail: "Trail update to CFCFRMS: onward transfers, exits and KYC (SOP 6.1(k), 9.1(i))"
   release: "Lifting a hold needs approval (Department Head); a hold with no police direction is reviewed, not kept by default"
   send_back: "Notice that does not match a transaction: returned for correction, nothing held (Rajasthan HC: clarify unclear notices)"
-  pre_alert: "Information to CFCFRMS for the police and the payer's bank (SOP 6.1(k)): the payment is already held under the existing notice; nothing more is held on the alert"
+  pre_alert: "Information to CFCFRMS for the police and the payer's bank (SOP 6.1(k)): the payment is already held; nothing more is held on the alert"
+  larger: "A larger lien, up to the fraud-linked money received in 90 days, never above the balance (S.168 r/w S.94 BNSS; freeze ladder, Medium)"
+  rbi_draft: "Temporary debit hold on a suspicious transaction of Rs 1,000 or more flagged by the bank's own monitoring (RBI draft KYC Amendment Directions, 11 Sep 2026)"
+  police_notice: "Held under the existing police notice on the account (MHA SOP for NCRP-CFCFRMS; D-47)"
+  referral: "Referral of an unresolved temporary debit hold to the police through NCRP-CFCFRMS (RBI draft KYC Amendment Directions, 11 Sep 2026)"
 
 # Automatic: the bank cannot refuse these, or they move no money, so the agent does them the moment the ticket lands.
 # Filings are filed, never left as drafts: a draft onward entry sitting until 9 a.m. stalls the next bank's ticket.
@@ -33,7 +37,8 @@ automatic:
   SEND_BACK: "The ticket does not match a transaction: return it for correction, naming only the fields that differ"
   LINK_DUPLICATE: "The same transaction reached the bank twice: link the tickets, place no second hold"
   RECORD_SPLIT: "Several victims' money in one account: record the split for the refund stage (moves no money)"
-  WATCH_HOLD: "New money on a mule-like watched account: hold it up to the reported amount, tagged not linked to a reported victim yet"
+  WATCH_HOLD: "Retired by D-62 (kept so old proposals stay readable): new money is now held only as a PROACTIVE_HOLD"
+  PROACTIVE_HOLD: "New money from a first-time payer into an eligible account (Layer 1 or Suspect Registry, typed Pipe for fraud or Fast mover) that passed the payment checks: hold that payment, never above its own amount or the balance (D-60 to D-62)"
   WATCH_ADD: "Add an account to the watch (a failed transfer named it), with no hold"
 
 # The officer's five decisions. The agent prepares the proposal, the reasons and the case against; nothing changes
@@ -43,22 +48,57 @@ officer:
   PROPOSE_FULL_FREEZE: "Mule-like account whose own behaviour shows the pattern courts accept: propose a whole-account freeze (widen), with the reasons written down"
   UNMATCHED_NOTICE: "The ticket matches no transaction exactly but a near match exists on the named account: decide what to do with it"
   PROPOSE_RELEASE: "A hold with no police direction for 75 days: decide whether to release it"
-  PROPOSE_PRE_ALERT: "A new sender paid an account already held as mule-like: send a pre-alert that the payer may be a victim who has not reported yet (D-53)"
+  PROPOSE_PRE_ALERT: "Retired by D-64 (kept so old proposals stay readable): pre-alerts now follow a proactive hold"
+  PROPOSE_LARGER_HOLD: "The freeze ladder at Medium: fraud money leaves this account faster than its other money, in 2 to under 3 fraud cases. Hold up to the fraud-linked money of 90 days, never above the balance"
 
 # When a full freeze may be proposed (Rajasthan HC: a deliberately operated account, or repeated credits followed by
 # onward transfers). Never on a nodal, pool or escrow account; never placed without the officer.
 full_freeze_evidence:
-  complaint_links_min: 3                 # first pass: band MULE and money from 3+ fraud tickets in 7 days
-  watch_cash_out_channels: [ATM, CASH, CRYPTO]   # watch: a mule-like account tried to cash out and the hold refused it
-  watch_bands: [MULE, REVIEW]            # what counts as mule-like at the first pass
+  # first pass: the freeze ladder (config/scoring.yaml freeze_ladder): Strong at 3 or more fraud cases, only once
+  # fraud money is seen leaving faster than the account's other money (D-59)
+  watch_cash_out_channels: [ATM, CASH, CRYPTO]   # watch: a refused withdrawal on a Pipe for fraud or Fast mover
+  refused_withdrawal_types: [PIPE_FOR_FRAUD, FAST_MOVER]   # goes straight to Strong
 
 # The watch (pipeline/watch.py). A query a minute is enough: the hold already protects the money, so a refused
 # attempt is evidence for a morning decision, not an emergency.
 watch:
   release_review_days: 75                # no police direction by then: one release flag to the officer
   business_holder_types: [merchant, business]   # a refused transfer to these is noted, never labelled a next mule
-  pre_alert_min_inr: 1000                # a new sender's payment this size or more is flagged (the RBI draft's Rs 1,000)
-  pre_alert_new_sender_days: 90          # "new": the payer has not paid the account in this many days before the hold
+
+# What each account type may trigger on top of the mandatory hold, which every type gets (D-57). The score can stop a
+# hold, never start one: it only ever makes the bank hold less than an eligible account would otherwise get.
+account_types:
+  PIPE_FOR_FRAUD:    {proactive: true,  shrink: never,   freeze: ladder}
+  FAST_MOVER:        {proactive: true,  shrink: "no",    freeze: refused_withdrawal}
+  EXPOSED_BUSINESS:  {proactive: false, shrink: officer, freeze: ladder}
+  ORDINARY_CUSTOMER: {proactive: false, shrink: "yes",   freeze: never}
+  GREY_ZONE:         {proactive: false, shrink: officer, freeze: officer}
+
+# Proactive holds (D-60 to D-64). Once a victim's ticket names an account at this bank, new money from a stranger into
+# it is held the moment it lands, and someone who can reach the payer is told.
+proactive:
+  proactive_hold_mode: rbi_draft         # rbi_draft (the RBI draft of 11 Sep 2026) or current_sop (today's SOP, D-47)
+  eligible_types: [PIPE_FOR_FRAUD, FAST_MOVER]
+  never_types: [nodal, pool, escrow]     # never an automatic hold on new money; the officer decides
+  # the payment checks on arrival (D-61): all required
+  min_amount: 1000                       # Rs 1,000 or more, the draft's threshold
+  new_payer_days: 90                     # the payer has not paid this account in the previous 90 days
+  skip_nach_credits: true                # NACH and UPI AutoPay credits (salary, pension, refunds, dividends) pass
+  # a Fast mover is linked to one fraud case so far: one of these must also hold
+  fast_mover_size_percentile: 90         # larger than 90% of the account's credits in the last 90 days
+  fast_mover_recent_hours: 24            # within 24 hours of the last victim payment into the account
+  # the draft's clocks (D-63), calendar days from the hold
+  explanation_days: 20
+  decide_days: 30
+  decide_after_explanation_days: 10
+  police_reply_days: 30
+  must_decide_day: 50
+  limit_days: 60
+  next_day_check_by: "18:00"             # the next-day check is due by 18:00 on the next working day
+  escalate_to: "Department Head"
+  holder_contact: "Nodal Officer, Bank X, nodal.officer@bank-x.example (simulated)"
+  bank_holidays:                         # with Sundays, not working days (simulated calendar)
+    - {date: "2026-11-09", name: "Deepavali (simulated holiday)"}
 
 # Never, whoever asks: the checker refuses these.
 forbidden:

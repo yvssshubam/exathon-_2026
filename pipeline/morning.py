@@ -94,12 +94,21 @@ def facts(conn, bank: str, period_from: str, period_to: str) -> dict:
     tries = dict(conn.execute("SELECT account_id, COUNT(*) FROM WATCH_EVENT WHERE event_kind IN ('CASHOUT_BLOCKED', "
                               "'TRANSFER_BLOCKED') AND event_at <= TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS') "
                               "GROUP BY account_id", p).fetchall())
-    links = dict(conn.execute("SELECT ca.account_id, MAX(ca.complaint_links) FROM CASE_ACCOUNT ca "
-                              "JOIN CASE_ACTION a ON a.case_id = ca.case_id AND a.account_id = ca.account_id "
-                              "WHERE a.action_code = 'PROPOSE_FULL_FREEZE' GROUP BY ca.account_id").fetchall())
+    links = dict(conn.execute("SELECT s.account_id, MAX(s.fraud_case_count) FROM ACCOUNT_SCORE s "
+                              "JOIN CASE_ACTION a ON a.case_id = s.case_id AND a.account_id = s.account_id "
+                              "WHERE a.action_code = 'PROPOSE_FULL_FREEZE' GROUP BY s.account_id").fetchall())
+    # proactive holds (D-60 to D-64): placed in the period, and every one still waiting for its next-day check
+    proactive = conn.execute(f"SELECT h.hold_id, h.account_id, h.amount_inr, h.placed_at, h.payer_type, "
+                             f"h.review_state, p.alert_status FROM HOLD_LEDGER h LEFT JOIN PRE_ALERT p "
+                             f"ON p.hold_id = h.hold_id WHERE h.action_code = 'PROACTIVE_HOLD' "
+                             f"AND h.placed_at {window} ORDER BY h.placed_at, h.hold_id", p).fetchall()
+    to_check = conn.execute("SELECT COUNT(*), SUM(amount_inr) FROM HOLD_LEDGER WHERE action_code = 'PROACTIVE_HOLD' "
+                            "AND hold_status = 'ACTIVE' AND review_state = 'NEXT_DAY_CHECK'").fetchone()
+    to_send = conn.execute("SELECT COUNT(*) FROM PRE_ALERT WHERE alert_status = 'waiting_for_officer'").fetchval()
 
     return {"names": names, "labels": ticket_labels(conn), "tickets": tickets, "holds": holds, "filings": filings,
             "stories": stories, "attempts": attempts, "tries": tries, "links": links,
+            "proactive": proactive, "to_check": to_check, "to_send": int(to_send or 0),
             "watch": watch,
             "splits": splits, "refused": refused, "failed": failed, "waiting": waiting}
 
@@ -111,9 +120,10 @@ def freeze_why(f: dict, acc: str) -> str:
         1 for _w, a, k, *_ in f.get("attempts", []) if a == acc and k != "RECIPIENT_WATCHED")
     if tries:
         return f", after {tries} tr{'y' if tries == 1 else 'ies'} to move held money."
-    links = int(float((f.get("links") or {}).get(acc) or 0))
+    links = float((f.get("links") or {}).get(acc) or 0)
     if links > 1:
-        return f", money from {links} fraud complaints in 7 days."
+        cases = int(links) if links == int(links) else links
+        return f": fraud money leaves it faster than its other money, in {cases} fraud cases."
     return "."
 
 
@@ -165,12 +175,11 @@ def template(f: dict, bank_name: str, period_to: str) -> str:
         if st["caught"]:
             parts.append(f"Already held: it landed in {n.get(st['caught'][1], st['caught'][1])} at "
                          f"{at(st['caught'][0])}, while that account was watched.")
-            if st.get("flagged_at"):
-                from pipeline.prealert import duration
-                from pipeline.prealert import minutes as gap
+            from pipeline.prealert import duration
+            from pipeline.prealert import minutes as gap
 
-                parts.append(f"The watch had flagged the payer as a likely unreported victim "
-                             f"{duration(max(0, gap(st['flagged_at'], st['received_at'])))} before the complaint.")
+            parts.append(f"It was held {duration(max(0, gap(st['caught'][0], st['received_at'])))} before the "
+                         f"complaint.")
         elif held:
             total = sum((amt for _, amt in held), Decimal(0))
             parts.append(f"{rupees(total)} held here in {_names([a for a, _ in held], n)}.")
@@ -202,14 +211,32 @@ def template(f: dict, bank_name: str, period_to: str) -> str:
         else:                               # the watched account is the event's own; the payer is its counterparty
             payer = n.get(to, to) if to else "a held account"
             lines.append(f"- {who} is now watched, after {payer} tried to pay it at {at(w)}.")
+    words = {"flagged": "from an account itself flagged: recorded as layering",
+             "own_customer": "from our own customer: a fraud-team call", "other_bank": "from another bank's customer"}
+    alert_words = {"sent": "pre-alert sent", "waiting_for_officer": "pre-alert waiting for you", "answered":
+                   "the payer's complaint has since linked to it", "confirmed": "the payer says it was fraud",
+                   "genuine": "the payer says it was genuine", "not_needed": "not needed"}
+    if f.get("proactive"):
+        total = sum((_d(amt) for _h, _a, amt, *_ in f["proactive"]), Decimal(0))
+        lines.append(f"## Held before anyone complained: {rupees(total)}")
+        for _hid, acc, amt, placed, payer, _state, status in f["proactive"]:
+            lines.append(f"- {n.get(acc, acc)}: {rupees(amt)} at {at(placed)}, {words.get(payer, payer)}"
+                         + (f"; {alert_words.get(status, status)}." if status else "."))
     # a refused duplicate (the same proposal already waiting) is the checker doing its job, not news for the desk
     refused = list(dict.fromkeys((acc, note) for _case, _code, acc, note in f["refused"]
                                  if "already waiting" not in (note or "")))
     if refused:
         lines.append("## Needs a look")
         lines += [f"- The checker refused a step on {n.get(acc, acc)}: {note}" for acc, note in refused]
-    if f["waiting"]:
+    checks, held_check = (f.get("to_check") or (0, 0))
+    if f["waiting"] or int(checks or 0) or f.get("to_send"):
         lines.append("## Waiting for the morning desk")
+        if int(checks or 0):
+            lines.append(f"- Held overnight: confirm or release {int(checks)} hold{'s' if int(checks) != 1 else ''} "
+                         f"({rupees(held_check)}) placed before anyone complained.")
+        if f.get("to_send"):
+            lines.append(f"- {f['to_send']} pre-alert{'s' if f['to_send'] != 1 else ''} to send with "
+                         f"{'its' if f['to_send'] == 1 else 'their'} hold.")
         for _pid, case, acc, code, amount in f["waiting"]:
             who = n.get(acc, acc)
             story = next((st for st in stories if st["case_id"] == case), None)

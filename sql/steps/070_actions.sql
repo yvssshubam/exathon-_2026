@@ -1,7 +1,7 @@
 -- 070_actions.sql — the rules engine: what the facts allow for each account the money reached, and whose call it is.
 -- Runs inside the bank's schema, once per case, after 060_score.sql. pipeline/steps.py fills the parameters from
 -- config/rules.yaml:
---   case_id, own_bank_id, basis_hold, basis_narrow, basis_freeze, basis_trail, freeze_links_min (number)
+--   case_id, own_bank_id, basis_hold, basis_narrow, basis_larger, basis_freeze, basis_trail
 --
 -- Allowing is not doing: this step writes what is allowed; the maker proposes it and the checker (another database
 -- user) carries out the automatic part. Nothing here touches a hold.
@@ -19,19 +19,27 @@
 --      otherwise                                 -> MANDATORY_HOLD of the trail amount, never above the balance
 --                                                   (less what other tickets already hold there) or the amount the
 --                                                   ticket reports
--- 3. CASE_ACTION, officer rows (only proposed; nothing changes until an officer approves):
---      PROPOSE_NARROW      held more than the victims' money, and the evidence reads honest or borderline
---                          (or the account is nodal, pool or escrow): narrow the lien to the victims' money
---      PROPOSE_FULL_FREEZE MULE evidence and money from freeze_links_min+ tickets in 7 days (repeated credits).
---                          The watch can propose one later, when a mule-like account tries to cash out.
--- There is deliberately no automatic full freeze, and no other judgment call: the officer decides four things only.
+-- 3. CASE_ACTION, officer rows (only proposed; nothing changes until an officer approves). What each account type
+--    may trigger (config/rules.yaml account_types; D-57, D-59). One account type, one meaning: the same account can
+--    never get both a shrink suggestion and a freeze suggestion.
+--      PROPOSE_NARROW      held more than the victims' money, and the account is an Ordinary customer (or nodal,
+--                          pool or escrow): shrink the lien to the victims' money. Exposed business and Grey zone:
+--                          no automatic suggestion, the officer reviews.
+--      PROPOSE_LARGER_HOLD the freeze ladder at Medium (fraud money leaves fast, 2 to under 3 fraud cases), on a Pipe
+--                          for fraud or an Exposed business: hold up to the fraud-linked money of 90 days, never
+--                          above the balance
+--      PROPOSE_FULL_FREEZE the ladder at Strong (3 or more cases), on a Pipe for fraud or an Exposed business, never
+--                          nodal, pool or escrow. The watch proposes one later when a Pipe for fraud or Fast mover
+--                          tries to cash out (a refused withdrawal goes straight to Strong).
+--    The ladder at Weak (one case) is shown as information: each fraud-linked payment is held as it arrives.
+-- There is deliberately no automatic full freeze: every step is a suggestion, and the officer approves or rejects it.
 
 DELETE FROM CASE_ACCOUNT WHERE case_id = {case_id} AND viewing_bank_id = {own_bank_id};
 
 INSERT INTO CASE_ACCOUNT (case_id, viewing_bank_id, account_id, bank_id, hop, is_exit, is_own_bank,
                           paid_by_own_bank, never_full, trail_amount_inr, reported_inr, victim_amount_inr,
-                          other_victims_inr, balance_now_inr, hold_amount_inr, onward_share_inr, band, score,
-                          pass_through, cash_exits, complaint_links, stmt_id)
+                          other_victims_inr, balance_now_inr, hold_amount_inr, onward_share_inr, account_pattern,
+                          pass_through_score, exposure_score, ladder_step, fraud_linked_inr, snapshot_id, stmt_id)
 SELECT {case_id},
        {own_bank_id},
        e.account_id,
@@ -52,11 +60,12 @@ SELECT {case_id},
                        GREATEST(COALESCE(att.balance_now_inr, 0) - COALESCE(oh.held_inr, 0), 0),
                        COALESCE(cp.amount_inr, e.trail_amount)) END,
        COALESCE(rf.victim_share, 0),
-       sc.band,
-       sc.score,
-       sg.pass_through,
-       sg.cash_exits,
-       sg.complaint_links,
+       sc.account_pattern,
+       sc.pass_through,
+       sc.fraud_exposure,
+       sc.ladder_step,
+       sc.fraud_linked_inr,
+       sc.snapshot_id,
        CURRENT_STATEMENT
 FROM (
     SELECT te.to_account                                                              AS account_id,
@@ -88,22 +97,13 @@ LEFT JOIN (
     FROM REFERRAL_OUT
     WHERE case_id = {case_id} AND from_bank_id = {own_bank_id}
     GROUP BY account_id
-) rf ON rf.account_id = e.account_id
-LEFT JOIN (
-    SELECT account_id,
-           MAX(CASE WHEN signal_name = 'pass_through_ratio'          THEN signal_value END) AS pass_through,
-           MAX(CASE WHEN signal_name = 'cash_or_crypto_exits'        THEN signal_value END) AS cash_exits,
-           MAX(CASE WHEN signal_name = 'complaint_linked_credits_7d' THEN signal_value END) AS complaint_links
-    FROM ACCOUNT_SIGNALS
-    WHERE case_id = {case_id}
-    GROUP BY account_id
-) sg ON sg.account_id = e.account_id;
+) rf ON rf.account_id = e.account_id;
 
 DELETE FROM CASE_ACTION WHERE case_id = {case_id} AND viewing_bank_id = {own_bank_id};
 
 INSERT INTO CASE_ACTION (case_id, viewing_bank_id, account_id, bank_id, hop, action_code, act_mode, amount_inr,
                          current_hold_inr, victim_amount_inr, other_victims_inr, balance_now_inr, trail_amount_inr,
-                         band, score, reason_code, legal_basis, action_status, stmt_id)
+                         account_pattern, snapshot_id, reason_code, legal_basis, action_status, stmt_id)
 SELECT {case_id},
        {own_bank_id},
        r.account_id,
@@ -122,8 +122,8 @@ SELECT {case_id},
        r.other_victims_inr,
        r.balance_now_inr,
        r.trail_amount_inr,
-       r.band,
-       r.score,
+       r.account_pattern,
+       r.snapshot_id,
        r.reason_code,
        CASE WHEN r.action_code IN ('MANDATORY_HOLD', 'HOLD_MARKER') THEN {basis_hold}
             WHEN r.action_code IN ('RECORD_EXIT', 'ONWARD_ENTRY') THEN {basis_trail}
@@ -157,30 +157,43 @@ FROM (
 
 INSERT INTO CASE_ACTION (case_id, viewing_bank_id, account_id, bank_id, hop, action_code, act_mode, amount_inr,
                          current_hold_inr, victim_amount_inr, other_victims_inr, balance_now_inr, trail_amount_inr,
-                         band, score, reason_code, legal_basis, action_status, stmt_id)
+                         account_pattern, snapshot_id, reason_code, legal_basis, action_status, stmt_id)
 SELECT {case_id}, {own_bank_id}, p.account_id, p.bank_id, p.hop, p.action_code, 'OFFICER', p.amount_inr,
        p.hold_amount_inr, p.victim_amount_inr, p.other_victims_inr, p.balance_now_inr, p.trail_amount_inr,
-       p.band, p.score, p.reason_code, p.legal_basis, 'PROPOSED', CURRENT_STATEMENT
+       p.account_pattern, p.snapshot_id, p.reason_code, p.legal_basis, 'PROPOSED', CURRENT_STATEMENT
 FROM (
     SELECT ca.*, 'PROPOSE_NARROW' AS action_code,
            ca.victim_amount_inr + ca.other_victims_inr AS amount_inr,
-           CASE WHEN ca.never_full THEN 'NODAL_POOL_ESCROW' ELSE 'LIKELY_HONEST_RECEIVER' END AS reason_code,
+           CASE WHEN ca.never_full THEN 'NODAL_POOL_ESCROW' ELSE 'ORDINARY_CUSTOMER' END AS reason_code,
            {basis_narrow} AS legal_basis
     FROM CASE_ACCOUNT ca
     WHERE ca.case_id = {case_id} AND ca.viewing_bank_id = {own_bank_id}
       AND ca.is_own_bank AND NOT ca.is_exit
       AND ca.hold_amount_inr > 0
       AND ca.victim_amount_inr + ca.other_victims_inr < ca.hold_amount_inr
-      AND (ca.band IN ('HONEST', 'REVIEW') OR ca.never_full)
+      AND (ca.account_pattern = 'ORDINARY_CUSTOMER' OR ca.never_full)
+
+    UNION ALL
+    SELECT ca.*, 'PROPOSE_LARGER_HOLD',
+           LEAST(ca.fraud_linked_inr, ca.balance_now_inr),
+           'LADDER_MEDIUM',
+           {basis_larger}
+    FROM CASE_ACCOUNT ca
+    WHERE ca.case_id = {case_id} AND ca.viewing_bank_id = {own_bank_id}
+      AND ca.is_own_bank AND NOT ca.is_exit
+      AND ca.account_pattern IN ('PIPE_FOR_FRAUD', 'EXPOSED_BUSINESS')
+      AND ca.ladder_step = 'MEDIUM'
+      AND LEAST(ca.fraud_linked_inr, ca.balance_now_inr) > ca.hold_amount_inr
+      AND ca.victim_amount_inr + ca.other_victims_inr >= ca.hold_amount_inr
 
     UNION ALL
     SELECT ca.*, 'PROPOSE_FULL_FREEZE',
            ca.balance_now_inr,
-           'REPEATED_COMPLAINTS',
+           'LADDER_STRONG',
            {basis_freeze}
     FROM CASE_ACCOUNT ca
     WHERE ca.case_id = {case_id} AND ca.viewing_bank_id = {own_bank_id}
       AND ca.is_own_bank AND NOT ca.is_exit AND NOT ca.never_full
-      AND ca.band = 'MULE'
-      AND ca.complaint_links >= {freeze_links_min!d}
+      AND ca.account_pattern IN ('PIPE_FOR_FRAUD', 'EXPOSED_BUSINESS')
+      AND ca.ladder_step = 'STRONG'
 ) p;

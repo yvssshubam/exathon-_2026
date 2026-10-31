@@ -1,92 +1,134 @@
-# Mule-or-honest scoring (requirements section 9, step 3). Weights are hand-set for the demo and NOT
-# validated on real data; say so in the README and the deck. An ML model may add one signal, never replace these
-# (learned_signal below).
+# Account scoring v2 (docs/DECISIONS.md D-57 to D-59). The score answers one question for the bank: how much should we
+# hold on this account, and can we defend it? It never says the holder is a criminal.
 #
-# Each signal is computed in SQL (sql/steps/060_score.sql) over the 90 days before the hold time and turned into
-# a mule-likeness m in [0, 1] by straight-line interpolation between `honest_at` (m = 0) and `mule_at` (m = 1),
-# clamped. score = sum(weight * m) / sum(weight). Each signal's contribution = weight * m / sum(weight).
-# Definitions of each signal: docs/DECISIONS.md D-22.
+# Two scores per account, each the weighted average of its signals' m values:
+#   pass_through     does money run straight through the account?   (P1..P5)
+#   fraud_exposure   does the account keep getting fraud money?      (E1, E2, E3, E5)
+# Each signal is computed in SQL (sql/steps/060_score.sql) over the 90 days before the decision, from this bank's own
+# transactions, and turned into m in [0, 1]: a straight line from `low_at` (m = 0) to `high_at` (m = 1), clamped.
+# A signal that cannot be measured counts as m = 0, so a gap can only send a case to the officer, never cause a hold.
 #
-# Sentences: the mule sentence is used when m >= 0.5, the honest one otherwise. Placeholders filled in SQL:
-#   {v} value rounded to a whole number   {v1} one decimal   {pct} value x 100, whole number   {years} value / 365
+# The weights are learned (D-58): `start_weight` is version 0; the live weights are read from the SCORING_WEIGHTS
+# table, which `python -m pipeline.weights` fills with a new version only after the gate and a person's approval.
+# What each signal measures, its low and high points, the cut-offs, E4 and the ladder stay set by policy, here.
+#
+# Sentences: `high_sentence` is used when m >= 0.5, `low_sentence` otherwise. Placeholders filled in SQL:
+#   {v} value rounded to a whole number   {v1} one decimal   {pct} value x 100, whole number
+# The facts never say "mule", "criminal" or "fraudster": the type names a pattern of money, never the holder.
 
+version: 2
 window_days: 90
 
-bands:                    # score >= mule -> MULE; >= review -> REVIEW; else HONEST
-  mule: 0.70
-  review: 0.40
+cutoffs:
+  high_at: 0.60          # a score at or above this is high
+  low_below: 0.40        # a score below this is low; anything in between is the grey zone (the officer decides)
 
-signals:
-  account_age_days:
-    weight: 0.15
-    honest_at: 365
-    mule_at: 90
-    mule_sentence: "The account was opened only {v} days ago."
-    honest_sentence: "The account is {years} years old."
-  median_dwell_minutes:
-    weight: 0.20
-    honest_at: 360           # 6 hours: shops sweep takings daily; mules forward within minutes
-                             # automatic payments (channel NACH or AUTOPAY: EMIs, SIPs, bills) are not counted (D-54)
-    mule_at: 30
-    mule_sentence: "Money it receives usually leaves within {v} minutes."
-    honest_sentence: "Money it receives usually stays for hours or days (median {v} minutes)."
-  pass_through_ratio:        # share of each credit sent on within 60 minutes of arriving, over all credits;
-                             # automatic payments (channel NACH or AUTOPAY) are not counted (D-54)
-    weight: 0.20
-    honest_at: 0.2
-    mule_at: 0.8
-    mule_sentence: "{pct}% of the money it received was sent on within an hour."
-    honest_sentence: "Only {pct}% of the money it received was sent on within an hour."
-  complaint_linked_credits_7d:
-    weight: 0.10
-    honest_at: 1
-    mule_at: 2
-    mule_sentence: "It received money from {v} different fraud complaints in the last 7 days."
-    honest_sentence: "It received money from at most one fraud complaint in the last 7 days."
-  large_payer_share:         # share of credit value from the top 3 payers
-    weight: 0.10
-    honest_at: 0.2
-    mule_at: 0.8
-    mule_sentence: "{pct}% of the money it received came from just three payers."
-    honest_sentence: "It is paid by many different small payers ({pct}% from its top three), like a shop."
-  balance_retained_ratio:    # balance at the hold time / the victim money that came in
-    weight: 0.10
-    honest_at: 5.0
-    mule_at: 0.05
-    mule_sentence: "Its balance is now only {v1} times the victim money it received."
-    honest_sentence: "Its balance stayed far above the payment it received ({v} times larger)."
-  cash_or_crypto_exits:      # ATM / cash / crypto withdrawals in the window
-    weight: 0.10
-    honest_at: 0
-    mule_at: 1
-    mule_sentence: "Money left it through {v} cash or crypto withdrawals."
-    honest_sentence: "No money left it through cash or crypto withdrawals."
-  credit_vs_profile:         # credits in the last 30 days / the declared profile band's expected monthly credits;
-                             # money paid in through NACH (salary, dividends, refunds from companies) left out (D-55)
-    weight: 0.05
-    honest_at: 1.0
-    mule_at: 5.0
-    mule_sentence: "In the last 30 days it received {v1} times what its declared profile suggests."
-    honest_sentence: "What it received matches its declared profile."
+account_types:           # pass_through x fraud_exposure -> type (070_actions.sql, config/rules.yaml account_types)
+  PIPE_FOR_FRAUD:    {pass_through: high, fraud_exposure: high, name: "Pipe for fraud"}
+  FAST_MOVER:        {pass_through: high, fraud_exposure: low,  name: "Fast mover"}
+  EXPOSED_BUSINESS:  {pass_through: low,  fraud_exposure: high, name: "Exposed business"}
+  ORDINARY_CUSTOMER: {pass_through: low,  fraud_exposure: low,  name: "Ordinary customer"}
+  GREY_ZONE:         {name: "Grey zone"}
 
-# The one learned signal (DECISIONS D-51). Added only when config/learned_signal.yaml exists, which
-# `python -m pipeline.learned` writes after training on AMLworld's labels. It is a ninth signal next to the eight,
-# never a replacement: the smallest weight in the list, so the hand-set signals still decide the band. Its value is
-# the model's 0-100% rating (classes balanced: 50% is the midpoint between the two groups, not a probability).
-learned_signal:
-  name: learned_pattern
-  weight: 0.05
-  honest_at: 0.2
-  mule_at: 0.8
-  mule_sentence: "A model trained on flagged accounts in synthetic bank data rates its money pattern {pct}% like theirs."
-  honest_sentence: "A model trained on flagged accounts in synthetic bank data rates its money pattern only {pct}% like theirs."
+pass_through:
+  median_dwell_minutes:            # P1: for each credit, minutes until the next debit (NACH and AutoPay left out); median
+    low_at: 360
+    high_at: 30
+    start_weight: 0.25
+    high_sentence: "Money it receives usually leaves within {v} minutes."
+    low_sentence: "Money it receives usually stays for hours or days (median {v} minutes)."
+  passed_on_within_hour:           # P2: part of each credit sent on within 60 minutes (matched once), over all credits
+    low_at: 0.20
+    high_at: 0.80
+    start_weight: 0.30
+    high_sentence: "{pct}% of the money it received was sent on within an hour."
+    low_sentence: "Only {pct}% of the money it received was sent on within an hour."
+  cashed_out_within_hour:          # P3: part of each credit taken out as ATM cash, cash or crypto within 60 minutes
+    low_at: 0.05
+    high_at: 0.50
+    start_weight: 0.20
+    high_sentence: "{pct}% of the money it received was taken out as cash or crypto within an hour."
+    low_sentence: "Only {pct}% of the money it received was taken out as cash or crypto within an hour."
+  balance_kept_ratio:              # P4: balance at the decision / the victim money that came in
+    low_at: 5.0
+    high_at: 0.05
+    start_weight: 0.15
+    high_sentence: "Its balance is now only {v1} times the victim money it received."
+    low_sentence: "Its balance stayed far above the victim money it received ({v} times larger)."
+  top3_payer_share:                # P5: share of money received from the top 3 payers, NACH credits left out
+    low_at: 0.20
+    high_at: 0.80
+    start_weight: 0.10
+    skip_nach_credits: true
+    high_sentence: "{pct}% of the money it received came from just three payers."
+    low_sentence: "It is paid by many different payers ({pct}% from its top three), like a shop."
 
+fraud_exposure:
+  direct_complaints_7d:            # E1: distinct complaints whose victim paid straight into the account, last 7 days
+    low_at: 1
+    high_at: 3
+    start_weight: 0.25
+    high_sentence: "{v} different fraud complaints paid straight into it in the last 7 days."
+    low_sentence: "At most one fraud complaint paid straight into it in the last 7 days."
+  trail_touches_90d:               # E2: distinct complaints whose traced trail passed through it (30 days 1, older 0.5)
+    low_at: 1
+    high_at: 4
+    start_weight: 0.25
+    recent_days: 30
+    older_counts_as: 0.5
+    high_sentence: "The traced money of {v1} fraud complaints passed through it in the last 90 days."
+    low_sentence: "The traced money of at most one fraud complaint passed through it in the last 90 days."
+  money_from_flagged_share:        # E3: money from flagged accounts / all money received, NACH credits left out
+    low_at: 0.02
+    high_at: 0.25
+    start_weight: 0.35
+    skip_nach_credits: true
+    high_sentence: "{pct}% of the money it received came from accounts under a police notice or in the Suspect Registry."
+    low_sentence: "Only {pct}% of the money it received came from accounts under a police notice or in the Suspect Registry."
+  pays_back_its_payers:            # E5: share of the accounts it paid that also paid it
+    low_at: 0.10
+    high_at: 0.50
+    start_weight: 0.15
+    high_sentence: "{pct}% of the accounts it paid also paid it."
+    low_sentence: "Only {pct}% of the accounts it paid also paid it."
+
+# E4 is not part of either score: it decides the freeze ladder (D-59).
+fast_exit_check:
+  fraud_money_out_within_hour_at_least: 0.50
+  gap_over_other_money_at_least: 0.30
+  thin_evidence_below_payments: 3
+
+freeze_ladder:
+  medium_at_cases: 2
+  strong_at_cases: 3
+  weak_only_if_fraud_money_share_below: 0.02
+  refused_withdrawal_goes_to: strong
+  nodal_pool_escrow_max_step: medium
+
+weight_learning:                   # D-58: pipeline/weights.py and sql/udf/train_weights.py
+  model: logistic_regression
+  coefficients_at_least: 0
+  weight_min: 0.05
+  weight_max: 0.50
+  signal_window_share: 0.60
+  test_accounts_share: 0.30
+  max_auc_drop_vs_live: 0.02
+  needs_approval: true
+  benchmark_model: boosted_trees
+  seed: 42
+  l2: 0.001
+
+# Shown as context, never scored: who the holder is, not what the money does.
+context: [account_age_days, declared_profile_band, account_type, kyc_date, salary_by_nach]
+
+# Declared-profile bands: context only now; kept because the training features of the retired learned signal
+# (sql/learn/010_features.sql) still read them.
 profile_band_expected_monthly_credit_inr:
   low: 50000
   medium: 300000
   high: 5000000
 
-# Not a score signal: a guard applied in step 4 (SOP 9.1(i), 9.1(iii)).
+# Not a score signal: a guard (SOP 9.1(i), 9.1(iii)). Never fully frozen, never an automatic hold on new money.
 never_account_hold_types: [nodal, pool, escrow]
 
 top_reasons: 3

@@ -61,7 +61,7 @@ def split_statements(text: str, root: Path = ROOT) -> list[str]:
             buf.append(line)
         else:
             buf.append(line)
-            if stripped.endswith(";"):
+            if stripped.endswith(";") and not stripped.startswith("--"):   # a ';' in a comment ends nothing
                 statements.append("\n".join(buf).rstrip()[:-1].rstrip())
                 buf = []
     if buf:

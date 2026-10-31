@@ -31,7 +31,7 @@ export const api = {
   config: () => call("GET", "/config"),
   clock: () => call("GET", "/clock"),
   // the demo: run the simulated night (every bank, one clock), reset, the narrator's view
-  night: (until, reset = false, mode = "pipeline") => call("POST", "/night/run", { until, reset, mode }),
+  night: (until, reset = false, mode = "pipeline", holdMode = null) => call("POST", "/night/run", { until, reset, mode, hold_mode: holdMode }),
   reset: () => call("POST", "/demo/reset"),
   narrator: (victim = "V_LAKSHMI") => call("GET", `/narrator?victim=${enc(victim)}`),
   // the officer's morning
@@ -63,4 +63,13 @@ export const api = {
   notices: () => call("GET", "/notices"),
   readNotice: (body) => call("POST", "/notices", body),
   prealerts: () => call("GET", "/prealerts"),
+  // proactive holds (D-60 to D-65): every officer action needs a name and a reason, and goes through the checker
+  proactive: () => call("GET", "/proactive"),
+  confirmHold: (id, body) => call("POST", `/proactive/${id}/confirm`, body),
+  reviewKeep: (caseId, acc, body) => call("POST", `/review/${enc(caseId)}/${enc(acc)}/keep`, body),
+  confirmClear: (body) => call("POST", "/proactive/confirm-clear", body),
+  releaseHold: (id, body) => call("POST", `/proactive/${id}/release`, body),
+  keepAndRefer: (id, body) => call("POST", `/proactive/${id}/keep-and-refer`, body),
+  sendPreAlert: (id, body) => call("POST", `/prealerts/${id}/send`, body),
+  outcomes: () => call("GET", "/outcomes"),
 };

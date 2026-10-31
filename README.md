@@ -112,7 +112,7 @@ Don't open and re-save them in Excel: it drops the leading zeros of the bank cod
 python -m pipeline.load_amlworld --check    # files present and shaped as expected (no database)
 make data                                   # imports into PH_AML once, then gives each bank its share
 make lab                                    # trace and scoring tests on the labelled patterns (PH_LAB)
-make learn                                  # train the learned signal on the labels, then reload the banks
+make learn                                  # propose new scoring weights trained in Exasol, and run the gate
 make bench                                  # scale benchmark: 100 tickets at once (TICKETS=1000 for more)
 ```
 
@@ -121,10 +121,14 @@ AMLworld table and works each through every step, up to the holds, in its own sc
 banks). It writes `docs/BENCHMARK.md`: time per step and how many tickets were held within the golden hour, with the
 machine it ran on.
 
-**The learned signal (optional).** `make learn` trains a small logistic regression on AMLworld's laundering labels
-and writes `config/learned_signal.yaml` and `docs/LEARNED_SIGNAL.md`, the held-out test against the hand-set
-weights. A new model replaces the saved one only if it ranks the held-out accounts better. It becomes a ninth signal with the smallest weight, scored in Exasol next to the eight; it never replaces
-them (DECISIONS D-51). Without the file the scoring is the eight hand-set signals.
+**Scoring weights (optional).** Every account gets two scores, pass-through and fraud exposure, which give one of
+four account types or the grey zone ([D-57](docs/DECISIONS.md)). Each signal starts at a hand-set weight.
+`make learn` trains a logistic regression inside Exasol on AMLworld's labels and proposes a new set of weights, each
+kept between 0.05 and 0.50, then runs the gate: bounds, the five demo accounts keep their types, and no more than
+0.02 AUC lost. A proposal goes live only when a named person approves it:
+`python -m pipeline.weights approve --version N --by "NAME"` ([D-58](docs/DECISIONS.md)). The report is
+`docs/SCORING_WEIGHTS.md`; `python -m pipeline.weights show` lists every version. AMLworld is synthetic, so the test
+says how well the weights rank AMLworld accounts, not real mule accounts.
 
 Each AMLworld bank becomes a branch of Bank X, Y or Z, and each bank's schema gets only the AMLworld rows touching
 its own branches. The import into `PH_AML` runs once; `make seed` and the console's Reset keep it.
@@ -139,7 +143,7 @@ cd app/web && npm install && npm run dev              # console on http://localh
 ```
 
 The console is Bank X's nodal desk. **This morning** has the two lists: done automatically overnight (the morning
-log, every ticket worked, what the watch saw) and waiting for you (the five decisions only, each with its reasons,
+log, every ticket worked, what the watch saw) and waiting for you (the officer's decisions only, each with its reasons,
 the case against, its fixed legal citation and the agent's draft for you to sign). The demo controls at the bottom
 replay the night to 09:00, continue it to 10:30 so Bank Z's desk opens, or reset. Every account opens a **hold
 record**: the notice, the path, the lowest-balance steps, the rule, who decided, every change and the Exasol
@@ -164,13 +168,16 @@ repeat no number it was not given, or the fixed template is used. The holds come
 ## Repository
 
 ```
-config/      rules.yaml (automatic actions, the five officer decisions, legal bases), scoring.yaml, banks.yaml
-data/        demo_case.yaml (the night), extra_cases.yaml (generated, seed 42), loop_case.yaml
+config/      rules.yaml (automatic actions, officer decisions, legal bases, proactive holds), scoring.yaml,
+             scoring_weights.yaml (weight versions), banks.yaml
+data/        demo_case.yaml (the night), extra_cases.yaml (generated, seed 42), loop_case.yaml,
+             proactive_case.yaml (proactive holds, scenarios A to G)
 sql/bank/    one bank's schema and views (run once per bank); sql/portal/ the simulated CFCFRMS;
              sql/steps/ the agent's analysis tools and the checker's actions, run inside Exasol;
              sql/amlworld/, sql/lab/ the AMLworld import and tests
 pipeline/    agent.py (the maker), checker.py, night.py (the simulation), portal.py, core.py (simulated core
-             banking), watch.py, recalc.py, reasons.py, record.py, morning.py, narrator.py, users.py, loaders
+             banking), watch.py, scoring.py (account types), proactive.py (proactive holds), weights.py,
+             recalc.py, reasons.py, record.py, morning.py, narrator.py, users.py, loaders
 app/api/     FastAPI service the console talks to
 app/web/     officer console (React + Vite)
 tests/       oracles (attribution, scoring, rules) and their tests; -m db tests run against Exasol
@@ -189,10 +196,14 @@ Stated as assumptions, not as how banks work. Each one is a question for anyone 
   the fraud-monitoring system.
 - A hold larger than the balance catches later credits until it is filled (bank practice varies). Here the watch
   holds new money on a mule-like account up to the amount the notice reported.
-- New money from a payer who never paid a held, mule-like account before is held under the existing notice, and
-  the payer is flagged as a likely unreported victim: a pre-alert, with where the account is on hold, waits for the
-  officer to send to the portal ([D-53](docs/DECISIONS.md)). In the demo, Ravi is flagged at 05:45, 15 minutes
-  before his own complaint, which closes the pre-alert unsent.
+- **Proactive holds** ([D-60 to D-65](docs/DECISIONS.md)). On an account a complaint names directly, or one in the
+  Suspect Registry, typed Pipe for fraud or Fast mover, a first-time payment of Rs 1,000 or more is held the minute
+  it lands, before anyone complains, and someone who can reach the payer is told (our fraud team for our own
+  customer, a CFCFRMS pre-alert otherwise). Two modes: `rbi_draft` (default) follows the RBI draft KYC Amendment
+  Directions of 11 Sep 2026, with the holder told and 20/30/60-day clocks; `current_sop` holds only in the room
+  under an existing notice. Switch with `python -m pipeline.night --hold-mode current_sop` or the demo bar. The draft
+  directions are not final law. The Suspect Registry, CFCFRMS, holder notices and the payers' answers are simulated:
+  every message is a row in a table, nothing is sent. The demo cases are in `data/proactive_case.yaml`.
 - An investigating officer's notice after an FIR can repeat a transaction already ticketed on the portal; it is
   linked to the first case, not held twice. Notices also arrive by e-mail or as PDF letters (four synthetic ones in
   `data/notices/` and `data/notices.yaml`); `python -m pipeline.notices read FILE` shows what is read from one
@@ -202,8 +213,9 @@ Stated as assumptions, not as how banks work. Each one is a question for anyone 
 - Every referral between banks is signed with a SHA-256 hash chain (DECISIONS D-17); `python -m pipeline.chain`
   checks every hop. A real portal would also sign with each bank's key; a hash chain shows tampering, not who did it.
 - AMLworld is synthetic and labels laundering, not cyber-fraud mule accounts.
-- The scoring weights are hand-set (unless the AMLworld scoring test runs). The one learned signal is trained on
-  synthetic laundering labels, so its test shows how well it ranks AMLworld accounts, not real mule accounts.
+- The scoring weights are the hand-set start weights until a version trained on AMLworld is approved. AMLworld's
+  labels are synthetic laundering, so its test shows how well the weights rank AMLworld accounts, not real mule
+  accounts.
 - The model runs locally, so account data doesn't leave the bank.
 - Bank Z works tickets by hand: its desk opens at 10:00 and takes about 20 minutes for a ticket. Today's desk in
   Before / after is the same kind of stated model (desk hours, lookup times, whole-account freezes), not a

@@ -16,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DEMO_CASE = ROOT / "data" / "demo_case.yaml"
 EXTRA_CASES = ROOT / "data" / "extra_cases.yaml"
 LOOP_CASE = ROOT / "data" / "loop_case.yaml"
+PROACTIVE_CASE = ROOT / "data" / "proactive_case.yaml"
+# Simulated inputs a case file may carry for proactive holds (D-60 to D-64): loaded as they are, by pipeline/load_cases.
+SIM_INPUTS = ("suspect_registry", "holder_explanations", "police_directions", "payer_responses")
 EXIT_PREFIX = "EXIT:"
 TICKET_KINDS = ("POLICE", "ONWARD", "IO_NOTICE")
 
@@ -80,6 +83,7 @@ class Case:
     expected_morning: list = field(default_factory=list)
     expected_compare: dict = field(default_factory=dict)
     today: dict = field(default_factory=dict)
+    sim_inputs: dict = field(default_factory=dict)
 
     def opening_paise(self) -> dict[str, int]:
         return {
@@ -166,6 +170,7 @@ def load_case(path: Path = DEMO_CASE) -> Case:
         expected_morning=raw.get("expected_morning", []),
         expected_compare=raw.get("expected_compare", {}),
         today=raw.get("today", {}),
+        sim_inputs={k: raw.get(k) or [] for k in SIM_INPUTS},
     )
     _check(case)
     return case

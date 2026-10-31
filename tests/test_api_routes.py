@@ -36,13 +36,21 @@ def test_no_route_places_a_hold_or_freeze_by_itself():
     assert not any(word in p.lower() for p in writes for word in ("freeze", "hold", "auto", "file"))
     assert writes == {"/api/night/run", "/api/demo/reset", "/api/tickets/{case_id}/work", "/api/notices",
                       "/api/proposals/{proposal_id}/approve", "/api/proposals/{proposal_id}/reject",
-                      "/api/decisions/{decision_id}/undo"}   # undoing a decision the officer made, with a reason
+                      "/api/decisions/{decision_id}/undo",    # undoing a decision the officer made, with a reason
+                      # the officer's decisions on proactive holds (D-63, D-64): each needs a name and a reason and
+                      # goes through the checker; none places a hold
+                      "/api/proactive/{proactive_id}/confirm", "/api/proactive/confirm-clear",
+                      "/api/proactive/{proactive_id}/release", "/api/proactive/{proactive_id}/keep-and-refer",
+                      "/api/prealerts/{pre_alert_id}/send",
+                      # a grey-zone or exposed-business account reviewed: the hold stays as it is (an audit entry)
+                      "/api/review/{case_id}/{account_id}/keep"}
 
 
 def test_config_without_database():
     body = TestClient(app).get("/api/config").json()
     assert {b["bank_id"] for b in body["banks"]} == {"BANK_X", "BANK_Y", "BANK_Z"}
-    assert set(body["officer"]) == {"PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE",
+    assert set(body["officer"]) == {"PROPOSE_NARROW", "PROPOSE_LARGER_HOLD", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE",
+                                    "PROPOSE_RELEASE",
                                     "PROPOSE_PRE_ALERT"}
     assert "MANDATORY_HOLD" in body["automatic"] and "KYC_PACKET" in body["automatic"]
     assert {b["bank_id"]: b["works_tickets"] for b in body["banks"]} == {

@@ -27,9 +27,10 @@ from pipeline.explain import inr
 
 ROOT = Path(__file__).resolve().parents[1]
 RULES = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
-MODEL_WORDED = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE")
+MODEL_WORDED = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "PROPOSE_LARGER_HOLD")
 CITATION = {"MANDATORY_HOLD": "hold", "HOLD_MARKER": "hold", "WATCH_HOLD": "hold", "PROPOSE_NARROW": "narrow",
-            "PROPOSE_FULL_FREEZE": "freeze", "RECORD_EXIT": "trail", "ONWARD_ENTRY": "trail", "KYC_PACKET": "trail",
+            "PROPOSE_FULL_FREEZE": "freeze", "PROPOSE_LARGER_HOLD": "larger", "PROACTIVE_HOLD": "rbi_draft",
+            "RECORD_EXIT": "trail", "ONWARD_ENTRY": "trail", "KYC_PACKET": "trail",
             "SEND_BACK": "send_back", "UNMATCHED_NOTICE": "send_back", "PROPOSE_RELEASE": "release"}
 
 SYSTEM = (
@@ -110,11 +111,20 @@ def _d(v) -> Decimal:
 
 
 def _signals(conn, case_id: str, account_id: str) -> list[dict]:
+    """The account's signals of both scores (D-57). "ml" keeps its old name: the m value, 0 low to 1 high."""
     rows = conn.execute(
-        "SELECT signal_name, signal_value, mule_likeness, sentence, mule_rank, honest_rank FROM ACCOUNT_SIGNALS "
-        "WHERE case_id = {c} AND account_id = {a}", {"c": case_id, "a": account_id}).fetchall()
-    return [{"name": n, "value": v, "ml": float(m or 0), "text": s, "mule_rank": int(mr or 99),
-             "honest_rank": int(hr or 99)} for n, v, m, s, mr, hr in rows]
+        "SELECT signal_name, signal_value, m_value, sentence, high_rank, low_rank, score_name, weight FROM "
+        "ACCOUNT_SIGNALS WHERE case_id = {c} AND account_id = {a}", {"c": case_id, "a": account_id}).fetchall()
+    return [{"name": n, "value": v, "ml": float(m or 0), "text": s, "mule_rank": int(hr or 99),
+             "honest_rank": int(lr or 99), "score": sc, "weight": float(w or 0)}
+            for n, v, m, s, hr, lr, sc, w in rows]
+
+
+def _ranked(sig: list[dict], high: bool) -> list[dict]:
+    """The rules choose the reasons (D-57): per score, the signals on the deciding side, strongest first."""
+    side = [s for s in sig if s["text"] and ((s["ml"] >= 0.5) if high else (s["ml"] < 0.5))]
+    key = (lambda s: -s["weight"] * s["ml"]) if high else (lambda s: -s["weight"] * (1 - s["ml"]))
+    return sorted(side, key=key)
 
 
 def cross_ticket(conn, account_id: str, case_id: str | None = None) -> list[str]:
@@ -157,14 +167,34 @@ def declined_lines(conn, account_id: str) -> list[str]:
     return out
 
 
+def ladder_lines(conn, case_id: str, account_id: str) -> list[str]:
+    """E4 and the fraud cases behind a freeze-ladder step, in plain words (D-59)."""
+    row = conn.execute("SELECT fraud_out_share, other_out_share, fraud_money_leaves_fast, fraud_case_count, "
+                       "fraud_linked_credits, ladder_step FROM ACCOUNT_SCORE WHERE case_id = {c} AND account_id = {a}",
+                       {"c": case_id, "a": account_id}).fetchone()
+    if not row or not row[2]:
+        return []
+    fraud, other, _, cases, n, _step = row
+    out = [f"Fraud-linked money leaves this account faster than its other money: {round(float(fraud or 0) * 100)}% "
+           f"within an hour, against {round(float(other or 0) * 100)}%."]
+    if n is not None and int(n) < 3:
+        out[0] += f" Based on {int(n)} payment{'s' if int(n) != 1 else ''}."
+    if cases:
+        c = float(cases)
+        out.append(f"Seen in {int(c) if c == int(c) else c} fraud cases in the last 90 days (a case in the last "
+                   f"30 days "
+                   f"counts 1, an older one 0.5).")
+    return out
+
+
 def structured(conn, case_id: str, account_id: str, action_code: str, numbers_in: dict | None = None) -> dict:
     """The reasons as data, from the rules engine and the evidence step. Nothing here comes from a model."""
     acc = conn.execute("SELECT COALESCE(holder_name, account_id), account_type, holder_type, opened_on FROM ACCOUNT "
                        "WHERE account_id = {a}", {"a": account_id}).fetchone() or (account_id, None, None, None)
     name = acc[0]
     sig = _signals(conn, case_id, account_id)
-    mule = sorted((s for s in sig if s["ml"] >= 0.5 and s["text"]), key=lambda s: s["mule_rank"])
-    honest = sorted((s for s in sig if s["ml"] < 0.5 and s["text"]), key=lambda s: s["honest_rank"])
+    mule = _ranked(sig, high=True)            # what points at money running through, or at fraud money
+    honest = _ranked(sig, high=False)         # what reads like an ordinary account
     nums = {k: str(v) for k, v in (numbers_in or {}).items() if v is not None}
     support, against = [], []
     if action_code == "PROPOSE_NARROW":
@@ -180,9 +210,9 @@ def structured(conn, case_id: str, account_id: str, action_code: str, numbers_in
         if not against:
             against.append("Narrowing releases money the lowest-balance rule counts as the holder's own; if that "
                            "rule is wrong for this account, the released money can leave.")
-    elif action_code == "PROPOSE_FULL_FREEZE":
-        support = [s["text"] for s in mule[:3]] + declined_lines(conn, account_id) + cross_ticket(conn, account_id,
-                                                                                                    case_id)
+    elif action_code in ("PROPOSE_FULL_FREEZE", "PROPOSE_LARGER_HOLD"):
+        support = ladder_lines(conn, case_id, account_id) + [s["text"] for s in mule[:3]] + \
+            declined_lines(conn, account_id) + cross_ticket(conn, account_id, case_id)
         against = [s["text"] for s in honest[:2]]
         held = conn.execute("SELECT liens_inr FROM ACTIVE_HOLD WHERE account_id = {a}", {"a": account_id}).fetchval()
         if held:
@@ -220,6 +250,9 @@ def lead(r: dict) -> str:
                 f"{n.get('near_at', '')[11:16]} may be the one it means. Nothing is held.")
     if code == "PROPOSE_RELEASE":
         return f"Release the {inr(n.get('held'))} held on {name}: no police direction in 75 days."
+    if code == "PROPOSE_LARGER_HOLD":
+        return (f"Hold more on {name}: {inr(n.get('proposed'))} (the fraud-linked money of 90 days, never above the "
+                f"balance), against {inr(n.get('held'))} held now.")
     return ""
 
 

@@ -34,10 +34,10 @@ ENGINE_AUTOMATIC = ("MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTR
 FILES = {"MANDATORY_HOLD": "081_hold.sql", "HOLD_MARKER": "081_hold.sql", "RECORD_EXIT": "082_exits.sql",
          "ONWARD_ENTRY": "083_onward.sql", "KYC_PACKET": "084_kyc.sql"}
 # Order the checker carries out a case's automatic proposals in: holds before the paperwork that cites them.
-ORDER = ["LINK_DUPLICATE", "SEND_BACK", "MANDATORY_HOLD", "HOLD_MARKER", "WATCH_HOLD", "RECORD_EXIT", "ONWARD_ENTRY",
-         "KYC_PACKET", "RECORD_SPLIT", "WATCH_ADD"]
+ORDER = ["LINK_DUPLICATE", "SEND_BACK", "MANDATORY_HOLD", "HOLD_MARKER", "WATCH_HOLD", "PROACTIVE_HOLD", "RECORD_EXIT",
+         "ONWARD_ENTRY", "KYC_PACKET", "RECORD_SPLIT", "WATCH_ADD"]
 CASH_OUT = tuple(RULES["full_freeze_evidence"]["watch_cash_out_channels"])
-MULE_LIKE_BANDS = tuple(RULES["full_freeze_evidence"]["watch_bands"])
+MULE_LIKE_TYPES = tuple(RULES["full_freeze_evidence"]["refused_withdrawal_types"])   # Pipe for fraud, Fast mover
 FMT = "%Y-%m-%d %H:%M:%S"
 PROPOSAL_COLUMNS = ("proposal_id", "case_id", "account_id", "action_code", "act_mode", "amount_inr", "proposed_by",
                     "proposed_at", "reasons_json", "draft_text", "proposal_status")
@@ -217,6 +217,15 @@ class Checker:
             return None if own is not None else "not this bank's account"
         if code == "WATCH_HOLD":
             return self._validate_watch_hold(p, own)
+        if code == "PROACTIVE_HOLD":
+            from pipeline import proactive
+
+            return proactive.validate(self, p, own)
+        if code == "PROPOSE_LARGER_HOLD":
+            row = self._engine_row(p, "OFFICER")
+            if row is None:
+                return "the rules engine did not propose a larger hold on this account"
+            return None if _d(row[0]) == _d(p["amount_inr"]) else "amount differs from the rules engine's"
         if code == "PROPOSE_RELEASE":
             w = self._q("SELECT added_at FROM WATCH_LIST WHERE account_id = {a} AND case_id = {c} AND left_at IS NULL",
                         a=acc, c=case).fetchone()
@@ -364,6 +373,10 @@ class Checker:
                                      p["reasons"].get("reason"))
         if code == "WATCH_ADD":
             return self._watch_add(p, now)
+        if code == "PROACTIVE_HOLD":
+            from pipeline import proactive
+
+            return proactive.place(self, p, now)
         if code == "WATCH_HOLD":
             self._q("INSERT INTO HOLD_LEDGER (case_id, viewing_bank_id, account_id, hold_kind, amount_inr, hold_tag, "
                     "source_txn_id, placed_at, placed_by, hold_status, action_code, reason_text, proposal_id, stmt_id) "
@@ -406,6 +419,9 @@ class Checker:
                              a=acc, c=case).fetchval()
             self._q("UPDATE HOLD_LEDGER SET hold_status = 'REPLACED', replaced_by = {n!d} WHERE hold_id = {h!d}",
                     n=str(int(new_id)), h=str(int(hold_id)))
+            from pipeline import proactive
+
+            proactive.mark_linked(self, int(hold_id), case, now)   # a proactive hold's clocks stop here (D-62)
             if _d(amount) > take:      # the rest stays caught, still not linked
                 self._q("INSERT INTO HOLD_LEDGER (case_id, viewing_bank_id, account_id, hold_kind, amount_inr, "
                         "hold_tag, source_txn_id, placed_at, placed_by, hold_status, action_code, reason_text, "
@@ -457,27 +473,75 @@ class Checker:
         return out
 
     def _watch_add(self, p: dict, now: str) -> str:
+        """Put an own account on the watch with its first-pass type and its eligibility for proactive holds (D-60).
+        first_pass is MULE_LIKE for a Pipe for fraud or Fast mover (a refused withdrawal then goes to Strong)."""
+        from pipeline import proactive
+
         case, acc, r = p["case_id"], p["account_id"], p["reasons"]
+        snap = None
         if r.get("trigger") == "watch":
             first = "CHECKED"
         else:
-            first = "MULE_LIKE" if r.get("band") in MULE_LIKE_BANDS else "HONEST"
-            if self._q("SELECT COUNT(*) FROM HOLD_LEDGER WHERE account_id = {a} AND case_id = {c} "
-                       "AND hold_kind = 'MARKER' AND hold_status = 'ACTIVE'", a=acc, c=case).fetchval():
-                first = "MULE_LIKE"       # a first-layer marker catches later credits up to the trail amount
+            sid = r.get("snapshot_id") or self._q("SELECT snapshot_id FROM ACCOUNT_SCORE WHERE case_id = {c} "
+                                                  "AND account_id = {a}", c=case, a=acc).fetchval()
+            snap = proactive.snapshot(self.conn, acc, int(sid)) if sid else proactive.snapshot(self.conn, acc)
+            pattern = (snap or {}).get("account_pattern") or r.get("pattern")
+            first = "MULE_LIKE" if pattern in MULE_LIKE_TYPES else "HONEST"
         exists = self._q("SELECT COUNT(*) FROM WATCH_LIST WHERE account_id = {a} AND case_id = {c} AND left_at IS NULL",
                          a=acc, c=case).fetchval()
         if int(exists or 0):
+            if snap:
+                self.refresh_eligibility(acc, now, proactive.decide_eligibility(self.conn, acc, now, snap))
             return "already on the watch"
-        reported = self._q("SELECT amount_inr FROM COMPLAINT WHERE case_id = {c}", c=case).fetchval()
-        why = r.get("why") or {"MULE_LIKE": "Mule-like at the first pass: new money is held up to the reported amount",
-                               "HONEST": "Honest receiver: new money is the holder's own and is not held",
+        reported = None if case.startswith("REGISTRY:") else \
+            self._q("SELECT amount_inr FROM COMPLAINT WHERE case_id = {c}", c=case).fetchval()
+        type_words = proactive.type_name((snap or {}).get("account_pattern"))
+        why = r.get("why") or {"MULE_LIKE": f"Typed {type_words} at the first pass: money runs straight through it",
+                               "HONEST": f"Typed {type_words} at the first pass: new money is not held automatically",
                                "CHECKED": "Named by a refused transfer; no victim money reached it, so nothing is held"
                                }[first]
         self._q("INSERT INTO WATCH_LIST (account_id, case_id, first_pass, reported_inr, added_at, added_why, stmt_id) "
                 "VALUES ({a}, {c}, {f}, {r}, TO_TIMESTAMP({t}, 'YYYY-MM-DD HH24:MI:SS'), {w}, CURRENT_STATEMENT)",
                 a=acc, c=case, f=first, r=None if reported is None else str(reported), t=now, w=why)
-        return f"on the watch ({first.lower().replace('_', '-')})"
+        if first != "CHECKED":
+            self.refresh_eligibility(acc, now, proactive.decide_eligibility(self.conn, acc, now, snap), force=True)
+        allowed = self._q("SELECT MAX(CASE WHEN proactive_allowed THEN 1 ELSE 0 END) FROM WATCH_LIST "
+                          "WHERE account_id = {a} AND left_at IS NULL", a=acc).fetchval()
+        return f"on the watch ({type_words if first != 'CHECKED' else 'checked'}" + \
+               ("; proactive holds allowed)" if int(allowed or 0) else ")")
+
+    def refresh_eligibility(self, account: str, now: str, decision: dict, force: bool = False) -> None:
+        """Module 1: write the latest eligibility on every open watch row of the account. Every change to
+        proactive_allowed goes to the audit log with the scoring snapshot behind it. Holds already placed keep
+        their own clocks."""
+        rows = self._q("SELECT case_id, proactive_allowed, eligibility_reason, account_pattern, snapshot_id, "
+                       "first_pass FROM WATCH_LIST WHERE account_id = {a} AND left_at IS NULL "
+                       "AND first_pass <> 'CHECKED'", a=account).fetchall()
+        if not rows:
+            return
+        first = "MULE_LIKE" if decision["pattern"] in MULE_LIKE_TYPES else "HONEST"
+        changed = any(bool(row[1]) != decision["allowed"] for row in rows)
+        snap = None if decision["snapshot_id"] is None else int(decision["snapshot_id"])
+        same = all(row[2] == decision["reason"] and row[3] == decision["pattern"] and row[5] == first
+                   and (None if row[4] is None else int(row[4])) == snap for row in rows)
+        if same and not force:
+            return                      # nothing new: no write (a busy account's every payment lands here)
+        self._q("UPDATE WATCH_LIST SET eligibility_reason = {r}, account_pattern = {p}, "
+                f"proactive_allowed = {'TRUE' if decision['allowed'] else 'FALSE'}, "
+                "eligibility_checked_at = TO_TIMESTAMP({n}, 'YYYY-MM-DD HH24:MI:SS'), snapshot_id = {s}, "
+                "first_pass = {f} WHERE account_id = {a} AND left_at IS NULL AND first_pass <> 'CHECKED'",
+                r=decision["reason"], p=decision["pattern"], n=now, a=account, f=first,
+                s=None if decision["snapshot_id"] is None else str(int(decision["snapshot_id"])))
+        if changed or force:
+            self._audit("eligibility", rows[0][0], json.dumps(
+                {"proactive_allowed": decision["allowed"], "eligibility_reason": decision["reason"],
+                 "account_pattern": decision["pattern"], "snapshot_id": decision["snapshot_id"]}), now, account)
+
+    def sweep(self, now: str) -> list[str]:
+        """Module 4: the draft's clocks on every proactive hold, and the simulated inputs that arrived."""
+        from pipeline import proactive
+
+        return proactive.sweep(self, now)
 
     def record_split(self, account: str, now: str, trigger: str, trigger_case: str | None = None,
                      reason: str | None = None) -> str:
@@ -571,6 +635,9 @@ class Checker:
             self._finish_ticket(case, now, bool(failed))
             if not proposal_ids:
                 self.close_pre_alerts(case, now)     # a new ticket may name a payment the watch flagged (D-53)
+                from pipeline import proactive
+
+                proactive.on_ticket(self, case, now)  # ... or a payment a proactive hold caught (D-64)
         status = None
         if case_id:
             status = self._q("SELECT ticket_status FROM TICKET WHERE case_id = {c}", c=case_id).fetchval()
@@ -652,6 +719,18 @@ class Checker:
             self._holder_message(case, acc, final, "LIEN", new_id, now)
             self._q("UPDATE WATCH_LIST SET first_pass = 'HONEST' WHERE account_id = {a} AND case_id = {c} "
                     "AND left_at IS NULL", a=acc, c=case)
+        elif code == "PROPOSE_LARGER_HOLD":
+            liens = self._q("SELECT hold_id FROM HOLD_LEDGER WHERE case_id = {c} AND account_id = {a} "
+                            "AND hold_kind = 'LIEN' AND hold_status = 'ACTIVE' AND NOT COALESCE(proactive, FALSE) "
+                            "ORDER BY hold_id", c=case, a=acc).fetchall()
+            target = min(final, self.balance_at(acc, now) - (self.held(acc) - self.held(acc, case)))
+            new_id = self._officer_hold(case, acc, "LIEN", target, officer, code, comment or "Larger hold approved: "
+                                        "fraud money leaves this account fast (freeze ladder, Medium)", now,
+                                        int(p["proposal_id"]))
+            for (hold_id,) in liens:
+                self._q("UPDATE HOLD_LEDGER SET hold_status = 'REPLACED', replaced_by = {n!d} WHERE hold_id = {h!d}",
+                        n=str(new_id), h=str(int(hold_id)))
+            self._holder_message(case, acc, target, "LIEN", new_id, now)
         elif code == "PROPOSE_FULL_FREEZE":
             balance = self.balance_at(acc, now)
             new_id = self._officer_hold(case, acc, "ACCOUNT_FREEZE", balance, officer, code,

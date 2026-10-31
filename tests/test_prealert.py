@@ -59,6 +59,7 @@ def test_the_handover_note_reports_the_head_start_and_a_waiting_pre_alert():
                           "caught": ("2026-10-18 05:45:00", "ACC_A"), "flagged_at": "2026-10-18 05:45:00"}],
              "waiting": [(9, "CASE_DEMO", "ACC_A", "PROPOSE_PRE_ALERT", "12000.00")]}
     text = template(facts, "Bank X", "2026-10-18 09:00:00")
-    assert "The watch had flagged the payer as a likely unreported victim 15 minutes before the complaint." in text
+    assert "Already held: it landed in A at 05:45, while that account was watched." in text
+    assert "It was held 15 minutes before the complaint." in text                    # D-64: the minutes early
     assert ("- Pre-alert: A received Rs 12,000 from a payer who had not paid it before, while it was held. Send the "
             "pre-alert that they may be an unreported victim?") in text

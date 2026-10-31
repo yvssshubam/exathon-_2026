@@ -10,7 +10,7 @@ import { PanelFooter } from "./SidePanel.jsx";
 // changes, evidence (each row says which way it reads), the case against, since the hold, legal basis, actions.
 // variant "wide" is the Review card; "panel" the narrower card beside a complaint or a hold record.
 
-export const KIND = { PROPOSE_NARROW: "Smaller hold", PROPOSE_FULL_FREEZE: "Freeze", UNMATCHED_NOTICE: "Near match · nothing held yet",
+export const KIND = { PROPOSE_NARROW: "Smaller hold", PROPOSE_LARGER_HOLD: "Larger hold", PROPOSE_FULL_FREEZE: "Freeze", UNMATCHED_NOTICE: "Near match · nothing held yet",
   PROPOSE_RELEASE: "Release", PROPOSE_PRE_ALERT: "Pre-alert · the money is already held" };
 const UNDO = { PROPOSE_NARROW: ["Hold again", "HOLD_AGAIN"], PROPOSE_FULL_FREEZE: ["Unfreeze", "UNFREEZE"], UNMATCHED_NOTICE: ["Release", "RELEASE"] };
 const LEGAL = {
@@ -42,7 +42,10 @@ export function sinceLine(e, names = {}) {
     case "NEW_MONEY_HELD": case "NEW_MONEY_ABOVE_NOTICE": return `${amt} more came in, held.`;
     case "LINKED_TO_VICTIM": return "the money caught was linked to a new complaint.";
     case "RECIPIENT_WATCHED": return "the account it tried to pay is now watched.";
-    case "PRE_ALERT_READY": return `${amt} from a new payer: a likely unreported victim. Pre-alert ready.`;
+    case "PRE_ALERT_READY": return `${amt} from a first-time payer, held; the pre-alert waits for you.`;
+    case "PROACTIVE_HOLD": return `${amt} from a first-time payer, held at once.`;
+    case "NEW_MONEY_PASSED": return `${amt} came in and passed the checks. Not held.`;
+    case "LAYERING_HELD": return "the payer is itself flagged: recorded for the police as layering.";
     case "PRE_ALERT_SENT": return "the pre-alert was sent to the portal.";
     case "PRE_ALERT_NOT_NEEDED": case "PRE_ALERT_ANSWERED": {
       const m = /flagged (.+?) earlier|arrived (.+?) after/.exec(e.sentence || "");
@@ -55,7 +58,8 @@ export function sinceLine(e, names = {}) {
 
 // The events worth a line after a hold, as a short phrase ("ATM ₹29,500 refused"). Notes about the other side of a
 // refused payment (another bank, a business) stay in the hold record and the audit log.
-export const KEY_EVENTS = ["CASHOUT_BLOCKED", "TRANSFER_BLOCKED", "NEW_MONEY_HELD", "NEW_MONEY_ABOVE_NOTICE", "NEW_MONEY_HONEST", "MOVED", "PRE_ALERT_READY"];
+export const KEY_EVENTS = ["CASHOUT_BLOCKED", "TRANSFER_BLOCKED", "NEW_MONEY_HELD", "NEW_MONEY_ABOVE_NOTICE", "NEW_MONEY_HONEST", "MOVED", "PRE_ALERT_READY",
+  "PROACTIVE_HOLD", "NEW_MONEY_PASSED"];
 export function shortEvent(e) {
   const amt = inrR(e.amount_inr);
   const cp = String(e.counterparty || "");
@@ -80,7 +84,7 @@ export function clearCase(p) {
   const days = ageDays(p.opened_on, p.held_since || p.proposed_at);
   const f = figures(p);
   if (days != null && days < 365) return [false, "Account under 1 year"];
-  if (n(p.cash_exits) > 0) return [false, `${Math.round(n(p.cash_exits))} cash withdrawal${Math.round(n(p.cash_exits)) === 1 ? "" : "s"} in 90 days`];
+  if (n(p.pass_through_score) >= 0.3) return [false, `Some money runs through it (pass-through ${n(p.pass_through_score).toFixed(2)})`];
   if (f.balance && f.target / f.balance >= 0.05) return [false, `Victim's share is ${Math.round((f.target / f.balance) * 100)}% of balance`];
   return [true, null];
 }
@@ -107,96 +111,84 @@ export function matchCount(p) {
 }
 
 // ---------------------------------------------------------------- evidence table
-// The learned score as words first, then the number: "Low (9 out of 100)".
-function modelValue(learned) {
-  const v = Math.round(n(learned) * 100);
-  return `${v < 50 ? "Low" : "High"} (${v} out of 100)`;
-}
+// Account scoring v2 (D-57): two questions, each answered by its own signals. A row's verdict is the score's own mark
+// for that signal (m of 0.5 or more points the score up), so the table always agrees with the scores. The type names
+// a pattern of money, never a verdict on the holder.
+export const TYPE_NAMES = { PIPE_FOR_FRAUD: "Pipe for fraud", FAST_MOVER: "Fast mover", EXPOSED_BUSINESS: "Exposed business",
+  ORDINARY_CUSTOMER: "Ordinary customer", GREY_ZONE: "Grey zone" };
+export const typeName = (t) => TYPE_NAMES[t] || "Not scored yet";
+const pct = (v) => `${Math.round(n(v) * 100)}%`;
 
-function evidence(p, panel, inflows, watch, short = false) {
-  const sig = Object.fromEntries((panel?.signals || []).map((s) => [s.signal_name, s.signal_value]));
-  const dwell = sig.median_dwell_minutes, pass = sig.pass_through_ratio ?? p.pass_through, large = sig.large_payer_share;
-  const cash = sig.cash_or_crypto_exits ?? p.cash_exits, links = sig.complaint_linked_credits_7d ?? p.complaint_links;
-  const learned = sig.learned_pattern; // the one learned signal (D-51): only when a model is trained
-  const MODEL = short ? "Match with fraud accounts" : "How closely it matches known fraud accounts";
+export function evidence(p, panel, inflows, watch, short = false) {
+  const by = Object.fromEntries((panel?.signals || []).map((s) => [s.signal_name, s]));
+  const has = (name) => by[name] != null;
+  const v = (name) => by[name]?.signal_value;
+  const high = (name) => n(by[name]?.m_value) >= 0.5;
+  const measured = (name) => v(name) != null;
   const rows = [];
-  if (p.action_code === "PROPOSE_FULL_FREEZE") {
-    const F = "For a freeze";
-    if (links != null) rows.push(["Fraud complaints that paid it, 7 days", String(Math.round(n(links))), n(links) > 1 ? F : "Against: only one complaint", n(links) > 1]);
-    if (pass != null) rows.push(["Money sent out within an hour of arriving", `${Math.round(n(pass) * 100)}% of money received`, n(pass) >= 0.5 ? F : "Against", n(pass) >= 0.5]);
-    if (cash != null) rows.push(["Cash or crypto taken out", n(cash) ? String(Math.round(n(cash))) : "None", n(cash) ? F : "Against", n(cash) > 0]);
-    const tries = attemptsOf(p, watch);
-    if (tries.length) rows.push(["Tries to move held money", String(tries.length), F, true]);
-    if (learned != null) rows.push([MODEL, modelValue(learned), n(learned) >= 0.5 ? F : "Against", n(learned) >= 0.5]);
-    if (p.opened_on) { const d = ageDays(p.opened_on, p.held_since); rows.push(["Account age", ageWords(p.opened_on, p.held_since), d < 365 ? F : "Against", d < 365]); }
-    const fresh = (watch || []).filter((e) => e.account_id === p.account_id && e.event_kind.startsWith("NEW_MONEY") && (!p.held_since || e.event_at > p.held_since));
-    rows.push(["New money since the hold", fresh.length ? `${inrR(fresh.reduce((t, e) => t + n(e.amount_inr), 0))}` : `None since ${clock(p.held_since)}`,
-      fresh.length ? F : "Against: a freeze blocks nothing yet", fresh.length > 0]);
-    return rows;
-  }
-  // Each row: [what was checked, this account's value, what it points to, normal?, why the check matters, section].
-  // "Normal?" comes from the score's own mark for that signal (mule_likeness under 0.5), so the card always agrees
-  // with the score; the cut-offs after ?? are only used before the account's evidence has loaded.
-  const ml = Object.fromEntries((panel?.signals || []).map((s) => [s.signal_name, s.mule_likeness]));
-  const ok = (name, fallback) => (ml[name] != null ? n(ml[name]) < 0.5 : fallback);
-  const OK = "Normal account", BAD = "Fraud sign";
-  const verdict = (good) => (good ? OK : BAD);
-  const hint = (t) => (short ? undefined : t);
-  // the section each check is shown under (EvidenceTable)
   const push = (group, row) => rows.push([row[0], row[1], row[2], row[3], row[4], group]);
+  const hint = (t) => (short ? undefined : t);
   const times = (x) => (x >= 10 ? Math.round(x).toLocaleString("en-IN") : (Math.round(x * 10) / 10).toLocaleString("en-IN"));
+  const PT = "Fraud sign", FX = "Fraud sign", OK = "Normal account";
+  const row = (group, name, label, value, why, sign) => {
+    if (!has(name)) return;
+    const good = !high(name);
+    push(group, [label, measured(name) ? value(v(name)) : "Not measured", good ? OK : sign, good, hint(why)]);
+  };
   const inn = inflows || [];
   const from = (x) => accountName(x.from_name).replace(/^Account /, "account ");
-  const age = sig.account_age_days ?? (p.opened_on ? ageDays(p.opened_on, p.held_since) : null);
-  const kept = sig.balance_retained_ratio, declared = sig.credit_vs_profile;
-
-  // Why the account was held
   if (inn.length) push("held", [short ? "Payments from fraud accounts" : "Payments received from fraud accounts",
     inn.length === 1 ? `1 payment: ${inrR(inn[0].amount_inr)} from ${from(inn[0])}${inn[0].ts && !short ? ` at ${clock(inn[0].ts)}` : ""}` : `${inn.length} payments`,
     "Fraud link", false, hint("This is why the account was held.")]);
-  if (links != null) { const k = Math.round(n(links)), good = ok("complaint_linked_credits_7d", k <= 1);
-    push("held", [short ? "Fraud complaints" : "Fraud complaints that paid it",
-      `${k} in the last 7 days`, verdict(good), good,
-      hint("One can happen to any shop. Several in a week point to a fraud account.")]); }
-  // The account's history
-  if (age != null) { const good = ok("account_age_days", age >= 365);
-    push("history", [short ? "Account age" : "How old the account is",
-      p.opened_on ? ageWords(p.opened_on, p.held_since) : `${Math.round(n(age))} days`, verdict(good), good,
-      hint("Fraud accounts are usually opened shortly before use.")]); }
-  // How money moves through it
-  if (dwell != null) { const good = ok("median_dwell_minutes", dwell >= 60);
-    push("money", [short ? "How long money stays" : "How long money stays before it is spent",
-      short ? stay(dwell) : `${stay(dwell).replace(" h", " hours").replace(" min", " minutes")} on average`,
-      verdict(good), good, hint("Fraud accounts usually empty within minutes. Automatic payments like EMIs are not counted.")]); }
-  if (pass != null) { const good = ok("pass_through_ratio", n(pass) < 0.5);
-    push("money", [short ? "Sent out within 1 hour" : "Money sent out within an hour of arriving",
-      `${Math.round(n(pass) * 100)}% of money received`, verdict(good), good,
-      hint("Fraud accounts pass on most money this quickly.")]); }
-  if (large != null) { const good = ok("large_payer_share", large < 0.5);
-    push("money", ["Who sends it money",
-      large < 0.2 ? "Many customers, small amounts" : large > 0.8 ? "A few senders, large amounts" : "A mix of small and large amounts",
-      verdict(good), good, hint("Fraud accounts usually get a few large payments.")]); }
-  if (kept != null) { const r = n(kept), good = ok("balance_retained_ratio", r >= 1);
-    push("money", [short ? "Money left vs fraud money" : "Money left compared with the fraud money",
-      r >= 1 ? `${times(r)} times the fraud money` : r < 0.05 ? "Almost nothing left" : `${Math.round(r * 100)}% of the fraud money`,
-      verdict(good), good, hint("Fraud accounts are usually nearly empty: the money was already sent on.")]); }
-  if (cash != null) { const k = Math.round(n(cash)), good = ok("cash_or_crypto_exits", !k);
-    push("money", ["Cash or crypto taken out", k ? `${k} time${k === 1 ? "" : "s"}` : "None", verdict(good), good,
-      hint("Fraudsters do this so the money can't be traced.")]); }
-  if (declared != null) { const r = n(declared), good = ok("credit_vs_profile", r <= 3);
-    push("history", [short ? "Money in vs declared" : "Money received compared with what was declared",
-      r <= 1 ? "Within what was declared" : `${times(r)} times what was declared`, verdict(good), good,
-      hint("In the last 30 days. Salary, dividends and refunds paid by companies through NACH are not counted. A sudden jump far above declared income is a warning sign.")]); }
-  // The model, last and smallest
-  if (learned != null) { const good = ok("learned_pattern", n(learned) < 0.5);
-    push("model", [MODEL, modelValue(learned), verdict(good), good,
-      hint("Rough guide only: this score was built from made-up examples, not real bank records.")]); }
+  if (p.action_code === "PROPOSE_FULL_FREEZE" || p.action_code === "PROPOSE_LARGER_HOLD") {
+    const ev = panel?.evidence || {};
+    if (ev.fraud_out_share != null) {
+      const fast = !!ev.fraud_money_leaves_fast;
+      push("held", ["Fraud money leaves faster than its other money", `${pct(ev.fraud_out_share)} within an hour, against ${pct(ev.other_out_share)}`,
+        fast ? "For a freeze" : "Against", !fast, hint("The freeze ladder starts only when fraud-linked money leaves faster than the account's normal money.")]);
+    }
+    if (ev.fraud_case_count != null) push("held", ["Fraud cases on its trail, 90 days", String(Math.round(n(ev.fraud_case_count) * 10) / 10),
+      n(ev.fraud_case_count) >= 3 ? "Strong" : n(ev.fraud_case_count) >= 2 ? "Medium" : "Weak", n(ev.fraud_case_count) < 2,
+      hint("A case in the last 30 days counts 1, an older one 0.5. Three or more: Strong.")]);
+    const tries = attemptsOf(p, watch);
+    if (tries.length) push("held", ["Tries to move held money", String(tries.length), "Strong", false,
+      hint("A refused withdrawal on a Pipe for fraud or a Fast mover goes straight to Strong.")]);
+  }
+  // The account's history: shown as context, never scored (scoring v2 counts only what the money does)
+  if (p.opened_on) {
+    const days = ageDays(p.opened_on, p.held_since);
+    push("history", [short ? "Account age" : "How old the account is", ageWords(p.opened_on, p.held_since),
+      days < 365 ? "Context: under a year" : "Context", true,
+      hint("Fraud accounts are often opened shortly before use. Shown for context only: the scores count what the money does, not who the holder is.")]);
+  }
+  // How money moves
+  row("pass", "median_dwell_minutes", short ? "How long money stays" : "How long money stays before it is spent",
+    (x) => (short ? stay(x) : `${stay(x).replace(" h", " hours").replace(" min", " minutes")} (median)`),
+    "Money that runs through an account leaves within minutes. Automatic payments like EMIs are not counted.", PT);
+  row("pass", "passed_on_within_hour", short ? "Sent on within 1 hour" : "Money sent on within an hour of arriving",
+    (x) => `${pct(x)} of money received`, "Each payment out is matched to one payment in, never counted twice.", PT);
+  row("pass", "cashed_out_within_hour", short ? "Cash or crypto within 1 hour" : "Taken out as cash or crypto within an hour",
+    (x) => `${pct(x)} of money received`, "Only cash taken out right after money arrives counts, so a shop's daily ATM visit does not.", PT);
+  row("pass", "balance_kept_ratio", short ? "Money left vs fraud money" : "Money left compared with the fraud money",
+    (x) => (n(x) >= 1 ? `${times(n(x))} times the fraud money` : n(x) < 0.05 ? "Almost nothing left" : `${pct(x)} of the fraud money`),
+    "An account that passes money on is nearly empty afterwards.", PT);
+  row("pass", "top3_payer_share", "Who sends it money",
+    (x) => (n(x) < 0.2 ? `Many payers (${pct(x)} from the top three)` : `${pct(x)} from the top three payers`),
+    "Salary paid by NACH is left out, so one employer does not make an account look like a pipe.", PT);
+  // Where its money comes from
+  row("exposure", "direct_complaints_7d", short ? "Complaints that paid it" : "Fraud complaints that paid it directly, 7 days",
+    (x) => String(Math.round(n(x))), "Every first-layer account has one. A second and third in a week is what counts.", FX);
+  row("exposure", "trail_touches_90d", short ? "Fraud trails through it" : "Fraud trails that passed through it, 90 days",
+    (x) => String(Math.round(n(x) * 10) / 10), "A complaint in the last 30 days counts 1, an older one 0.5.", FX);
+  row("exposure", "money_from_flagged_share", short ? "Money from flagged accounts" : "Money from accounts under a police notice or in the Suspect Registry",
+    (x) => `${pct(x)} of money received`, "A share, not a count: a big business with one stray payment stays low.", FX);
+  row("exposure", "pays_back_its_payers", short ? "Pays back its payers" : "Accounts it paid that also paid it",
+    (x) => pct(x), "The smallest weight: traders often buy from suppliers who are also their customers.", FX);
   return rows;
 }
 
-const BAND_WORDS = { HONEST: "normal account", REVIEW: "an officer should look", MULE: "fraud account" };
 const SECTIONS = [["held", "Why the account was held"], ["history", "The account's history"],
-                  ["money", "How money moves"], ["model", "Computer model check"]];
+                  ["pass", "How money moves"], ["exposure", "Where its money comes from"]];
 
 function CheckRow({ row: [what, val, reads, good, why] }) {
   return (
@@ -213,11 +205,13 @@ function CheckRow({ row: [what, val, reads, good, why] }) {
 // stay closed and say "All normal". On a narrow card each check stacks (name and verdict, then the value, then why
 // it matters); on a wide one the rows line up as three columns (styles.css, .chk). Rows without a section (the
 // freeze card's) are shown as one plain list.
-function EvidenceTable({ rows, score }) {
+// sections: [key, title] in display order (default SECTIONS); statusOf(key, list) may word a section's summary
+// itself (null keeps the usual "N fraud signs" / "All normal").
+export function EvidenceTable({ rows, score, sections: order = SECTIONS, statusOf }) {
   if (!rows.length) return null;
   const grouped = rows.some((r) => r[5]);
   const hasWhy = rows.some((r) => r[4]);
-  const sections = SECTIONS.map(([key, title]) => [key, title, rows.filter((r) => r[5] === key)]).filter(([, , r]) => r.length);
+  const sections = order.map(([key, title]) => [key, title, rows.filter((r) => r[5] === key)]).filter(([, , r]) => r.length);
   return (
     <div className="chk" style={{ marginBottom: 12 }}>
       <div className="chk-list" role="table" aria-label="What we checked">
@@ -229,7 +223,7 @@ function EvidenceTable({ rows, score }) {
         {!grouped && rows.map((r) => <CheckRow key={r[0]} row={r} />)}
         {grouped && sections.map(([key, title, list]) => {
           const flagged = list.filter((r) => !r[3]).length;
-          const status = key === "held" && flagged ? "Fraud link" : flagged ? `${flagged} fraud sign${flagged === 1 ? "" : "s"}` : "All normal";
+          const status = statusOf?.(key, list) ?? (key === "held" && flagged ? "Fraud link" : flagged ? `${flagged} fraud sign${flagged === 1 ? "" : "s"}` : "All normal");
           return (
             <details className="chk-group" key={key} open={flagged > 0}>
               <summary className="chk-sum">
@@ -240,10 +234,10 @@ function EvidenceTable({ rows, score }) {
             </details>
           );
         })}
-        {score && score.score != null && (
+        {score && score.pass_through != null && (
           <div className="chk-total" role="row">
-            <span role="cell">Total score: <b>{(Math.round(n(score.score) * 100) / 100).toFixed(2)}</b> out of 1</span>
-            <span role="cell" className={`reads ${score.band === "HONEST" ? "r-for" : "r-against"}`}>{cap(BAND_WORDS[score.band] || score.band)}</span>
+            <span role="cell">Pass-through <b>{n(score.pass_through).toFixed(2)}</b> · Fraud exposure <b>{n(score.fraud_exposure).toFixed(2)}</b> out of 1</span>
+            <span role="cell" className={`reads ${score.account_pattern === "ORDINARY_CUSTOMER" ? "r-for" : "r-against"}`}>{typeName(score.account_pattern)}</span>
           </div>
         )}
       </div>
@@ -256,6 +250,7 @@ function EvidenceTable({ rows, score }) {
 function primaryLabel(p, variant, f) {
   switch (p.action_code) {
     case "PROPOSE_NARROW": return `Reduce to ${inrR(f.target)}`;
+    case "PROPOSE_LARGER_HOLD": return `Hold ${inrR(f.target)}`;
     case "PROPOSE_FULL_FREEZE": return variant === "panel" ? `Freeze ${shortName(p.name)}` : "Freeze the account";
     case "UNMATCHED_NOTICE": return `Accept and hold ${inrR(p.near_amount_inr || p.amount_inr)}`;
     case "PROPOSE_PRE_ALERT": return "Send the pre-alert";
@@ -265,6 +260,7 @@ function primaryLabel(p, variant, f) {
 function keepLabel(p, variant, f) {
   switch (p.action_code) {
     case "PROPOSE_NARROW": return `Keep ${inrR(f.held)}`;
+    case "PROPOSE_LARGER_HOLD": return `Keep ${inrR(f.held)} only`;
     case "PROPOSE_FULL_FREEZE": return variant === "panel" ? "Keep the hold only" : `Keep the ${inrR(f.held)} hold only`;
     case "UNMATCHED_NOTICE": return "Wait for the police";
     case "PROPOSE_PRE_ALERT": return "Don't send";
@@ -281,7 +277,7 @@ export function Actions({ p, officer, onDone, variant = "wide", note }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const readOnly = !officer || SNAPSHOT;
-  const signs = ["PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "PROPOSE_PRE_ALERT"].includes(p.action_code);
+  const signs = ["PROPOSE_NARROW", "PROPOSE_LARGER_HOLD", "PROPOSE_FULL_FREEZE", "PROPOSE_PRE_ALERT"].includes(p.action_code);
 
   async function send() {
     setBusy(true);
@@ -563,7 +559,7 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
     return (
       <article className={`card dc ${wide ? "" : "narrowcard"}`}>
         {!wide && <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}><span className="kind">{position || KIND.PROPOSE_FULL_FREEZE}</span><span className="pill p-wait">Waiting</span></div>}
-        {wide && <Header p={p} pill="Pass-through pattern" pillClass="p-held" />}
+        {wide && <Header p={p} pill={typeName(p.account_pattern)} pillClass="p-held" />}
         <Changed p={p} />
         <h4 style={{ fontSize: 19, marginBottom: wide ? 12 : 2 }}>{wide ? `Freeze ${who}'s full account?` : `Freeze ${who}'s whole account?`}</h4>
         {!wide && <p className="note" style={{ marginBottom: 12 }}>{who} <span className="id">{p.account_id}</span> · {p.account_type}, opened {String(p.opened_on || "").slice(0, 10)}</p>}
@@ -585,7 +581,7 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
             </table>
           </div>
         )}
-        <EvidenceTable rows={wide ? rows : rows.filter((r) => !r[0].startsWith("New money"))} />
+        <EvidenceTable rows={rows} score={pd?.evidence} />
         {!wide && <div className="against" style={{ marginBottom: 12 }}><b>Against freezing:</b> a freeze blocks nothing yet. Every rupee in {who} is already held. It only matters if new money arrives, and a full freeze is harder to defend in court than a hold.</div>}
         <Since p={p} watch={watch} />
         <p className="note" style={{ marginBottom: wide ? 14 : 0 }}>Legal basis: {legal}</p>
@@ -601,7 +597,7 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
     const from = pd?.inflows?.[0]?.from_name;
     const against = clear
       ? `the ${inrR(f.held)} came straight from ${from || "an account already held"}. Keeping the full hold costs ${who} ${inrR(f.release)} until the police reply.`
-      : /cash/.test(why || "") ? "this account regularly takes cash out. Money released today could leave as cash the same day. That's why it needs review."
+      : /runs through/.test(why || "") ? "some of the money it receives leaves quickly. Money released today could leave the same day. That's why it needs review."
         : /under 1 year/.test(why || "") ? "the account is under a year old, so its history is short. That's why it needs review."
           : "the victim's share is a large part of the balance, so this is less like one stray payment. That's why it needs review.";
     return (
@@ -630,9 +626,9 @@ export default function DecisionCard({ p, officer, onDone, watch, variant = "wid
   return (
     <article className={`card dc ${wide ? "" : "narrowcard"}`}>
       {!wide && position && <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}><span className="kind">{position}</span><span className="pill p-wait">Waiting</span></div>}
-      {wide && <Header p={p} pill={p.band === "HONEST" ? "Likely genuine customer" : "Mixed history"} pillClass={p.band === "HONEST" ? "p-honest" : "p-plain"} />}
+      {wide && <Header p={p} pill={typeName(p.account_pattern)} pillClass={p.account_pattern === "ORDINARY_CUSTOMER" ? "p-honest" : "p-plain"} />}
       <Changed p={p} />
-      <h4 style={{ fontSize: 19, marginBottom: wide ? 12 : 4 }}>{p.action_code === "PROPOSE_RELEASE" ? `Release the hold on ${who}?` : wide ? `Reduce the hold from ${inrR(f.held)} to ${inrR(f.target)}?` : `Reduce ${who}'s hold to ${inrR(f.target)}?`}</h4>
+      <h4 style={{ fontSize: 19, marginBottom: wide ? 12 : 4 }}>{p.action_code === "PROPOSE_RELEASE" ? `Release the hold on ${who}?` : p.action_code === "PROPOSE_LARGER_HOLD" ? `Hold more on ${who}: ${inrR(f.target)} instead of ${inrR(f.held)}?` : wide ? `Reduce the hold from ${inrR(f.held)} to ${inrR(f.target)}?` : `Reduce ${who}'s hold to ${inrR(f.target)}?`}</h4>
       {!wide && <p className="note" style={{ marginBottom: 12 }}>{p.name}, {p.bank_name || "Bank X"} {p.account_type} account, open {ageWords(p.opened_on, p.held_since)}</p>}
       {!wide && <PinnedActions wrap p={p} officer={officer} onDone={onDone} variant={variant} note={false} />}
       {p.action_code === "PROPOSE_NARROW" && wide && (

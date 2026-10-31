@@ -1,4 +1,6 @@
-"""A likely unreported victim (DECISIONS D-53). When new money reaches an account the bank already holds as mule-like,
+"""Retired by D-64: pre-alerts now follow a proactive hold (pipeline/proactive.py). Kept so the pre-alerts of
+earlier runs stay readable. A likely unreported victim (DECISIONS D-53). When new money reaches an account the bank
+already holds as mule-like,
 and the payer has not paid it before, the payer may be a victim who has not reported yet. The watch holds the money
 under the existing notice as it always has (D-47); this module prepares a pre-alert for the officer to send:
 
@@ -22,8 +24,8 @@ from pipeline.db import ROOT
 from pipeline.explain import inr
 
 RULES = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
-MIN_INR = Decimal(str(RULES["watch"]["pre_alert_min_inr"]))
-NEW_DAYS = int(RULES["watch"]["pre_alert_new_sender_days"])
+MIN_INR = Decimal(str(RULES["proactive"]["min_amount"]))       # the RBI draft's Rs 1,000 (D-61)
+NEW_DAYS = int(RULES["proactive"]["new_payer_days"])
 CITATION = RULES["legal_basis"]["pre_alert"]
 FMT = "%Y-%m-%d %H:%M:%S"
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")

@@ -31,10 +31,10 @@ def test_murugans_mandatory_hold_is_amount_only():
 
 def test_narrowing_proposal_says_why():
     a = act(action_code="PROPOSE_NARROW", act_mode="OFFICER", amount_inr=Decimal("500"),
-            current_hold_inr=Decimal("1000"), reason_code="LIKELY_HONEST_RECEIVER")
+            current_hold_inr=Decimal("1000"), reason_code="ORDINARY_CUSTOMER")
     assert headline(a) == "Narrow the hold to Rs 500?"
     text = " ".join(explain(a))
-    assert "Rs 1,000" in text and "Rs 500" in text and "honest receiver" in text
+    assert "Rs 1,000" in text and "Rs 500" in text and "Ordinary customer" in text
 
 
 def test_emptied_account_hold_takes_what_was_left():

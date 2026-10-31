@@ -5,12 +5,11 @@ After the first pass, every own account a case touched is on the watch list with
 (mule-like, or an honest receiver). The simulated clock checks the watched accounts as payments happen
 (pipeline/night.py; a query a minute is enough, because the hold already protects the money):
 
-  new money, mule-like account   hold it up to the ticket's reported amount, tagged "not linked to a reported victim
-                                 yet" (under LIBR it is not the first victim's money). Above that amount: one line for
-                                 the officer, no hold. A later ticket for that payment links the money to its victim
-                                 If the payer has not paid it before, they may be a victim who has not reported yet:
-                                 a pre-alert, with where the account is on hold, waits for the officer (D-53)
-  new money, honest receiver     let it through and say why: it arrived after the victim's money left
+  new money, eligible account    (Layer 1 or Suspect Registry, typed Pipe for fraud or Fast mover): the payment checks
+                                 on arrival, then a proactive hold of that payment through the checker and its
+                                 pre-alert (pipeline/proactive.py, D-60 to D-64). A later ticket for that payment
+                                 links the money to its victim
+  new money, any other account   let it through and say why: the score can stop a hold, never start one
   refused cash-out, mule-like    record it as evidence and propose a full freeze (the officer decides)
   refused transfer               the recipient is at this bank: check its evidence, put it on the watch, no hold
                                  (no victim money reached it); a business recipient is noted, never labelled; at
@@ -93,70 +92,12 @@ class Watch:
 
     # ------------------------------------------------------------ new money
     def on_credit(self, account: str, txn_id: str, at: str, amount: Decimal, payer: str) -> list[str]:
-        out = []
-        for w in self.entries(account):
-            if at <= w["added_at"]:
-                continue
-            name, when = self.name(account), at[11:16]
-            if w["first_pass"] == "MULE_LIKE":
-                room = w["reported"] - self.checker.held(account, w["case_id"])
-                take = min(amount, max(room, Decimal(0)))
-                if take > 0:
-                    pid = propose(self.maker, w["case_id"], account, "WATCH_HOLD", "AUTOMATIC", take, "watch", at,
-                                  {"trigger": "watch", "source_txn_id": txn_id, "room": str(room)})
-                    r = self.checker.process(None, at, [pid])
-                    sentence = (f"{when}: {name} received {inr(amount)}; {inr(take)} held under the existing notice, "
-                                f"tagged not linked to a reported victim yet (under the lowest-balance rule it is "
-                                f"not the first victim's money)." if r["done"] else
-                                f"{when}: {name} received {inr(amount)}; the checker refused to hold it ({r['text']}).")
-                    self.event(account, w["case_id"], at, "NEW_MONEY_HELD", sentence, amount, self.counterparty(payer),
-                               ref=txn_id, proposal_id=pid)
-                    out.append(sentence)
-                if amount > take:
-                    sentence = (f"{when}: {name} received {inr(amount)}; {inr(amount - take)} of it is above what the "
-                                f"notice covers, so it is not held. For the officer: one line, no decision needed.")
-                    self.event(account, w["case_id"], at, "NEW_MONEY_ABOVE_NOTICE", sentence, amount - take,
-                               self.counterparty(payer), ref=txn_id)
-                    out.append(sentence)
-                out += self.pre_alert(account, w["case_id"], txn_id, at, amount, payer)
-                break                              # one case's notice catches it; the next case's would double it
-            if w["first_pass"] == "HONEST":
-                sentence = (f"{when}: {name} received {inr(amount)}: not held. It arrived after the victim's money "
-                            f"left (lowest-balance rule), so it is the holder's own.")
-                self.event(account, w["case_id"], at, "NEW_MONEY_HONEST", sentence, amount, self.counterparty(payer),
-                           ref=txn_id)
-                out.append(sentence)
-                break
-        return out
+        """New money on a watched account (D-60 to D-64): an eligible account (Layer 1 or Suspect Registry, typed
+        Pipe for fraud or Fast mover) runs the payment checks and, if they pass, gets a proactive hold through the
+        checker and its pre-alert. Any other account: one line saying why nothing is held."""
+        from pipeline import proactive
 
-    def pre_alert(self, account: str, case_id: str, txn_id: str, at: str, amount: Decimal, payer: str) -> list[str]:
-        """A new sender paid a held mule-like account: they may be a victim who has not reported yet (D-53). The
-        pre-alert, with where the account is on hold, waits for the officer to send; nothing more is held."""
-        from pipeline import prealert
-        from pipeline.db import BANKS
-
-        if prealert.is_new_sender(self.maker, account, payer, txn_id, at, amount):
-            return []
-        row = self._q("SELECT utr, channel FROM TXN_LIVE WHERE txn_id = {t}", t=txn_id).fetchone() or (None, None)
-        payer_bank = self._q("SELECT bank_id FROM ACCOUNT WHERE account_id = {p}", p=payer).fetchval()
-        where = self.counterparty(payer)
-        c = {"account": account, "name": self.name(account), "bank_name": BANKS[self.bank]["name"], "payer": payer,
-             "payer_bank_id": payer_bank, "payer_bank_name": BANKS.get(payer_bank or "", {}).get("name"),
-             "payer_where": where, "txn_id": txn_id, "utr": row[0], "channel": row[1], "amount": amount, "at": at,
-             "holds": prealert.holds_on(self.maker, account), "case_id": case_id}
-        reasons, text = prealert.draft(c)
-        pid = propose(self.maker, case_id, account, "PROPOSE_PRE_ALERT", "OFFICER", amount, "watch", at, reasons,
-                      text)
-        r = self.checker.process(None, at, [pid])
-        if not r["waiting"]:
-            return [f"{at[11:16]}: no pre-alert for the payment into {c['name']} ({r['text']})."]
-        held = sum((Decimal(h["amount_inr"]) for h in c["holds"]), Decimal(0))
-        sentence = (f"{at[11:16]}: the {inr(amount)} came from {where}, which had not paid {c['name']} before: it may "
-                    f"be a victim who has not reported yet. A pre-alert is ready for the officer, with where "
-                    f"{c['name']} is on hold ({inr(held)} under {len({h['case_id'] for h in c['holds']})} "
-                    f"{'notice' if len({h['case_id'] for h in c['holds']}) == 1 else 'notices'}).")
-        self.event(account, case_id, at, "PRE_ALERT_READY", sentence, amount, where, row[1], txn_id, proposal_id=pid)
-        return [sentence]
+        return proactive.on_new_money(self, account, txn_id, at, amount, payer)
 
     def on_debit(self, account: str, txn_id: str, at: str, amount: Decimal, to_account: str, channel: str,
                  exit_identifier: str | None) -> list[str]:
@@ -173,6 +114,15 @@ class Watch:
     def on_declined(self, a: dict) -> list[str]:
         account, at = a["account_id"], a["at"]
         ws = [w for w in self.entries(account) if at > w["added_at"]]
+        if ws and (a["channel"] in CASH_OUT or a.get("is_exit")):
+            # a watch event: rescore the account so the type behind a Strong suggestion is today's (D-57)
+            from pipeline import proactive
+
+            if any(w["first_pass"] != "CHECKED" for w in ws):
+                snap = proactive.rescore(self.maker, self.bank, account, at)
+                self.checker.refresh_eligibility(account, at,
+                                                 proactive.decide_eligibility(self.maker, account, at, snap))
+                ws = [w for w in self.entries(account) if at > w["added_at"]]
         name, when = self.name(account), at[11:16]
         case = ws[0]["case_id"] if ws else None
         mule = next((w for w in ws if w["first_pass"] == "MULE_LIKE"), None)
@@ -189,7 +139,10 @@ class Watch:
                 r = reasons.structured(self.maker, mule["case_id"], account, "PROPOSE_FULL_FREEZE",
                                        {"balance": balance, "held": held})
                 pid = propose(self.maker, mule["case_id"], account, "PROPOSE_FULL_FREEZE", "OFFICER", balance,
-                              "watch", at, {**r, "trigger": "watch", "attempt_id": a["attempt_id"]},
+                              "watch", at, {**r, "trigger": "watch", "attempt_id": a["attempt_id"],
+                                            "ladder": "STRONG", "why_strong": "a refused withdrawal on a Pipe for "
+                                                                              "fraud or Fast mover goes straight "
+                                                                              "to Strong"},
                               reasons.template(r))
                 res = self.checker.process(None, at, [pid])
                 sentence += (" A full freeze is proposed: the officer decides." if res["waiting"] else
@@ -232,14 +185,15 @@ class Watch:
         self._q("DELETE FROM SCORE_TARGET WHERE case_id = {k}", k=key)
         self._q("INSERT INTO SCORE_TARGET (case_id, account_id) VALUES ({k}, {a})", k=key, a=recipient)
         steps.score(self.maker, key, self.bank, at, targets=False)
-        band = self._q("SELECT band FROM ACCOUNT_SCORE WHERE case_id = {k} AND account_id = {a}", k=key,
-                       a=recipient).fetchval()
+        from pipeline.proactive import type_name
+
+        pattern = self._q("SELECT account_pattern FROM ACCOUNT_SCORE WHERE case_id = {k} AND account_id = {a}", k=key,
+                          a=recipient).fetchval()
         lines = cross_ticket(self.maker, recipient)
-        words = {"MULE": "a pass-through pattern", "REVIEW": "a mixed pattern",
-                 "HONEST": "an ordinary customer's pattern"}.get(band or "", "no history to read")
+        words = f"the pattern of a {type_name(pattern)}" if pattern else "no history to read"
         evidence = f"its 90-day history shows {words}." + ((" " + " ".join(lines)) if lines else "")
         pid = propose(self.maker, case or key, recipient, "WATCH_ADD", "AUTOMATIC", None, "watch", at,
-                      {"trigger": "watch", "band": band, "why": f"Named by a refused transfer from "
+                      {"trigger": "watch", "pattern": pattern, "why": f"Named by a refused transfer from "
                                                                  f"{self.name(a['account_id'])}; " + evidence})
         res = self.checker.process(None, at, [pid])
         s = (f"The account it tried to pay, {name}, is at this bank: {evidence} "

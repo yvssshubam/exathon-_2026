@@ -83,14 +83,11 @@ def test_payments_bank_x_refused_never_arrive_at_bank_y(db):
 
 
 def test_no_pre_alert_for_money_that_never_arrived(db):
-    assert one(db, "SELECT COUNT(*) FROM PH_Y.PROPOSAL WHERE action_code = 'PROPOSE_PRE_ALERT' "
-                   "AND account_id = 'ACC_M14'") == 0
+    assert one(db, "SELECT COUNT(*) FROM PH_Y.PRE_ALERT WHERE account_id = 'ACC_M14'") == 0
 
 
-def test_a_pre_alert_on_a_complaint_s_trail_closes_unsent(db):
-    rows = q(db, "SELECT p.proposal_status, p.checker_note FROM PH_X.PROPOSAL p WHERE p.action_code = "
-                 "'PROPOSE_PRE_ALERT' AND p.account_id = 'ACC_M10'")
-    assert rows and all(s == "CANCELLED" for s, _ in rows), rows
-    assert any("trail" in (n or "") for _, n in rows)
-    assert one(db, "SELECT COUNT(*) FROM PH_X.WATCH_EVENT WHERE account_id = 'ACC_M10' "
-                   "AND event_kind = 'PRE_ALERT_NOT_NEEDED'") >= 1
+def test_an_account_deeper_in_the_trail_never_gets_a_proactive_hold(db):
+    """D-60: M10 is a second-layer account. However it scores, new money into it is never held automatically."""
+    assert one(db, "SELECT COUNT(*) FROM PH_X.HOLD_LEDGER WHERE account_id = 'ACC_M10' "
+                   "AND action_code = 'PROACTIVE_HOLD'") == 0
+    assert one(db, "SELECT COUNT(*) FROM PH_X.WATCH_LIST WHERE account_id = 'ACC_M10' AND proactive_allowed") == 0

@@ -151,23 +151,19 @@ def test_victim_two_s_money_is_caught_then_linked_and_the_total_held_never_chang
                    "AND event_kind = 'LINKED_TO_VICTIM'") == 1
 
 
-def test_victim_two_was_flagged_before_he_reported_and_the_pre_alert_closed_unsent(db):
-    """D-53: Ravi's 05:45 payment came from a new payer into A, already held: a pre-alert waited for the officer, with
-    where A is on hold. His own complaint at 06:00 closed it unsent, 15 minutes after the flag."""
-    rows = q(db, "SELECT proposed_at, proposal_status, amount_inr, draft_text FROM PH_X.PROPOSAL "
-                 "WHERE account_id = 'ACC_A' AND action_code = 'PROPOSE_PRE_ALERT'")
-    assert [(ts(t), st, d(v)) for t, st, v, _ in rows] == [("2026-10-18 05:45:00", "CANCELLED", Decimal("40000"))]
-    text = rows[0][3]
-    assert "Where account ACC_A is on hold at Bank X:" in text and "IMPS2026101805450021" in text
-    assert "this payment, held under the same notice, not linked to a reported victim yet" in text
-    kinds = q(db, "SELECT event_kind, event_at, sentence FROM PH_X.WATCH_EVENT WHERE account_id = 'ACC_A' "
-                  "AND event_kind LIKE 'PRE_ALERT%' ORDER BY event_at, event_id")
-    assert [(k, ts(t)) for k, t, _ in kinds] == [("PRE_ALERT_READY", "2026-10-18 05:45:00"),
-                                                 ("PRE_ALERT_NOT_NEEDED", "2026-10-18 06:03:00")]
-    assert "15 minutes earlier" in kinds[1][2]
-    assert one(db, "SELECT COUNT(*) FROM PH_X.PORTAL_ENTRY WHERE entry_kind = 'PRE_ALERT'") == 0     # never sent
-    log = q(db, "SELECT log_text FROM PH_X.MORNING_LOG ORDER BY log_id DESC LIMIT 1")[0][0]
-    assert "flagged the payer as a likely unreported victim 15 minutes before the complaint" in log
+def test_victim_two_s_money_was_held_before_he_reported_and_his_complaint_answered_the_pre_alert(db):
+    """D-60 to D-64: A is a Layer-1 Fast mover; Ravi's 05:45 payment came from a first-time payer within 24 hours of
+    the last victim payment, so it was held at once and its pre-alert waited for the officer. His own complaint at
+    06:00 answered it: the money was already held, 15 minutes early (to the minute the ticket reached the bank)."""
+    rows = q(db, "SELECT amount_inr, legal_basis, payer_type, review_state FROM PH_X.HOLD_LEDGER "
+                 "WHERE account_id = 'ACC_A' AND action_code = 'PROACTIVE_HOLD'")
+    assert [(d(v), b, p) for v, b, p, _ in rows] == [(Decimal("40000"), "rbi_draft", "other_bank")]
+    assert rows[0][3] == "LINKED"
+    alert = q(db, "SELECT alert_status, minutes_early, alert_text FROM PH_X.PRE_ALERT WHERE account_id = 'ACC_A'")
+    assert len(alert) == 1 and alert[0][0] == "answered" and int(alert[0][1]) == 15
+    assert "victim" not in alert[0][2].lower() and "mule" not in alert[0][2].lower()
+    assert one(db, "SELECT COUNT(*) FROM PH_X.PORTAL_ENTRY WHERE entry_kind = 'PRE_ALERT' AND account_id = 'ACC_A'") \
+        == 0                                                    # a Fast mover's pre-alert waits; it was never sent
 
 
 def test_the_split_between_victims_is_versioned(db):

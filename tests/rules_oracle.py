@@ -14,7 +14,7 @@ import yaml
 
 from pipeline.cases import Case, TxnRow, bank_view
 from tests.helpers import run
-from tests.score_oracle import score, signals
+from tests.score_oracle import classify, signals
 
 ROOT = Path(__file__).resolve().parents[1]
 RULES = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
@@ -95,19 +95,17 @@ def facts(case: Case, rows: dict, own_bank: str, complaint: dict | None = None, 
             f["hold"] = min(named, f["balance"], f["reported"])
         else:
             f["hold"] = 0
-        f["band"] = f["pass_through"] = f["cash_exits"] = f["complaint_links"] = None
+        f["pattern"] = f["ladder"] = f["fraud_linked"] = None
         if evidence and f["is_own"] and not f["is_exit"]:
             values = signals(rows, case, acc, as_of)
-            f["band"] = score(values)[1]
-            f["pass_through"] = values["pass_through_ratio"]
-            f["cash_exits"] = values["cash_or_crypto_exits"]
-            f["complaint_links"] = values["complaint_linked_credits_7d"]
+            c = classify(values, f["never_full"])
+            f["pattern"], f["ladder"] = c["account_type"], c["ladder"]
+            f["fraud_linked"] = values.get("_fraud_money_share")
     return out
 
 
 def actions(facts_by_account: dict) -> list[dict]:
     """The rules engine: every action, automatic and officer, as in 070_actions.sql. Amounts in paise."""
-    ev = RULES["full_freeze_evidence"]
     out = []
     for f in sorted(facts_by_account.values(), key=lambda f: (f["hop"], f["account_id"])):
         if f["is_exit"]:
@@ -126,10 +124,12 @@ def actions(facts_by_account: dict) -> list[dict]:
         if not f["is_own"] or f["is_exit"]:
             continue
         tainted = f["victim"] + f["others"]
-        if f["hold"] > 0 and tainted < f["hold"] and (f["band"] in ("HONEST", "REVIEW") or f["never_full"]):
+        # what the account type allows (D-57): shrink only an Ordinary customer (or nodal, pool, escrow); the
+        # freeze ladder only on a Pipe for fraud or an Exposed business
+        if f["hold"] > 0 and tainted < f["hold"] and (f["pattern"] == "ORDINARY_CUSTOMER" or f["never_full"]):
             out.append({"account_id": f["account_id"], "action_code": "PROPOSE_NARROW", "mode": "OFFICER",
                         "amount": tainted})
-        if f["band"] == "MULE" and not f["never_full"] and (f["complaint_links"] or 0) >= ev["complaint_links_min"]:
+        elif f["pattern"] in ("PIPE_FOR_FRAUD", "EXPOSED_BUSINESS") and f["ladder"] == "STRONG" and not f["never_full"]:
             out.append({"account_id": f["account_id"], "action_code": "PROPOSE_FULL_FREEZE", "mode": "OFFICER",
                         "amount": f["balance"]})
     return out

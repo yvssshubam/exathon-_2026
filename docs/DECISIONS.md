@@ -436,7 +436,7 @@ At a bank that sees only its own accounts, a victim's money can leave through an
 of its accounts by a hop it cannot see. The money is still the victim's and still in the bank's view, so
 conservation sums the victim's money in every account and exit of the bank's attribution, not only on its own trail.
 
-## D-51 · DEFAULT · One learned signal next to the eight, never in their place
+## D-51 · SUPERSEDED by D-57 and D-58 · One learned signal next to the eight, never in their place
 
 Requirements section 9 allows a model to add one signal and never to replace the list. `python -m pipeline.learned`
 fits a logistic regression (numpy, classes balanced) on AMLworld's labels: accounts that sent a payment marked as
@@ -472,7 +472,7 @@ payment with that UTR is Rs 1,52,800"). A date without a time is compared by the
 account is noted for the officer and answered in the letter; the bank holds only the amount traced. Nothing is held
 on a notice alone, and the text as received is kept in NOTICE_INBOX.
 
-## D-53 · DEFAULT · A new payer into a held account is flagged as a likely unreported victim (a fifth decision)
+## D-53 · SUPERSEDED by D-60 to D-64 · A new payer into a held account is flagged as a likely unreported victim (a fifth decision)
 
 When new money reaches an account already held as mule-like (D-47), it is still held under the existing notice. If
 the payer has not paid the account in the 90 days before, is not on a trail, is not a reported victim, no complaint
@@ -530,3 +530,145 @@ The pre-alert (D-53) closed only when a new complaint named the flagged payment 
 the flagged payment was the fraud's own money moving on (for example V_X10's money passing from M07 to M10) is now
 also enough: an unsent pre-alert on a payment found in the complaint's `TRACE_EDGE` rows is closed as not needed, with
 a watch event saying why. A pre-alert already sent stays as it was.
+
+## D-57 · DEFAULT · Account scoring v2: two scores, four account types and a grey zone replace the MULE, REVIEW and HONEST bands
+
+One mule score mixed two questions: does money run straight through the account, and does it keep getting fraud
+money. An honest fuel pump next to a fraud ring is fast and gets some fraud money; a quiet rented account is slow and
+gets a lot. So every account now gets two scores, each a weighted sum of signals scaled to 0..1 between a `low_at`
+and a `high_at` (`config/scoring.yaml`, version 2):
+
+- **Pass-through** (how the money moves): P1 median minutes money stays, P2 share passed on within an hour, P3 share
+  cashed out within an hour, P4 balance kept against money received, P5 share from the top three payers.
+- **Fraud exposure** (where the money comes from): E1 direct complaints in 7 days, E2 trail touches in 90 days (the
+  last 30 count 1, older ones 0.5), E3 share of money from flagged accounts, E5 pays money back to its own payers.
+
+Each credit is matched to the debits that follow it within the hour by the `MATCH_CREDITS` Python UDF
+(`sql/udf/match_credits.py`): earliest credit first, each debit used once, NACH and AutoPay never matched (D-54
+still holds). A flagged account is a complaint beneficiary whose intake matched (`EXACT` or `ACCEPTED`), an account
+held on a police notice, or one in the Suspect Registry (view `FLAGGED_ACCOUNT`).
+
+The two scores give the type, with cut-offs 0.6 and 0.4: **Pipe for fraud** (both high), **Fast mover** (fast, little
+fraud money), **Exposed business** (fraud money, but it stays), **Ordinary customer** (both low) and the **Grey zone**
+(either score between 0.4 and 0.6), where nothing is suggested and the officer decides. The column is called
+`account_pattern`, because `account_type` already means savings, current or nodal, and the scaled value is `m_value`.
+Every scoring is kept in the append-only `SCORE_SNAPSHOT` (both scores, type, ladder step, every signal as text, the
+weight and config versions); each hold and decision cites its snapshot, so an old hold is explained with the numbers
+of its day. Account age, declared profile, KYC date and salary by NACH are shown as context, never scored.
+
+`pipeline/scoring.py` computes the same thing in plain Python (the test oracle, and the five demo accounts the gate in
+D-58 checks): classic mule → Pipe for fraud; Murugan's fuel pump → Ordinary customer; the jeweller helping the ring →
+Exposed business with a Strong step; the honest fuel pump near the ring → Exposed business, no step; the salaried
+person who sold a phone → Ordinary customer. **VERIFY**: the SQL (`sql/steps/060_score.sql`, the UDF) has only been
+checked against the Python oracle, not yet run on Exasol.
+
+## D-58 · DEFAULT · Scoring weights are learned inside Exasol within bounds; a new version needs tests, no accuracy loss and an approval
+
+Each signal has a hand-set start weight. `python -m pipeline.weights train` builds one row per account in `PH_LEARN`
+(`sql/learn/020_weight_rows.sql`, the same matching UDF as the banks) and fits a logistic regression per score inside
+Exasol (`PH_LEARN.TRAIN_SCORING_WEIGHTS`, `sql/udf/train_weights.py`): coefficients kept at or above 0, classes
+balanced, seed 42, a stratified 70/30 split by account. Each weight is then kept between 0.05 and 0.50 and the set
+rescaled to sum to 1, so no signal can disappear or take over. Gradient-boosted trees (`pipeline/learned.py`) are
+trained on the same rows as a benchmark only and never deployed.
+
+A version is written to `config/scoring_weights.yaml` as **proposed**. `python -m pipeline.weights check --version N`
+runs the gate: weights in bounds and summing to 1, the five demo accounts in D-57 keep their types, and test AUC no
+more than 0.02 below the live version (or the start weights, for the first). Only then can a named person run
+`python -m pipeline.weights approve --version N --by NAME`, which runs the gate again, writes the version into every
+bank's `SCORING_WEIGHTS` and marks it live (`make seed` reloads the newest approved one). Every snapshot records the
+version it used. Nothing goes
+live without that approval. The labels come from AMLworld (synthetic): the report (`docs/SCORING_WEIGHTS.md`) says so.
+
+## D-59 · DEFAULT · The freeze ladder: suggestions grow with fraud cases only once fraud money leaves fast
+
+E4 asks whether fraud money leaves faster than the account's other money: at least half the fraud-linked credits are
+passed on or cashed out within the hour, and that share is at least 30 points above the share for its other credits.
+Only when E4 holds does the step grow with the number of fraud cases: **Weak** (one case, or fraud money under 2% of
+its credits however many cases) suggests nothing beyond the amount hold; **Medium** (2) lets the officer hold the larger of the fraud-linked total and
+the balance (`PROPOSE_LARGER_HOLD`, replacing the case liens with one officer lien); **Strong** (3 or more) proposes
+a whole-account freeze. A refused withdrawal on a Pipe for fraud or Fast mover account is Strong at once. Nodal, pool
+and escrow accounts stop at Medium. The system never places a whole-account hold itself; Medium and Strong are
+proposals the officer accepts or not.
+
+**OPEN** (gap in the spec, implemented literally): an account that passes all money on fast, fraud money and other
+money alike, fails the 30-point gap, so E4 is false and its step stays None however many cases it collects; it reaches
+Strong only through a refused withdrawal. If the team wants such accounts to climb the ladder, E4 needs a second way
+in (for example "Pipe for fraud and the fraud share ≥ 0.5").
+
+## D-60 · DEFAULT · Proactive holds only on Layer-1 or Suspect Registry accounts typed Pipe for fraud or Fast mover
+
+An account goes on the watch with proactive holds allowed only if a complaint ticket names it directly (Layer 1) or
+it is in the Suspect Registry, **and** it is typed Pipe for fraud or Fast mover, **and** it is not a nodal, pool or
+escrow account. Deeper layers and accounts flagged only by our own score are never held proactively. Eligibility is
+checked when the account is added and again whenever it is rescored (each new ticket, a refused cash-out, and once a
+day before the first payment of a new day); an account that turns Exposed business or Ordinary customer stops getting
+new holds but keeps the ones it has. The reason and the snapshot are on the `WATCH_LIST` row. The Suspect Registry is
+simulated (`SUSPECT_REGISTRY`, synced at the start of each run); there is no connection to RBI's Digital Payments
+Intelligence Platform.
+
+## D-61 · DEFAULT · Payment checks on arrival, with the extra condition for Fast movers
+
+Each new credit into an eligible account is checked and every check is written to `PAYMENT_CHECK`: Rs 1,000 or more;
+a payer who has not paid the account in 90 days; not NACH or AutoPay; not a return of the account's own payment; no
+complaint names it yet. A Fast mover also needs one extra condition, since its normal business is fast: larger than
+90% of its credits, or within 24 hours of the last reported payment. A payment that passes is held proactively; one
+that fails is let through and the failed check is shown.
+
+## D-62 · DEFAULT · Two modes; D-47 applies only in current SOP mode
+
+`proactive_hold_mode` in `config/rules.yaml` (or `--hold-mode` on the night run, or the demo bar's switch):
+
+- **rbi_draft** (default): the payment's own amount is held, up to the free balance, under the RBI draft KYC Amendment
+  Directions of 11 Sep 2026 (`legal_basis rbi_draft`), with the clocks of D-63, and the holder is told.
+- **current_sop**: what the rules allow today. New money is held only in the room left under an existing complaint's
+  hold (D-47), under that police notice (`legal_basis police_notice`), with no clocks.
+
+The hold is a `HOLD_LEDGER` row with `proactive TRUE` and hold tag `NOT_LINKED`, so when a ticket later names its UTR
+the existing linking (`_link_not_linked`) attaches it to that victim and its clock stops. The draft directions are
+not final law: the mode is a setting so the bank can run on today's SOP.
+
+## D-63 · DEFAULT · The draft hold lifecycle and its timeouts
+
+In rbi_draft mode: an officer checks every overnight hold by 18:00 the next working day (bank holidays in
+`BANK_HOLIDAY`); the holder can explain within 20 days (`HOLDER_EXPLANATION`); the bank decides within 30 days, or
+10 days after an explanation; a hold kept is referred to the police through CFCFRMS (`PORTAL_ENTRY` kind `REFERRAL`)
+and the police have 30 days to direct (`POLICE_DIRECTION`); without a direction it is released. A missed step goes to
+the Department Head; on day 50 a decision is forced, and at day 60 a hold with no decision is released and marked a
+compliance miss. Every clock is a column on `HOLD_LEDGER`, and the night loop wakes on the next due clock
+(`proactive.next_due`), so the "Jump ahead 60 days" button runs the lifecycle forward. The officer can confirm (one by
+one, or all clear cases at once), release, or keep and refer; each needs a reason and is an `OFFICER_DECISION` citing
+the hold and snapshot. Holder notices reuse `HOLDER_MESSAGE`. In current SOP mode only the next-day check applies.
+
+## D-64 · DEFAULT · Pre-alert routes, automatic sending for Pipe for fraud, officer sending for Fast mover, and the five endings
+
+After a proactive hold, someone who can reach the payer is told (`PRE_ALERT`). The route follows the payer: our own
+customer → a call task for our fraud team (`FRAUD_TEAM_TASK`); another bank's customer → a pre-alert through
+CFCFRMS (`PORTAL_ENTRY` kind `PRE_ALERT`). For a Pipe for fraud account it goes at once; for a Fast mover it waits for
+the officer's click, since a fast business has more genuine payers. If the payer is itself flagged, nothing is sent
+and a `LAYERING_RECORD` is written instead. The text and call script are fixed templates filled from the database,
+never written by the language model, and say "Nothing here says the payer has done anything wrong." Five endings:
+the payer's complaint names it (answered), the payer confirms fraud (confirmed: for our own customer the bank drafts
+their NCRP complaint), the payer says genuine (the officer decides on release), a complaint's trail shows it was not
+needed, or no response by the time the hold ends. Every message is a row in a simulated table; nothing is sent. This
+retires D-53's officer-only pre-alert decision (`PROPOSE_PRE_ALERT`) and the `WATCH_HOLD` automatic action.
+
+## D-65 · DEFAULT · Outcome metrics and the label export
+
+View `PROACTIVE_HOLD_OUTCOME` gives each proactive hold one outcome: confirmed by a victim (with the minutes held
+before the complaint), layering, released after explanation (an officer release counts here), released at the limit,
+or open. The Compare page and the morning brief show them; `GET /api/outcomes` returns them and `GET /api/labels.csv`
+(view `PROACTIVE_HOLD_LABEL`) exports one labelled row per hold with its snapshot's numbers, for the next weight
+training. Open holds have no label.
+
+## D-66 · DEFAULT · Smaller choices made while building v2 and proactive holds
+
+- Column names: `account_pattern` for the v2 type and `m_value` for a scaled signal, since `account_type` and `m`
+  were taken or unreadable.
+- The next-day check is kept in both modes; escalation to the Department Head only in rbi_draft.
+- Holder notices reuse `HOLDER_MESSAGE`, and CFCFRMS referrals and pre-alerts reuse `PORTAL_ENTRY` with new
+  `entry_kind` values, so the portal and audit pages need no new plumbing.
+- Daily rescoring runs only for days after the demo day (18 Oct 2026), so the demo morning's numbers do not move.
+- The demo data for proactive holds is `data/proactive_case.yaml` (scenarios A to G): synthetic, like everything else.
+- A ticket or notice matches only payments made by the moment it is checked (`sql/steps/030_intake.sql`). The
+  simulated world holds the whole day, so a notice read in early could otherwise match a payment that had not
+  happened yet, and the trace from that moment found nothing.

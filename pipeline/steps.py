@@ -33,8 +33,8 @@ DEFAULTS = yaml.safe_load((ROOT / "config" / "case_defaults.yaml").read_text(enc
 SCORING = yaml.safe_load((ROOT / "config" / "scoring.yaml").read_text(encoding="utf-8"))
 RULES = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
 ACTION_COLUMNS = ("account_id", "bank_id", "hop", "action_code", "act_mode", "amount_inr", "current_hold_inr",
-                  "victim_amount_inr", "other_victims_inr", "balance_now_inr", "trail_amount_inr", "band", "score",
-                  "reason_code", "legal_basis", "action_status", "stmt_id")
+                  "victim_amount_inr", "other_victims_inr", "balance_now_inr", "trail_amount_inr", "account_pattern",
+                  "snapshot_id", "reason_code", "legal_basis", "action_status", "stmt_id")
 COMPLAINT_KEYS = ("case_id", "utr", "reported_at", "lane", "victim_tag", "amount_inr", "beneficiary_account",
                   "ticket_kind", "ordering_authority", "ordering_reference", "notice_legal_basis", "fir_reference",
                   "remarks", "corrects_case_id", "complaint_source", "parent_case_id", "from_bank_id", "txn_at",
@@ -155,17 +155,29 @@ def attribute(conn, case_id: str, bank: str, as_of: str | None = None, rule: str
     return {**params, "seconds": elapsed}
 
 
-def score(conn, case_id: str, bank: str, as_of: str | None = None, targets: bool = True) -> dict:
-    """Step 3: the account evidence. targets=True scores the trail's own accounts (055); the watch fills
-    SCORE_TARGET itself for one account and passes targets=False."""
-    if as_of is None:
-        as_of = default_as_of(complaint(conn, case_id)["reported_at"])
-    params = {
+def score_params(case_id: str, as_of: str) -> dict:
+    """The parameters of 060_score.sql: the cut-offs, E4 and the ladder, from config/scoring.yaml (D-57, D-59)."""
+    fast, ladder = SCORING["fast_exit_check"], SCORING["freeze_ladder"]
+    return {
         "case_id": case_id,
         "as_of": as_of,
-        "mule_band": str(SCORING["bands"]["mule"]),
-        "review_band": str(SCORING["bands"]["review"]),
+        "high_at": str(SCORING["cutoffs"]["high_at"]),
+        "low_below": str(SCORING["cutoffs"]["low_below"]),
+        "fast_share": str(fast["fraud_money_out_within_hour_at_least"]),
+        "fast_gap": str(fast["gap_over_other_money_at_least"]),
+        "medium_cases": str(ladder["medium_at_cases"]),
+        "strong_cases": str(ladder["strong_at_cases"]),
+        "weak_share": str(ladder["weak_only_if_fraud_money_share_below"]),
+        "config_version": str(int(SCORING["version"])),
     }
+
+
+def score(conn, case_id: str, bank: str, as_of: str | None = None, targets: bool = True) -> dict:
+    """Step 3: account scoring v2. targets=True scores the trail's own accounts (055); the watch and the daily
+    rescoring fill SCORE_TARGET themselves for one account and pass targets=False."""
+    if as_of is None:
+        as_of = default_as_of(complaint(conn, case_id)["reported_at"])
+    params = score_params(case_id, as_of)
     started = time.perf_counter()
     if targets:
         run_step(conn, "055_score_target.sql", {"case_id": case_id, "own_bank_id": bank})
@@ -183,9 +195,9 @@ def actions(conn, case_id: str, bank: str) -> dict:
         "own_bank_id": bank,
         "basis_hold": RULES["legal_basis"]["hold"],
         "basis_narrow": RULES["legal_basis"]["narrow"],
+        "basis_larger": RULES["legal_basis"]["larger"],
         "basis_freeze": RULES["legal_basis"]["freeze"],
         "basis_trail": RULES["legal_basis"]["trail"],
-        "freeze_links_min": str(RULES["full_freeze_evidence"]["complaint_links_min"]),
     }
     started = time.perf_counter()
     run_step(conn, "070_actions.sql", params)
@@ -285,19 +297,23 @@ def print_attribution(conn, case_id: str, bank: str) -> None:
                   f"Rs {float(victim):,.2f} of it the victim's ({rule})")
 
 
+TYPE_NAMES = {k: v["name"] for k, v in SCORING["account_types"].items()}
+
+
 def print_score(conn, case_id: str) -> None:
     scores = conn.execute(
-        "SELECT account_id, score, band, stmt_id FROM ACCOUNT_SCORE WHERE case_id = {c} ORDER BY account_id",
-        {"c": case_id}).fetchall()
-    for acc, value, band, stmt in scores:
-        rank_col = "mule_rank" if band in ("MULE", "REVIEW") else "honest_rank"
-        reasons = conn.execute(
-            f"SELECT sentence FROM ACCOUNT_SIGNALS WHERE case_id = {{c}} AND account_id = {{a}} "
-            f"AND {rank_col} <= {int(SCORING['top_reasons'])} ORDER BY {rank_col}",
-            {"c": case_id, "a": acc}).fetchall()
-        print(f"{acc:14} {band:6} score {float(value):.2f}   (statement {stmt})")
-        for (sentence,) in reasons:
-            print(f"    - {sentence}")
+        "SELECT account_id, pass_through, fraud_exposure, account_pattern, ladder_step, snapshot_id, weight_version, "
+        "stmt_id FROM ACCOUNT_SCORE WHERE case_id = {c} ORDER BY account_id", {"c": case_id}).fetchall()
+    for acc, pt, fe, pattern, ladder, snap, version, stmt in scores:
+        print(f"{acc:14} {TYPE_NAMES.get(pattern, pattern):18} pass-through {float(pt):.2f}  fraud exposure "
+              f"{float(fe):.2f}  ladder {ladder}  (snapshot {snap}, weights v{version}, statement {stmt})")
+        for score_name, value in (("pass_through", pt), ("fraud_exposure", fe)):
+            rank_col = "high_rank" if float(value) >= 0.5 else "low_rank"
+            for (sentence,) in conn.execute(
+                    f"SELECT sentence FROM ACCOUNT_SIGNALS WHERE case_id = {{c}} AND account_id = {{a}} "
+                    f"AND score_name = {{s}} AND sentence IS NOT NULL AND {rank_col} <= {int(SCORING['top_reasons'])} "
+                    f"ORDER BY {rank_col}", {"c": case_id, "a": acc, "s": score_name}).fetchall():
+                print(f"    - {sentence}")
 
 
 def main(argv: list[str] | None = None) -> int:

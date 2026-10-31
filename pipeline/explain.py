@@ -15,7 +15,8 @@ import yaml
 BANK_NAMES = {k: v["name"] for k, v in yaml.safe_load(
     (Path(__file__).resolve().parents[1] / "config" / "banks.yaml").read_text(encoding="utf-8")).items()}
 AUTOMATIC = ("MANDATORY_HOLD", "HOLD_MARKER", "RECORD_EXIT", "ONWARD_ENTRY")
-PROPOSALS = ("PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE", "PROPOSE_PRE_ALERT")
+PROPOSALS = ("PROPOSE_NARROW", "PROPOSE_LARGER_HOLD", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE",
+             "PROPOSE_PRE_ALERT")
 
 
 def inr(amount) -> str:
@@ -84,6 +85,10 @@ def headline(a: dict) -> str:
         return f"Narrow the hold to {inr(amount)}?"
     if code == "PROPOSE_FULL_FREEZE":
         return "Freeze the whole account?"
+    if code == "PROPOSE_LARGER_HOLD":
+        return f"Hold more: {inr(amount)}?"
+    if code == "PROACTIVE_HOLD":
+        return f"Held {inr(amount)} of a first-time payer's money"
     if code == "UNMATCHED_NOTICE":
         return "Unmatched notice: act on the near match?"
     if code == "PROPOSE_RELEASE":
@@ -130,16 +135,22 @@ def explain(a: dict) -> list[str]:
         if reason == "NODAL_POOL_ESCROW":
             out.append("This is a nodal, pool or escrow account, so the hold should stay as small as the trail allows.")
         else:
-            out.append("The account's history reads like an honest receiver, so narrowing the lien to the victims' "
-                       "money is proposed. Receiving one tainted payment is not complicity (AP HC, 22 Jun 2026).")
+            out.append("The account is typed Ordinary customer: money does not run straight through it and it does "
+                       "not keep getting fraud money, so shrinking the lien to the victims' money is proposed. "
+                       "Receiving one tainted payment is not complicity (AP HC, 22 Jun 2026).")
     elif code == "PROPOSE_FULL_FREEZE":
         out.append("The account's history shows the exceptional pattern courts accept for a whole-account freeze "
                    "(Rajasthan HC, 20 Aug 2026). A label alone is not a reason, so the evidence is listed below.")
-        if reason == "REPEATED_COMPLAINTS":
-            out.append("It received money from three or more reported frauds in the last 7 days.")
+        if reason == "LADDER_STRONG":
+            out.append("Fraud-linked money leaves it faster than its other money, in three or more fraud cases (the "
+                       "freeze ladder at Strong).")
         else:
             out.append("After the hold it tried to take the money out as cash, and the hold refused it.")
         out.append("A freeze also stops money that arrives later from being moved. Only an officer can place it.")
+    elif code == "PROPOSE_LARGER_HOLD":
+        out.append("Fraud-linked money leaves this account faster than its other money, in two fraud cases (the "
+                   "freeze ladder at Medium). A larger lien is proposed, up to the fraud-linked money of 90 days and "
+                   "never above the balance; not the whole account.")
     elif code == "UNMATCHED_NOTICE":
         out.append("The ticket does not match a transaction exactly, so nothing is held and it was sent back for "
                    "correction at once. A payment on the account it names may be the one it means: you decide.")

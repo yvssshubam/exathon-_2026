@@ -158,6 +158,7 @@ function HandoverNote({ log }) {
 }
 
 const WHOM = [["all", "Everyone"], ["officers", "Any officer"], ["system", "The system"], ["watch", "After the hold"]];
+const BASIS = { rbi_draft: "RBI draft", police_notice: "Police notice" };
 
 export function Audit({ caseId, officer, onChange }) {
   const story = useLoad(() => api.story(), []);
@@ -168,7 +169,7 @@ export function Audit({ caseId, officer, onChange }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [onlyCase, setOnlyCase] = useState(caseId || null);
-  const [decidedOnly, setDecidedOnly] = useState(false);
+  const [view, setView] = useState("all");            // the tab: every event, decided today, proactive holds
   const [showAll, setShowAll] = useState(false);
   // wait for the handover note too, so the page does not jump when it arrives
   if ((story.loading && !story.data) || (inbox.loading && !inbox.data)) return <div className="wrap"><Loading what="Loading the audit log" /></div>;
@@ -185,11 +186,12 @@ export function Audit({ caseId, officer, onChange }) {
   const hay = (e) => [rs(e.what), e.who, e.label, e.victim, e.ref].filter(Boolean).join(" ").toLowerCase();
   const rows = all.filter((e) => {
     const day = (e.t || "").slice(0, 10), hm = (e.t || "").slice(11, 16);
-    return (!onlyCase || e.case_id === onlyCase) && (!decidedOnly || decided[e.ref]) && byWhom(e) && (!date || day === date)
+    return (!onlyCase || e.case_id === onlyCase) && (view !== "decided" || decided[e.ref]) && (view !== "proactive" || e.proactive) && byWhom(e) && (!date || day === date)
       && (!from || (hm && hm >= from)) && (!to || (hm && hm <= to)) && words.every((w) => hay(e).includes(w));
   });
   const filtered = q || whom !== "all" || date || from || to || onlyCase;
   const clear = () => { setQ(""); setWhom("all"); setDate(""); setFrom(""); setTo(""); setOnlyCase(null); };
+  const proactiveCount = all.filter((e) => e.proactive).length;
   const decidedCount = all.filter((e) => decided[e.ref]).length;
   const caseName = onlyCase && (all.find((e) => e.case_id === onlyCase) || {});
   const log = inbox.data?.morning_log;
@@ -199,10 +201,10 @@ export function Audit({ caseId, officer, onChange }) {
       <p style={{ fontSize: 15, color: "#44505e", marginTop: 4, marginBottom: 22 }}>Every step the system took and every decision an officer signed, in order. Nothing here can be edited.</p>
       {log && <HandoverNote log={log} />}
       <div role="tablist" aria-label="Which events" style={{ display: "flex", gap: 8, borderBottom: "1px solid #d9dfe5", marginBottom: 16 }}>
-        {[[false, "Every event", all.length], [true, "Decided today", decidedCount]].map(([on, label, n]) => (
-          <button key={label} type="button" role="tab" aria-selected={decidedOnly === on} onClick={() => { setDecidedOnly(on); setShowAll(false); }}
-            style={{ font: "inherit", fontSize: 17, fontWeight: decidedOnly === on ? 700 : 600, color: decidedOnly === on ? "#17212b" : "#44505e", background: "none",
-              border: 0, borderBottom: `3px solid ${decidedOnly === on ? "#17212b" : "transparent"}`, marginBottom: -1, padding: "10px 16px", minHeight: 48, cursor: "pointer" }}>
+        {[["all", "Every event", all.length], ["decided", "Decided today", decidedCount], ["proactive", "Proactive holds", proactiveCount]].map(([key, label, n]) => (
+          <button key={label} type="button" role="tab" aria-selected={view === key} onClick={() => { setView(key); setShowAll(false); }}
+            style={{ font: "inherit", fontSize: 17, fontWeight: view === key ? 700 : 600, color: view === key ? "#17212b" : "#44505e", background: "none",
+              border: 0, borderBottom: `3px solid ${view === key ? "#17212b" : "transparent"}`, marginBottom: -1, padding: "10px 16px", minHeight: 48, cursor: "pointer" }}>
             {label} <span style={{ marginLeft: 6, fontWeight: 400, color: "#5b6675" }}>{n}</span>
           </button>
         ))}
@@ -227,7 +229,7 @@ export function Audit({ caseId, officer, onChange }) {
       {from && to && from > to && <p className="note" style={{ marginBottom: 10, color: "#7a211b" }}>The "From" time is after the "To" time, so nothing can match.</p>}
       <div className="card" style={{ overflowX: "auto" }}>
         <table className="t">
-          <thead><tr><th scope="col">Time</th><th scope="col">Who</th><th scope="col">What happened</th><th scope="col">Complaint</th><th scope="col">Reference</th></tr></thead>
+          <thead><tr><th scope="col">Time</th><th scope="col">Who</th><th scope="col">What happened</th><th scope="col">Complaint</th><th scope="col">Legal basis</th><th scope="col">Reference</th></tr></thead>
           <tbody>
             {(showAll ? rows : rows.slice(0, 25)).map((e, i) => {
               const [who, cls] = e.kind === "officer" ? [e.who, "p-officer"] : WHO[e.kind] || [e.who, "p-system"];
@@ -248,11 +250,13 @@ export function Audit({ caseId, officer, onChange }) {
                     })()}
                   </td>
                   <td className="note">{e.case_id ? (e.victim || e.label) : e.kind === "note" ? "All" : "None"}</td>
+                  <td className="note">{e.legal_basis ? BASIS[e.legal_basis] || e.legal_basis : "–"}</td>
                   <td className="id">{e.ref}</td>
                 </tr>
               );
             })}
-            {!rows.length && <tr><td colSpan={5} className="note">{decidedOnly && !decidedCount ? "No officer has decided anything yet today." : "Nothing matches these filters."}</td></tr>}
+            {!rows.length && <tr><td colSpan={6} className="note">{view === "decided" && !decidedCount ? "No officer has decided anything yet today."
+              : view === "proactive" && !proactiveCount ? "No proactive hold yet." : "Nothing matches these filters."}</td></tr>}
           </tbody>
         </table>
       </div>

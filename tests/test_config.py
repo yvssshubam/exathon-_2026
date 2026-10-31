@@ -16,14 +16,17 @@ def test_rules_split_automatic_and_officer():
     assert not any("FREEZE" in name or "RELEASE" in name or "NARROW" in name for name in rules["automatic"])
 
 
-def test_the_officer_decides_five_things_only():
-    assert set(rules["officer"]) == {"PROPOSE_NARROW", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE", "PROPOSE_RELEASE",
-                                     "PROPOSE_PRE_ALERT"}
+def test_the_officer_decides_the_judgment_calls_only():
+    # PROPOSE_PRE_ALERT is retired (D-64) but kept so old proposals stay readable; PROPOSE_LARGER_HOLD is the freeze
+    # ladder's Medium step (D-59). The proactive holds' decisions (confirm, release, keep and refer) go through the
+    # checker as their own actions (pipeline/proactive.py).
+    assert set(rules["officer"]) == {"PROPOSE_NARROW", "PROPOSE_LARGER_HOLD", "PROPOSE_FULL_FREEZE", "UNMATCHED_NOTICE",
+                                     "PROPOSE_RELEASE", "PROPOSE_PRE_ALERT"}
 
 
 def test_full_freeze_evidence_and_legal_bases():
     ev = rules["full_freeze_evidence"]
-    assert ev["complaint_links_min"] == 3
+    assert set(ev["refused_withdrawal_types"]) == {"PIPE_FOR_FRAUD", "FAST_MOVER"}
     assert set(ev["watch_cash_out_channels"]) == {"ATM", "CASH", "CRYPTO"}
     assert "S.168" in rules["legal_basis"]["hold"] and "9.1(i)" in rules["legal_basis"]["hold"]
     assert "Rajasthan" in rules["legal_basis"]["freeze"]
@@ -38,13 +41,26 @@ def test_three_banks_each_with_its_own_schema():
     assert banks["BANK_Z"]["desk_opens"] == "10:00"
 
 
-def test_scoring_weights_and_bands():
-    weights = [s["weight"] for s in scoring["signals"].values()]
-    assert abs(sum(weights) - 1.0) < 1e-9
-    assert len(scoring["signals"]) == 8
-    assert scoring["bands"] == {"mule": 0.70, "review": 0.40}
+def test_scoring_v2_weights_cutoffs_and_ladder():
+    for score_name in ("pass_through", "fraud_exposure"):
+        assert abs(sum(s["start_weight"] for s in scoring[score_name].values()) - 1.0) < 1e-9
+        for name, s in scoring[score_name].items():
+            assert s["low_at"] != s["high_at"], name
+            assert s["high_sentence"] and s["low_sentence"], name
+    assert len(scoring["pass_through"]) == 5 and len(scoring["fraud_exposure"]) == 4
+    assert scoring["cutoffs"] == {"high_at": 0.60, "low_below": 0.40}
     assert scoring["window_days"] == 90
     assert set(scoring["never_account_hold_types"]) == {"nodal", "pool", "escrow"}
-    for name, s in scoring["signals"].items():
-        assert s["honest_at"] != s["mule_at"], name
-        assert s["mule_sentence"] and s["honest_sentence"], name
+    assert scoring["weight_learning"]["weight_min"] == 0.05 and scoring["weight_learning"]["weight_max"] == 0.50
+    assert scoring["freeze_ladder"]["strong_at_cases"] == 3 and scoring["freeze_ladder"]["medium_at_cases"] == 2
+
+
+def test_proactive_rules_match_the_brief():
+    p = rules["proactive"]
+    assert p["proactive_hold_mode"] in ("rbi_draft", "current_sop")
+    assert p["min_amount"] == 1000 and p["new_payer_days"] == 90
+    assert p["fast_mover_size_percentile"] == 90 and p["fast_mover_recent_hours"] == 24
+    assert (p["explanation_days"], p["decide_days"], p["decide_after_explanation_days"], p["limit_days"]) == (
+        20, 30, 10, 60)
+    assert set(p["eligible_types"]) == {"PIPE_FOR_FRAUD", "FAST_MOVER"}
+    assert {k for k, v in rules["account_types"].items() if v["proactive"]} == {"PIPE_FOR_FRAUD", "FAST_MOVER"}

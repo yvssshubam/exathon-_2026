@@ -1,6 +1,7 @@
 -- 030_intake.sql — ticket intake (Module 1): is the ticket's transaction really in this bank's data, and is it new?
 -- Runs inside the bank's schema the moment a ticket lands, before anything else. Run by the maker (tool read_ticket,
 -- check_notice and find_related_cases); it changes nothing outside INTAKE_CHECK. Parameters: case_id, checked_at.
+-- Only payments made by checked_at can match: the simulated world holds the whole day, a bank only what has happened.
 --
 --   EXACT       UTR, amount, time (within 15 minutes; the day, for a notice that gives no time) and the receiving
 --               account all match one payment. An onward
@@ -83,12 +84,14 @@ FROM (
     CROSS JOIN (SELECT MIN(t.txn_id) AS exact_txn
                 FROM TXN t JOIN COMPLAINT k ON k.case_id = {case_id}
                                            AND t.utr = k.utr AND t.to_account = k.beneficiary_account
-                WHERE (t.amount_inr = k.amount_inr OR (k.ticket_kind = 'ONWARD' AND k.amount_inr <= t.amount_inr))
+                WHERE t.ts <= TO_TIMESTAMP({checked_at}, 'YYYY-MM-DD HH24:MI:SS')
+                  AND (t.amount_inr = k.amount_inr OR (k.ticket_kind = 'ONWARD' AND k.amount_inr <= t.amount_inr))
                   AND (k.txn_at IS NULL
                        OR (k.txn_time_known = FALSE AND CAST(t.ts AS DATE) = CAST(k.txn_at AS DATE))
                        OR (COALESCE(k.txn_time_known, TRUE) AND ABS(MINUTES_BETWEEN(t.ts, k.txn_at)) <= 15))) ex
     CROSS JOIN (SELECT MIN(t.to_account) AS utr_account, MIN(t.amount_inr) AS utr_amount, MIN(t.ts) AS utr_ts
-                FROM TXN t JOIN COMPLAINT k ON k.case_id = {case_id} AND t.utr = k.utr) u
+                FROM TXN t JOIN COMPLAINT k ON k.case_id = {case_id} AND t.utr = k.utr
+                WHERE t.ts <= TO_TIMESTAMP({checked_at}, 'YYYY-MM-DD HH24:MI:SS')) u
     CROSS JOIN (SELECT COUNT(*) AS accepted FROM DECISION d
                 WHERE d.case_id = {case_id} AND d.action_code = 'UNMATCHED_NOTICE'
                   AND d.decision_outcome IN ('APPROVED', 'EDITED')) a
@@ -112,6 +115,7 @@ FROM (
                             AND t.to_account = k.beneficiary_account
                             AND t.amount_inr = k.amount_inr
             WHERE t.utr <> k.utr
+              AND t.ts <= TO_TIMESTAMP({checked_at}, 'YYYY-MM-DD HH24:MI:SS')
               AND ((COALESCE(k.txn_time_known, TRUE)
                     AND t.ts BETWEEN ADD_MINUTES(COALESCE(k.txn_at, k.reported_at), -120)
                                  AND ADD_MINUTES(COALESCE(k.txn_at, k.reported_at), 120))

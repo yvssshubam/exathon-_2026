@@ -30,24 +30,30 @@ from decimal import Decimal
 
 import yaml
 
-from pipeline.cases import DEMO_CASE, EXTRA_CASES, LOOP_CASE, ROOT, Case, load_case
+from pipeline.cases import DEMO_CASE, EXTRA_CASES, LOOP_CASE, PROACTIVE_CASE, ROOT, Case, load_case
 from pipeline.db import BANKS, PORTAL_SCHEMA, schema_for
 from pipeline.gen_history import generate as generate_history
 
 SNAPSHOT_TS = "2026-10-18 00:00:00.000"   # opening balances are as of the start of the case day
-CASE_FILES = {"demo_case": DEMO_CASE, "extra_cases": EXTRA_CASES, "loop_case": LOOP_CASE}
+CASE_FILES = {"demo_case": DEMO_CASE, "extra_cases": EXTRA_CASES, "loop_case": LOOP_CASE,
+              "proactive_case": PROACTIVE_CASE}
 SCORING = ROOT / "config" / "scoring.yaml"
+RULES = ROOT / "config" / "rules.yaml"
+WEIGHTS = ROOT / "config" / "scoring_weights.yaml"      # approved learned versions (pipeline/weights.py approve)
 
 # Reference tables loaded into every bank's schema (all columns, in table order).
 BANK_TABLES = ["BANK", "ACCOUNT", "TXN", "BALANCE_SNAPSHOT", "PAYMENT_REQUEST", "SCORING_CONFIG", "PROFILE_BAND",
-               "LEARNED_COEF", "LEARNED_TREE"]
+               "LEARNED_COEF", "LEARNED_TREE", "SCORING_WEIGHTS", "SUSPECT_REGISTRY", "BANK_HOLIDAY",
+               "HOLDER_EXPLANATION", "POLICE_DIRECTION", "PAYER_RESPONSE"]
 # Emptied on every load: the inbox (the portal fills it) and every work table, so a reload is a clean slate.
 EMPTIED = ["COMPLAINT", "TICKET", "INTAKE_CHECK", "CASE_LINK", "TRACE_LINK", "TRACE_EDGE", "REFERRAL_OUT",
            "ATTRIBUTION", "ATTRIBUTION_RAW", "ATTRIBUTION_FLOW", "VICTIM_SPLIT", "SCORE_TARGET", "ACCOUNT_SIGNALS",
            "ACCOUNT_SCORE", "CASE_ACCOUNT", "CASE_ACTION", "PROPOSAL", "CHECK_RESULT", "HOLD_LEDGER",
            "PORTAL_ENTRY", "HOLDER_MESSAGE", "DECISION", "WATCH_LIST", "DECLINED_ATTEMPT", "UNDELIVERED_CREDIT",
            "WATCH_EVENT",
-           "AGENT_RUN", "AGENT_STEP", "MORNING_LOG", "TODAY_RAW", "TODAY_OUTCOME", "LEARNED_INPUT", "NOTICE_INBOX"]
+           "AGENT_RUN", "AGENT_STEP", "MORNING_LOG", "TODAY_RAW", "TODAY_OUTCOME", "LEARNED_INPUT", "NOTICE_INBOX",
+           "CREDIT_MATCH", "SCORE_SNAPSHOT", "PAYMENT_CHECK", "PRE_ALERT", "FRAUD_TEAM_TASK", "LAYERING_RECORD",
+           "RUN_SETTING"]
 PORTAL_TABLES = ["TICKET", "ENTRY", "ROUTE_LOG", "SIM_CLOCK"]
 PORTAL_TICKET_COLUMNS = ["case_id", "to_bank_id", "origin", "parent_case_id", "source_entry_id", "ack_no",
                          "complaint_source", "ticket_kind", "victim_account", "victim_tag", "utr", "amount_inr",
@@ -137,20 +143,55 @@ def rows_for(cases: dict[str, Case], history: bool = True) -> dict[str, list]:
             out["TXN"].append((h["txn_id"], h["utr"], ts(h["ts"]), h["from"], h["to"], rupees(h["amount_paise"]),
                                h["channel"], b(h["to"].startswith("EXIT:")), h["exit_identifier"], "history"))
     scoring = yaml.safe_load(SCORING.read_text(encoding="utf-8"))
-    for name, sig in scoring["signals"].items():
-        out["SCORING_CONFIG"].append((name, sig["weight"], sig["honest_at"], sig["mule_at"],
-                                      sig["mule_sentence"], sig["honest_sentence"]))
+    for score_name in ("pass_through", "fraud_exposure"):           # scoring v2 (D-57)
+        for name, sig in scoring[score_name].items():
+            out["SCORING_CONFIG"].append((name, score_name, sig["low_at"], sig["high_at"], sig["start_weight"],
+                                          sig["high_sentence"], sig["low_sentence"]))
+    out["SCORING_WEIGHTS"] = weight_rows(scoring)
     from pipeline import learned
 
-    model = learned.load()                      # the learned signal, only once it is trained (D-51)
-    out["SCORING_CONFIG"] += learned.config_row(model)
+    model = learned.load()                      # the retired learned signal: kept in its tables, never scored (D-58)
     out["LEARNED_COEF"] = learned.coef_rows(model)
     out["LEARNED_TREE"] = learned.tree_rows(model)
+    rules = yaml.safe_load(RULES.read_text(encoding="utf-8"))
+    out["BANK_HOLIDAY"] = [(str(h["date"]), h.get("name")) for h in rules["proactive"].get("bank_holidays") or []]
+    for case in cases.values():                 # simulated inputs for proactive holds (D-60 to D-64)
+        sim = case.sim_inputs
+        out["SUSPECT_REGISTRY"] += [(r["account_id"], ts(r["listed_on"]), r.get("listed_by", "I4C (simulated)"))
+                                    for r in sim.get("suspect_registry", [])]
+        out["HOLDER_EXPLANATION"] += [(r["account_id"], r["txn_id"], ts(r["explained_at"]), r.get("explanation"), None)
+                                      for r in sim.get("holder_explanations", [])]
+        out["POLICE_DIRECTION"] += [(r["account_id"], r["txn_id"], r["direction"], r.get("reference"),
+                                     ts(r["directed_at"]), None) for r in sim.get("police_directions", [])]
+        out["PAYER_RESPONSE"] += [(r["txn_id"], r["response"], ts(r["responded_at"]), r.get("note"), None)
+                                  for r in sim.get("payer_responses", [])]
     for band, expected in scoring["profile_band_expected_monthly_credit_inr"].items():
         out["PROFILE_BAND"].append((band, str(Decimal(str(expected)))))
     out["ACCOUNT"] = list(accounts.values())
     out["BANK"] = [(k, v["name"], "FALSE") for k, v in BANKS.items()]
     return out
+
+
+def weight_rows(scoring: dict) -> list[tuple]:
+    """SCORING_WEIGHTS: version 0 (the starting weights, approved by policy) and every approved learned version in
+    config/scoring_weights.yaml. Exactly one version is live: the newest approved one (D-58)."""
+    saved = yaml.safe_load(WEIGHTS.read_text(encoding="utf-8")) if WEIGHTS.exists() else None
+    versions = (saved or {}).get("versions") or []
+    live = max((int(v["version"]) for v in versions if v.get("approved_by")), default=0)
+    rows = []
+    for score_name in ("pass_through", "fraud_exposure"):
+        for name, sig in scoring[score_name].items():
+            rows.append((0, score_name, name, None, sig["start_weight"], None, "config/scoring.yaml start_weight",
+                         None, None, "policy", None, "TRUE" if live == 0 else "FALSE"))
+    for v in versions:
+        if not v.get("approved_by"):
+            continue
+        for w in v["weights"]:
+            test = (v.get("test") or {}).get(w["score"], {})
+            rows.append((int(v["version"]), w["score"], w["signal"], w.get("coefficient"), w["weight"],
+                         ts(v.get("trained_at")), v.get("data_window"), test.get("auc"), test.get("precision"),
+                         v["approved_by"], ts(v.get("approved_at")), "TRUE" if int(v["version"]) == live else "FALSE"))
+    return rows
 
 
 def bank_rows(world: dict[str, list], bank: str) -> dict[str, list[tuple]]:
@@ -171,6 +212,12 @@ def bank_rows(world: dict[str, list], bank: str) -> dict[str, list[tuple]]:
         "PROFILE_BAND": world["PROFILE_BAND"],
         "LEARNED_COEF": world["LEARNED_COEF"],
         "LEARNED_TREE": world["LEARNED_TREE"],
+        "SCORING_WEIGHTS": world["SCORING_WEIGHTS"],
+        "SUSPECT_REGISTRY": world["SUSPECT_REGISTRY"],          # national: every bank may read it (simulated)
+        "BANK_HOLIDAY": world["BANK_HOLIDAY"],
+        "HOLDER_EXPLANATION": [r for r in world["HOLDER_EXPLANATION"] if r[0] in own],
+        "POLICE_DIRECTION": [r for r in world["POLICE_DIRECTION"] if r[0] in own],
+        "PAYER_RESPONSE": [r for r in world["PAYER_RESPONSE"] if r[0] in {t[0] for t in txns if t[4] in own}],
     }
 
 
@@ -238,7 +285,14 @@ def copy_amlworld(conn, bank: str) -> int:
 
 # ---------------------------------------------------------------- loading
 
-def load(conn, world: dict[str, list], amlworld: bool = True) -> dict[str, int]:
+def hold_mode(override: str | None = None) -> str:
+    """The proactive-hold mode of this run (D-62): the demo bar's choice, else config/rules.yaml."""
+    if override in ("rbi_draft", "current_sop"):
+        return override
+    return yaml.safe_load(RULES.read_text(encoding="utf-8"))["proactive"]["proactive_hold_mode"]
+
+
+def load(conn, world: dict[str, list], amlworld: bool = True, mode: str | None = None) -> dict[str, int]:
     """Empty every bank's tables, load its share, put the police tickets on the portal. Returns AMLworld
     transactions per bank (kept or copied). `conn` is an admin connection."""
     keep_aml = amlworld and amlworld_loaded(conn)
@@ -254,7 +308,10 @@ def load(conn, world: dict[str, list], amlworld: bool = True) -> dict[str, int]:
                 conn.execute(f"DELETE FROM {s}.{table} WHERE NOT ({key})")
             else:
                 conn.execute(f"TRUNCATE TABLE {s}.{table}")
-            conn.import_from_iterable(mine[table], (s, table))
+            if mine[table]:
+                conn.import_from_iterable(mine[table], (s, table))
+        conn.execute(f"INSERT INTO {s}.RUN_SETTING (setting_name, setting_value) VALUES ('proactive_hold_mode', "
+                     "{m})", {"m": hold_mode(mode)})
         from pipeline.notices import inbox_rows
 
         notices = inbox_rows().get(bank, [])        # police notices that reach this desk by e-mail or letter (D-52)
@@ -310,10 +367,11 @@ def world_from_files() -> dict[str, list]:
     return rows_for({source: load_case(path) for source, path in CASE_FILES.items()})
 
 
-def reset(conn, amlworld: bool = True) -> dict[str, int]:
-    """Reload everything: every ticket waits on the portal again, every work table is empty (the console's Reset)."""
+def reset(conn, amlworld: bool = True, mode: str | None = None) -> dict[str, int]:
+    """Reload everything: every ticket waits on the portal again, every work table is empty (the console's Reset).
+    mode: rbi_draft or current_sop for this run's proactive holds (default: config/rules.yaml)."""
     world = world_from_files()
-    copied = load(conn, world, amlworld)
+    copied = load(conn, world, amlworld, mode)
     from pipeline.db import audit
 
     for bank in BANKS:

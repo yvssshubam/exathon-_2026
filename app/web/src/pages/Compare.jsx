@@ -24,6 +24,7 @@ function One({ caseId, queue }) {
   const detail = useLoad(() => api.caseDetail(caseId), [caseId]);
   const trail = useLoad(() => api.trail(caseId).catch(() => null), [caseId]);
   const day = useLoad(() => api.day().catch(() => null), []);
+  const outcomes = useLoad(() => api.outcomes().catch(() => null), []);
   const tag = detail.data?.victim_tag;
   const nar = useLoad(() => (tag ? api.narrator(tag).catch(() => null) : Promise.resolve(null)), [tag]);
   if ((cmp.loading && !cmp.data) || (detail.loading && !detail.data)) return <div className="wrap"><Loading what="Replaying the manual desk in Exasol" /></div>;
@@ -164,9 +165,29 @@ function One({ caseId, queue }) {
               <tr><td>First hold, after-hours complaints</td><td>{nightMins.length ? (Math.min(...nightMins) === Math.max(...nightMins) ? duration(nightMins[0]) : `${duration(Math.min(...nightMins))} to ${duration(Math.max(...nightMins))}`) : "–"}</td><td className="good">{dd.tool.night_minutes?.length ? duration(Math.max(...dd.tool.night_minutes)) : duration(dd.tool.max_minutes)}</td></tr>
             </tbody>
           </table>
+          {outcomes.data?.proactive_holds > 0 && <Outcomes o={outcomes.data} />}
           <p className="note" style={{ marginTop: 8 }}>Manual desk modelled as: open {d.desk.desk_opens?.length > 5 ? clock(d.desk.desk_opens) : "10:00"} to 18:00, about {d.desk.first_lookup_minutes} min for the first account and {d.desk.per_account_minutes} min for each next, freezes whole accounts.{sentBack.length ? ` ${joinAnd(sentBack.map((t) => `${possessive(victimName(t.victim_tag))} ${clock(t.received_at)}`))} complaint${sentBack.length === 1 ? " is" : "s are"} left out of both columns because ${sentBack.length === 1 ? "its notice does" : "their notices do"} not match the payment.` : ""}</p>
         </section>
       )}
     </main>
+  );
+}
+
+// Module 7 (D-65): whether proactive holds are right. Open holds are not counted as right or wrong.
+function Outcomes({ o }) {
+  const share = (x) => (x == null ? "–" : `${Math.round(x * 100)}%`);
+  return (
+    <div style={{ marginTop: 16 }}>
+      <h3 style={{ fontSize: 15, marginBottom: 8 }}>Proactive holds: {plural(o.proactive_holds, "hold")} placed before anyone complained, {o.closed} closed</h3>
+      <table className="tl" style={{ border: "1px solid #e8ecf0" }}>
+        <thead><tr><th scope="col">Measure</th><th scope="col">Value</th><th scope="col">What it shows</th></tr></thead>
+        <tbody>
+          <tr><td>Holds confirmed by a victim</td><td className="good">{share(o.confirmed_share)} ({o.confirmed_by_victim} of {o.closed})</td><td className="note">The payer's own complaint later matched the hold</td></tr>
+          <tr><td>Holds released after an explanation</td><td>{share(o.released_share)} ({o.released_after_explanation} of {o.closed})</td><td className="note">The hold caught a genuine payment</td></tr>
+          <tr><td>Minutes early</td><td className="good">{o.median_minutes_early == null ? "–" : duration(o.median_minutes_early)}</td><td className="note">Median time from the hold to the victim's complaint</td></tr>
+        </tbody>
+      </table>
+      <p className="note" style={{ marginTop: 6 }}>From synthetic data: what a bank would track, not results. An unmatched hold is not proof of a mistake; many victims never report.</p>
+    </div>
   );
 }

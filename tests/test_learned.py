@@ -1,5 +1,5 @@
-"""The learned signal (DECISIONS D-51), no database: the fit, the scoring formula the SQL repeats, and the promise
-that it is one more signal and never decides a band on its own."""
+"""The retired learned signal (DECISIONS D-51, retired by D-58), no database: the fit and the boosted trees, which are
+now the benchmark for the learned weights. It never changes a score or a type."""
 import math
 import random
 
@@ -8,7 +8,6 @@ import pytest
 from pipeline import learned
 from pipeline.cases import DEMO_CASE, load_case
 from pipeline.load_cases import CASE_FILES, rows_for
-from tests.score_oracle import score, signals
 
 TINY = {"intercept": -0.5, "dropped": {},
         "features": [{"name": "pass_through_ratio", "log": False, "mean": 0.3, "std": 0.2, "coef": 2.0},
@@ -117,16 +116,20 @@ def test_the_learned_sentences_pass_no_verdict():
         assert "{pct}" in text and not VERDICT.search(text) and not OVERSTATE.search(text)
 
 
-def test_one_more_signal_never_decides_the_demo_band():
-    """Even a model that rates every account 0% or 100% leaves every demo band as the eight signals set it."""
-    demo = load_case(DEMO_CASE)
+def test_the_benchmark_never_changes_a_score_or_a_type():
+    """D-58: the boosted trees are a benchmark only. The scoring rows hold the nine v2 signals and nothing learned."""
+    from pipeline import scoring
+
     rows = rows_for({k: load_case(v) for k, v in CASE_FILES.items()})
-    never = {"intercept": -30.0, "features": []}
-    always = {"intercept": 30.0, "features": []}
-    for account in ("ACC_A", "ACC_B", "ACC_C", "ACC_D", "ACC_E", "ACC_G"):
-        v = signals(rows, demo, account, demo.tool_as_of)
-        base = score(v, {})[1]
-        assert score(v, never)[1] == base == score(v, always)[1], account
+    assert {r[0] for r in rows["SCORING_CONFIG"]} == set(scoring.CONFIG["pass_through"]) | set(
+        scoring.CONFIG["fraud_exposure"])
+    before = {n: scoring.classify(a) for n, a in scoring.DEMO_ACCOUNTS.items()}
+    learned.SIGNAL["weight"] = 0.9                       # whatever the benchmark does, the types stay
+    try:
+        assert {n: scoring.classify(a) for n, a in scoring.DEMO_ACCOUNTS.items()} == before
+    finally:
+        learned.SIGNAL["weight"] = 0.05
+    assert load_case(DEMO_CASE).case_id == "CASE_DEMO"
 
 
 def test_the_trees_can_be_deployed_and_score_as_trained(tmp_path):

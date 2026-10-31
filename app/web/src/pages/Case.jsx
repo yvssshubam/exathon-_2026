@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { api } from "../api.js";
-import DecisionCard, { Decided, sinceLine } from "../components/DecisionCard.jsx";
+import DecisionCard, { Decided, sinceLine, typeName } from "../components/DecisionCard.jsx";
+import { ProactiveCard, ReviewCard } from "../components/Proactive.jsx";
+import SidePanel from "../components/SidePanel.jsx";
 import { Failed, Loading } from "../components/bits.jsx";
 import { accountName, clock, duration, inrR, joinAnd, plural, rs, shortName, victim as victimName, when } from "../format.js";
+import { useShowManual } from "../demo.js";
 import { useLoad } from "../hooks.js";
 
 // One complaint (design board "Complaint: 02:13, Lakshmi"): where the victim's money is now, in one bar that sums
@@ -24,6 +27,7 @@ export default function Case({ caseId, officer, onChange }) {
   const holds = useLoad(() => api.holds().catch(() => []), [caseId]);
   const log = useLoad(() => api.log(caseId).catch(() => []), [caseId]);
   const paper = useLoad(() => api.paperwork(caseId).catch(() => []), [caseId]);
+  const pro = useLoad(() => api.proactive().catch(() => null), [caseId]);
   const [pos, setPos] = useState(0);
 
   if (detail.loading && !detail.data) return <div className="wrap"><Loading what="Loading the complaint" /></div>;
@@ -32,13 +36,23 @@ export default function Case({ caseId, officer, onChange }) {
   const v = victimName(c.victim_tag) || "the victim";
   const waiting = (c.proposals || []).filter((p) => p.proposal_status === "WAITING");
   const decided = (c.proposals || []).filter((p) => ["APPROVED", "EDITED", "REJECTED"].includes(p.proposal_status));
-  const reload = () => { detail.reload(); holds.reload(); watch.reload(); onChange?.(); };
+  const reload = () => { detail.reload(); holds.reload(); watch.reload(); pro.reload(); onChange?.(); };
   const events = watch.data?.events || [];
   const holdsAt = c.run?.sim_holds_at, received = c.ticket?.received_at || c.reported_at;
   const failed = ["FAILED", "CHECK_FAILED"].includes(c.run?.run_status);
   const intake = c.intake?.match_status;
-  const cur = waiting[Math.min(pos, waiting.length - 1)];
-  const orderNames = waiting.map((p) => shortName(p.name));
+  // every decision on this complaint, of any kind, as Review lists them: proposals, then accounts to review, then
+  // proactive holds to confirm or decide (one card each, in the same order as on Review)
+  const holdsHere = [...(pro.data?.held_overnight || []), ...(pro.data?.queue || [])].filter((h) => h.case_id === caseId);
+  const items = [...waiting.map((p) => ({ key: `p${p.proposal_id}`, kind: "proposal", p, name: shortName(p.name) })),
+    ...(pro.data?.review || []).filter((r) => r.case_id === caseId).map((r) => ({ key: `r${r.account_id}`, kind: "review", r, name: shortName(r.holder_name || r.account_id) })),
+    ...holdsHere.filter((h, i) => holdsHere.findIndex((x) => x.hold_id === h.hold_id) === i).map((h) => ({ key: `h${h.hold_id}`, kind: "hold", h, name: shortName(h.name) }))];
+  const at = Math.min(pos, items.length - 1);
+  const item = items[at];
+  const cur = item?.kind === "proposal" ? item.p : null;
+  const orderNames = items.map((x) => x.name);
+  const nextWords = (x) => x.kind === "review" ? "keep the hold?" : x.kind === "hold" ? (x.h.item_title || "confirm the hold?").replace(/^./, (ch) => ch.toLowerCase())
+    : x.p.action_code === "PROPOSE_FULL_FREEZE" ? "freeze the account?" : x.p.action_code === "PROPOSE_NARROW" ? "a smaller hold?" : x.p.action_code === "PROPOSE_LARGER_HOLD" ? "hold more?" : "the near match?";
 
   return (
     <main id="main" className="wrap" style={{ paddingTop: 18, paddingBottom: 40 }}>
@@ -51,7 +65,7 @@ export default function Case({ caseId, officer, onChange }) {
               [c.ordering_authority, c.ordering_reference].filter(Boolean).join(", "), c.notice_legal_basis].filter(Boolean).flatMap((x, i) => (i ? [" · ", x] : [x]))}
           </p>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-            {holdsAt && <span className="pill p-night" style={{ fontSize: 13, padding: "4px 12px" }}>Held at {clock(holdsAt)}, {duration(minutesBetween(received, holdsAt))} after the complaint, {c.after_hours ? "before office hours" : "during office hours"}</span>}
+            {holdsAt && <span className="pill p-night" style={{ fontSize: 13, padding: "4px 12px" }}>Held at {clock(holdsAt)}, {duration(minutesBetween(received, holdsAt))} after the complaint</span>}
             {intake === "EXACT" && <span className="pill p-honest" style={{ fontSize: 13, padding: "4px 12px" }}>Notice matches the payment</span>}
             {intake === "ACCEPTED" && <span className="pill p-wait" style={{ fontSize: 13, padding: "4px 12px" }}>Near match accepted by an officer</span>}
             {["NEAR_MATCH", "NO_MATCH", "INCOMPLETE"].includes(intake) && <span className="pill p-urgent" style={{ fontSize: 13, padding: "4px 12px" }}>Notice does not match a payment · nothing held</span>}
@@ -68,15 +82,14 @@ export default function Case({ caseId, officer, onChange }) {
           <p style={{ fontSize: 14, marginTop: 4 }}>Nothing was held automatically. The step that stopped is in "What the system did" below.</p>
         </section>
       )}
-      {waiting.length > 0 && (
+      {items.length > 0 && (
         <section style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: "14px 24px", background: "#fbf0dc", border: "1px solid #e3c58e", borderLeft: "6px solid #b07a1c", borderRadius: 12, padding: "16px 22px", marginBottom: 24 }}>
           <div style={{ flex: "1 1 320px" }}>
             <p style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "#8f5400" }}>Your action</p>
-            <h2 style={{ fontSize: 22, lineHeight: 1.25, marginTop: 2 }}>{waiting.length === 1 ? "1 decision is waiting for you" : `${waiting.length} decisions are waiting for you`}</h2>
+            <h2 style={{ fontSize: 22, lineHeight: 1.25, marginTop: 2 }}>{items.length === 1 ? "1 decision is waiting for you" : `${items.length} decisions are waiting for you`}</h2>
             <p style={{ fontSize: 14, color: "#5a3a00", marginTop: 4 }}>
-              {waiting.every((p) => p.action_code === "PROPOSE_PRE_ALERT") ? "The money is already held. You decide whether to send the pre-alert. "
-                : waiting.every((p) => p.action_code !== "UNMATCHED_NOTICE") ? "The money is already held. You only decide how much stays held. " : "Nothing is held yet. "}
-              {waiting.length > 1 ? `Make ${waiting.length === 2 ? "both decisions" : "the decisions"} in the card on the right, one at a time. ${orderNames[0]} comes first, then ${joinAnd(orderNames.slice(1))}.` : "Decide in the card on the right."}
+              {waiting.some((p) => p.action_code === "UNMATCHED_NOTICE") ? "Nothing is held yet. " : "The money is already held. You decide what happens to the hold. "}
+              {items.length > 1 ? `Make ${items.length === 2 ? "both decisions" : "the decisions"} in the card on the right, one at a time. ${orderNames[0]} comes first, then ${joinAnd(orderNames.slice(1))}.` : "Decide in the card on the right."}
             </p>
           </div>
           <a className="btn btn-p" href="#decide" style={{ textDecoration: "none", alignSelf: "center" }} onClick={(e) => { e.preventDefault(); document.getElementById("decide")?.scrollIntoView({ behavior: "smooth" }); }}>Decide now ›</a>
@@ -91,19 +104,21 @@ export default function Case({ caseId, officer, onChange }) {
               <p style={{ marginTop: 6 }}>{c.intake?.mismatched ? rs(c.intake.mismatched) + ". " : ""}{intake === "NEAR_MATCH" || intake === "NO_MATCH" ? "The notice does not match a payment into the account it names, so the system sent it back to the police and held nothing." : "The system has not traced this complaint yet."}</p></section>}
         </section>
         <aside id="decide" style={{ flex: "0 1 440px", minWidth: 0, position: "sticky", top: 16 }} aria-labelledby="dec-h">
-          {cur ? (
+          {item ? (
             <>
               <nav className="tabs" aria-label="Decisions on this complaint" style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14, alignItems: "center" }}>
-                <span style={{ fontSize: 16, fontWeight: 700, color: "#fff", background: "#8f5400", padding: "6px 14px", borderRadius: 999, letterSpacing: "0.02em" }}>Decision {Math.min(pos, waiting.length - 1) + 1} of {waiting.length}</span>
+                <span style={{ fontSize: 16, fontWeight: 700, color: "#fff", background: "#8f5400", padding: "6px 14px", borderRadius: 999, letterSpacing: "0.02em" }}>Decision {at + 1} of {items.length}</span>
                 <span style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
-                  <button className="btn btn-s" type="button" disabled={pos === 0} onClick={() => setPos((x) => Math.max(0, x - 1))}>‹ Previous</button>
-                  <button className="btn btn-s" type="button" disabled={pos >= waiting.length - 1} onClick={() => setPos((x) => Math.min(waiting.length - 1, x + 1))}>Next ›</button>
+                  <button className="btn btn-s" type="button" disabled={at === 0} onClick={() => setPos(Math.max(0, at - 1))}>‹ Previous</button>
+                  <button className="btn btn-s" type="button" disabled={at >= items.length - 1} onClick={() => setPos(Math.min(items.length - 1, at + 1))}>Next ›</button>
                 </span>
               </nav>
               <div style={{ borderTop: "6px solid #b07a1c", borderRadius: 10, boxShadow: "0 8px 24px rgba(143,84,0,0.18)" }}>
-                <DecisionCard key={cur.proposal_id} p={cur} officer={officer} watch={events} variant="panel" onDone={() => { setPos(0); reload(); }} />
+                {item.kind === "proposal" && <DecisionCard key={item.key} p={item.p} officer={officer} watch={events} variant="panel" onDone={() => { setPos(0); reload(); }} />}
+                {item.kind === "review" && <ReviewCard key={item.key} r={item.r} officer={officer} onDone={() => { setPos(0); reload(); }} position="Account to review" onComplaint />}
+                {item.kind === "hold" && <ProactiveCard key={item.key} h={item.h} officer={officer} onDone={() => { setPos(0); reload(); }} position={item.h.item_title || "Held overnight"} />}
               </div>
-              {waiting[pos + 1] && <p className="note" style={{ marginTop: 12 }}>Next: <button className="linkbtn" type="button" onClick={() => setPos(pos + 1)}>{shortName(waiting[pos + 1].name)}, {waiting[pos + 1].action_code === "PROPOSE_FULL_FREEZE" ? "freeze the account?" : waiting[pos + 1].action_code === "PROPOSE_NARROW" ? "a smaller hold?" : waiting[pos + 1].action_code === "PROPOSE_PRE_ALERT" ? "the pre-alert?" : "the near match?"}</button></p>}
+              {items[at + 1] && <p className="note" style={{ marginTop: 12 }}>Next: <button className="linkbtn" type="button" onClick={() => setPos(at + 1)}>{items[at + 1].name}, {nextWords(items[at + 1])}</button></p>}
             </>
           ) : decided.length ? (
             <div style={{ display: "grid", gap: 12 }}>{decided.map((p) => <Decided key={p.proposal_id} p={p} officer={officer} onDone={reload} />)}</div>
@@ -115,8 +130,7 @@ export default function Case({ caseId, officer, onChange }) {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 16, marginTop: 24 }}>
-        {c.notice && <Notice x={c.notice} intake={c.intake} />}
-        <Steps runs={log.data || []} checks={c.checks || []} />
+        <Steps runs={log.data || []} checks={c.checks || []} notice={c.notice || portalNotice(c)} intake={c.intake} />
         <Filed list={paper.data || []} holdsAt={holdsAt} v={v} />
       </div>
     </main>
@@ -219,7 +233,7 @@ function Trail({ c, t, acts, events, watchList, holds, waiting, v, caseId, curre
                     <p style={{ fontSize: 13, color: "#44505e", marginTop: 4 }}>Not on her trail: {x.ev ? `${shortName(x.ev.counterparty || "a held account")} tried to pay ${shortName(x.label)} at ${clock(x.ev.event_at)} and the hold refused it.` : "watched after a refused payment."}{frz ? ` Frozen by ${frz.placed_by} at ${clock(frz.placed_at)} (${inrR(frz.amount_inr)}), none of it ${v}'s.` : ""}</p>
                   </a>);
               }
-              const honest = x.evidence === "HONEST";
+              const honest = x.evidence === "ORDINARY_CUSTOMER";
               const now = dec && dec[1].proposal_id === current;        // the decision open on the right
               const color = now ? "#8f5400" : dec ? "#b07a1c" : hold ? "#5b3fa0" : "#c9d1da";
               const hers = n(hold?.victim_amount_inr), held = n(hold?.amount_inr);
@@ -229,7 +243,8 @@ function Trail({ c, t, acts, events, watchList, holds, waiting, v, caseId, curre
                   onClick={dec ? (e) => { e.preventDefault(); onPick?.(dec[0] - 1); document.getElementById("decide")?.scrollIntoView({ behavior: "smooth", block: "nearest" }); } : undefined}>
                   {now && <span className="pill" style={{ background: "#8f5400", color: "#fff", marginBottom: 6, display: "inline-block" }}>Deciding now</span>}
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}><b>{shortName(x.label)}</b>
-                    {honest ? <span className="pill p-honest">Likely genuine</span> : held ? <span className="pill p-held">Held</span> : <span className="pill p-plain">Nothing left</span>}</div>
+                    <span>{x.evidence && <span className={`pill ${honest ? "p-honest" : "p-plain"}`} style={{ marginRight: 6 }}>{typeName(x.evidence)}</span>}
+                    {held ? <span className="pill p-held">Held</span> : <span className="pill p-plain">Nothing left</span>}</span></div>
                   <p style={{ fontSize: 13, color: "#44505e", margin: "4px 0 8px" }}>
                     Got {joinAnd(ins.map((e) => `${inrR(e.amount_inr)} from ${e.from_account === t.nodes.find((z) => z.kind === "victim")?.id ? v : name(e.from_account)}, ${clock(e.ts)}`))}.
                     {outs.length > 0 && ` Sent ${joinAnd(outs.map((e) => `${inrR(e.amount_inr)} to ${byId[e.to_account]?.kind === "exit" ? "an ATM" : name(e.to_account)}`))}${outs.length && new Set(outs.map((e) => clock(e.ts))).size === 1 ? `, ${clock(outs[0].ts)}` : ""}.`}
@@ -254,17 +269,27 @@ const NOTICE_FIELDS = [["utr", "UTR", "utr:", "no utr"], ["amount_inr", "Amount"
   ["txn_time", "Time", "time:"], ["beneficiary_account", "Account", "utr:", "no receiving account"], ["legal_basis", "Legal provision", null, "no legal basis"],
   ["authority", "Authority"], ["notice_ref", "Reference"], ["ack_no", "Acknowledgement", null, "acknowledgement number"], ["fir_reference", "FIR"]];
 
-function Notice({ x, intake }) {
+// A ticket that came through the portal has no notice text of its own: its fields, as the ticket carried them.
+function portalNotice(c) {
+  const at = String(c.txn_at || "");
+  return { portal: true, channel: `Portal ticket (${c.complaint_source})`, sender: c.ordering_authority || "the police",
+    received_at: c.reported_at, raw_text: null,
+    fields: { utr: c.utr, amount_inr: c.amount_inr, txn_date: at.slice(0, 10) || null, txn_time: c.txn_time_known === false ? null : at.slice(11, 16) || null,
+      beneficiary_account: c.beneficiary_account, legal_basis: c.notice_legal_basis, authority: c.ordering_authority,
+      notice_ref: c.ordering_reference, ack_no: c.ack_no, fir_reference: c.fir_reference } };
+}
+
+function Notice({ x, intake, inline, panel }) {
   const [raw, setRaw] = useState(false);
   const flagged = `${intake?.mismatched || ""}\n${intake?.problems || ""}`.toLowerCase();
   const show = (k, v) => (v == null ? null : k === "amount_inr" ? inrR(v) : k === "txn_date" ? when(v + " 00:00").replace(/, 00:00$/, "") : v);
   const matched = ["EXACT", "ACCEPTED"].includes(intake?.match_status);   // only then was every field compared
   const seen = NOTICE_FIELDS.filter(([k]) => k !== "txn_time" || x.fields?.txn_time);
   return (
-    <section className="card" style={{ padding: "18px 20px", gridColumn: "1 / -1" }} aria-labelledby="notice-h">
+    <section className={inline || panel ? "" : "card"} style={panel ? {} : inline ? { marginTop: 10, padding: "12px 14px", border: "1px solid #f0d9a8", borderRadius: 8, background: "#fffaf0" } : { padding: "18px 20px", gridColumn: "1 / -1" }} aria-labelledby={panel ? undefined : "notice-h"}>
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", gap: "6px 12px", marginBottom: 8 }}>
-        <h2 id="notice-h" style={{ fontSize: 17 }}>The notice as received</h2>
-        <span className="note">{x.channel} from {x.sender} at {clock(x.received_at)} · read by {x.read_by === "model" ? "the local model, every value found in the text" : "the parser"}</span>
+        {!panel && <h2 id="notice-h" style={{ fontSize: inline ? 15 : 17 }}>{x.portal ? "The ticket as received" : "The notice as received"}</h2>}
+        <span className="note">{x.channel} from {x.sender} at {clock(x.received_at)} · {x.portal ? "the portal's fields, as the ticket carried them" : `read by ${x.read_by === "model" ? "the local model, every value found in the text" : "the parser"}`}</span>
       </div>
       <table className="t"><tbody>
         {seen.map(([k, label, wrong, absent]) => {
@@ -281,15 +306,17 @@ function Notice({ x, intake }) {
       </tbody></table>
       {x.read_note && <p style={{ fontSize: 14, marginTop: 10, padding: "8px 12px", background: "#fbf0dc", borderLeft: "4px solid #b07a1c", borderRadius: 6 }}>{x.read_note}</p>}
       <p className="note" style={{ marginTop: 8 }}>Every field is checked against the payment in the bank's own records; nothing is held on the notice alone.{x.stmt_id ? <> <span className="stmt">stmt {x.stmt_id}</span></> : null}</p>
-      <button className="linkbtn" type="button" style={{ marginTop: 8 }} onClick={() => setRaw(!raw)}>{raw ? "Hide the text" : "Show the text as received"}</button>
+      {x.raw_text && <button className="linkbtn" type="button" style={{ marginTop: 8 }} onClick={() => setRaw(!raw)}>{raw ? "Hide the text" : "Show the text as received"}</button>}
       {raw && <pre className="mono" style={{ whiteSpace: "pre-wrap", fontSize: 13, marginTop: 8, padding: "12px 14px", background: "#f5f7f9", border: "1px solid #e8ecf0", borderRadius: 8, maxHeight: 320, overflow: "auto" }}>{x.raw_text}</pre>}
     </section>
   );
 }
 
 // ---------------------------------------------------------------- what the system did, what it filed
-function Steps({ runs, checks }) {
+function Steps({ runs, checks, notice, intake }) {
   const run = runs[0];
+  const demo = useShowManual();                 // the Demo mode switch: demo-only detail
+  const [read, setRead] = useState(false);
   if (!run) return <section className="card" style={{ padding: "18px 20px" }}><h2 style={{ fontSize: 17 }}>What the system did</h2><p className="note" style={{ marginTop: 6 }}>Not worked yet.</p></section>;
   const passed = checks.filter((k) => k.check_passed).length;
   return (
@@ -301,11 +328,22 @@ function Steps({ runs, checks }) {
       <ol className="steps">
         {run.steps.map((s) => (
           <li key={s.step_no}><span className="note">{s.step_no}</span>
-            <span><b style={{ color: s.can_change ? "#4a2f8f" : s.tool_name === "error" ? "#7a211b" : "#17212b" }}>{STEP_NAMES[s.tool_name] || s.tool_name}</b> <span style={{ color: "#44505e" }}>{rs(s.result_text)}</span></span>
+            <span><b style={{ color: s.can_change ? "#4a2f8f" : s.tool_name === "error" ? "#7a211b" : "#17212b" }}>{STEP_NAMES[s.tool_name] || s.tool_name}</b> <span style={{ color: "#44505e" }}>{rs(s.result_text)}</span>
+              {s.tool_name === "read_ticket" && demo && notice && <>
+                {" "}<button className="linkbtn demo-link" type="button" aria-expanded={read} onClick={() => setRead(!read)}>{notice.portal ? "Show the ticket as read" : "Show the notice as read"}</button>
+              </>}</span>
             {s.stmt_ids ? <span className="stmt">stmt {String(s.stmt_ids).split(/[ ,]/)[0]}</span> : <span />}</li>
         ))}
       </ol>
       <p className="note" style={{ marginTop: 8 }}>Purple steps changed something. Only the checker can place a hold, and only after its checks pass.</p>
+      {read && demo && notice && (
+        <SidePanel title={notice.portal ? "The ticket as read" : "The notice as read"} itemKey="notice-read" onClose={() => setRead(false)}>
+          <article className="card dc narrowcard">
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}><span className="kind demo-link" style={{ fontWeight: 700 }}>Demo · step 1, read the ticket</span></div>
+            <Notice x={notice} intake={intake} panel />
+          </article>
+        </SidePanel>
+      )}
     </section>
   );
 }

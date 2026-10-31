@@ -38,7 +38,27 @@ from pipeline.db import ROOT
 MODEL_FILE = ROOT / "config" / "learned_signal.yaml"
 REPORT = ROOT / "docs" / "LEARNED_SIGNAL.md"
 FEATURE_SQL = ROOT / "sql" / "learn" / "010_features.sql"
-SCORING = yaml.safe_load((ROOT / "config" / "scoring.yaml").read_text(encoding="utf-8"))
+# Retired by D-58: the learned signal is no longer a ninth signal, and the boosted trees are now the benchmark for the
+# learned weights of scoring v2 (pipeline/weights.py). The version 1 signal table it was measured against is kept here,
+# unchanged, so this module and its report (docs/LEARNED_SIGNAL.md) still read as they did.
+_V2 = yaml.safe_load((ROOT / "config" / "scoring.yaml").read_text(encoding="utf-8"))
+SCORING = {
+    "signals": {
+        "median_dwell_minutes": {"weight": 0.20, "honest_at": 360, "mule_at": 30},
+        "pass_through_ratio": {"weight": 0.20, "honest_at": 0.2, "mule_at": 0.8},
+        "large_payer_share": {"weight": 0.10, "honest_at": 0.2, "mule_at": 0.8},
+        "cash_or_crypto_exits": {"weight": 0.10, "honest_at": 0, "mule_at": 1},
+        "credit_vs_profile": {"weight": 0.05, "honest_at": 1.0, "mule_at": 5.0},
+    },
+    "learned_signal": {
+        "name": "learned_pattern", "weight": 0.05, "honest_at": 0.2, "mule_at": 0.8,
+        "mule_sentence": "A model trained on flagged accounts in synthetic bank data rates its money pattern {pct}% "
+                         "like theirs.",
+        "honest_sentence": "A model trained on flagged accounts in synthetic bank data rates its money pattern only "
+                           "{pct}% like theirs.",
+    },
+    "profile_band_expected_monthly_credit_inr": _V2["profile_band_expected_monthly_credit_inr"],
+}
 SIGNAL = SCORING["learned_signal"]
 INTERCEPT = "(intercept)"
 CAVEAT = "Synthetic data (IBM AMLworld HI-Small); laundering labels, not cyber-fraud mule labels."

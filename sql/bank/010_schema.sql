@@ -245,13 +245,45 @@ CREATE OR REPLACE TABLE VICTIM_SPLIT (
 ) COMMENT IS 'How held money splits between the victims whose money reached an account. A record for the refund stage: it moves no money and never changes a hold.';
 
 CREATE OR REPLACE TABLE SCORING_CONFIG (
-    signal_name     VARCHAR(40)   NOT NULL COMMENT IS 'Signal, as named in config/scoring.yaml',
-    weight          DOUBLE        NOT NULL COMMENT IS 'Hand-set weight (not validated on real data)',
-    honest_at       DOUBLE        NOT NULL COMMENT IS 'Value at which the signal looks fully honest (mule-likeness 0)',
-    mule_at         DOUBLE        NOT NULL COMMENT IS 'Value at which the signal looks fully mule-like (mule-likeness 1)',
-    mule_sentence   VARCHAR(300)  NOT NULL COMMENT IS 'Reason text when the signal looks mule-like',
-    honest_sentence VARCHAR(300)  NOT NULL COMMENT IS 'Reason text when the signal looks honest'
-) COMMENT IS 'Scoring rules loaded from config/scoring.yaml, so the scoring SQL reads them inside Exasol.';
+    signal_name     VARCHAR(40)   NOT NULL COMMENT IS 'Signal, as named in config/scoring.yaml (P1..P5, E1, E2, E3, E5)',
+    score_name      VARCHAR(20)   NOT NULL COMMENT IS 'pass_through or fraud_exposure: the score the signal belongs to',
+    low_at          DOUBLE        NOT NULL COMMENT IS 'Value at which the signal is fully low (m = 0)',
+    high_at         DOUBLE        NOT NULL COMMENT IS 'Value at which the signal is fully high (m = 1)',
+    start_weight    DOUBLE        NOT NULL COMMENT IS 'Version 0 weight (config/scoring.yaml); live weights are in SCORING_WEIGHTS',
+    high_sentence   VARCHAR(300)  NOT NULL COMMENT IS 'Reason text when m >= 0.5',
+    low_sentence    VARCHAR(300)  NOT NULL COMMENT IS 'Reason text when m < 0.5'
+) COMMENT IS 'Scoring rules v2 loaded from config/scoring.yaml (D-57), so the scoring SQL reads them inside Exasol. Policy sets these; only the weights are learned.';
+
+CREATE OR REPLACE TABLE SCORING_WEIGHTS (
+    weight_version  DECIMAL(9,0)  NOT NULL COMMENT IS 'Version; 0 is the starting weights in config/scoring.yaml',
+    score_name      VARCHAR(20)   NOT NULL COMMENT IS 'pass_through or fraud_exposure',
+    signal_name     VARCHAR(40)   NOT NULL COMMENT IS 'Signal',
+    coefficient     DOUBLE                 COMMENT IS 'Logistic-regression coefficient (kept at zero or above); NULL for version 0',
+    weight          DOUBLE        NOT NULL COMMENT IS 'Weight inside its score: between 0.05 and 0.50, summing to 1 per score',
+    trained_at      TIMESTAMP              COMMENT IS 'When the version was trained',
+    data_window     VARCHAR(100)           COMMENT IS 'Training data and its signal/label windows',
+    test_auc        DOUBLE                 COMMENT IS 'AUC of this score on the held-out test accounts',
+    test_precision  DOUBLE                 COMMENT IS 'Precision at the 0.6 cut-off on the test accounts',
+    approved_by     VARCHAR(60)            COMMENT IS 'Who approved it (policy for version 0)',
+    approved_at     TIMESTAMP              COMMENT IS 'When it was approved',
+    is_live         BOOLEAN       NOT NULL COMMENT IS 'TRUE for the one version the scoring uses now'
+) COMMENT IS 'Learned weights of the two scores (D-58). A version goes live only after the gate (bounds, the five demo accounts, AUC) and a person''s approval; every snapshot cites the version it used.';
+
+CREATE OR REPLACE TABLE SUSPECT_REGISTRY (
+    account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Account listed',
+    listed_on       TIMESTAMP     NOT NULL COMMENT IS 'When it was listed',
+    listed_by       VARCHAR(100)  NOT NULL COMMENT IS 'Who listed it (I4C)'
+) COMMENT IS 'Simulated I4C Suspect Registry (D-60): whether a bank can read the real one directly is an open question. One of the two things that make an account eligible for proactive holds.';
+
+CREATE OR REPLACE TABLE RUN_SETTING (
+    setting_name    VARCHAR(40)   NOT NULL COMMENT IS 'proactive_hold_mode',
+    setting_value   VARCHAR(40)   NOT NULL COMMENT IS 'rbi_draft or current_sop'
+) COMMENT IS 'Settings of the simulated run, written at reset from config/rules.yaml or the demo bar (D-62).';
+
+CREATE OR REPLACE TABLE BANK_HOLIDAY (
+    holiday_on      DATE          NOT NULL COMMENT IS 'A bank holiday',
+    holiday_name    VARCHAR(100)           COMMENT IS 'Its name'
+) COMMENT IS 'Working-day calendar for the next-day check (D-63): Sundays and these days are not working days.';
 
 CREATE OR REPLACE TABLE LEARNED_COEF (
     feature_name    VARCHAR(40)   NOT NULL COMMENT IS 'Signal the coefficient applies to, or (intercept)',
@@ -299,27 +331,67 @@ CREATE OR REPLACE TABLE ACCOUNT_SIGNALS (
     case_id       VARCHAR(60)   NOT NULL COMMENT IS 'Case the account was scored for (or WATCH:<account>)',
     account_id    VARCHAR(40)   NOT NULL COMMENT IS 'Account scored',
     as_of         TIMESTAMP     NOT NULL COMMENT IS 'Signals use the 90 days before this moment',
+    score_name    VARCHAR(20)   NOT NULL COMMENT IS 'pass_through or fraud_exposure',
     signal_name   VARCHAR(40)   NOT NULL COMMENT IS 'Signal from config/scoring.yaml',
-    signal_value  DOUBLE                 COMMENT IS 'Raw value of the signal',
-    weight        DOUBLE        NOT NULL COMMENT IS 'Hand-set weight from config/scoring.yaml',
-    mule_likeness DOUBLE                 COMMENT IS '0 = honest-like, 1 = mule-like',
-    contribution  DOUBLE                 COMMENT IS 'weight * mule_likeness / total weight; contributions sum to the score',
+    signal_value  DOUBLE                 COMMENT IS 'Raw value of the signal (NULL: could not be measured, counts as m = 0)',
+    weight        DOUBLE        NOT NULL COMMENT IS 'Weight of the live version (SCORING_WEIGHTS)',
+    m_value       DOUBLE        NOT NULL COMMENT IS 'm: 0 = low, 1 = high: a straight line between low_at and high_at, clamped',
+    contribution  DOUBLE                 COMMENT IS 'weight * m_value / sum of the score''s weights; contributions sum to the score',
     sentence      VARCHAR(300)           COMMENT IS 'The signal written as a plain sentence for the reasons',
-    mule_rank     DECIMAL(3,0)           COMMENT IS 'Rank of this signal as a reason the account looks like a mule (1 = strongest)',
-    honest_rank   DECIMAL(3,0)           COMMENT IS 'Rank of this signal as a reason the account looks honest (1 = strongest)',
+    high_rank     DECIMAL(3,0)           COMMENT IS 'Rank of this signal as a reason the score is high (1 = strongest), within its score',
+    low_rank      DECIMAL(3,0)           COMMENT IS 'Rank of this signal as a reason the score is low (1 = strongest), within its score',
     stmt_id       DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
-) COMMENT IS 'Step 3 output: one row per account per signal, so every reason is explainable.';
+) COMMENT IS 'Step 3 output: one row per account per signal of both scores, so every reason is explainable.';
+
+CREATE OR REPLACE TABLE CREDIT_MATCH (
+    case_id       VARCHAR(60)   NOT NULL COMMENT IS 'Case (or WATCH:<account>)',
+    account_id    VARCHAR(40)   NOT NULL COMMENT IS 'Account',
+    txn_id        VARCHAR(40)   NOT NULL COMMENT IS 'Credit',
+    amount_inr    DECIMAL(18,2) NOT NULL COMMENT IS 'Credit amount',
+    fraud_linked  BOOLEAN       NOT NULL COMMENT IS 'From a flagged account, or named in a complaint (E4)',
+    out_inr       DECIMAL(18,2) NOT NULL COMMENT IS 'Part of it that left within 60 minutes (each debit matched once)',
+    cash_inr      DECIMAL(18,2) NOT NULL COMMENT IS 'Part of out_inr that left as ATM cash, cash or crypto',
+    stmt_id       DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Per-credit matching (MATCH_CREDITS UDF): what P2, P3 and E4 are computed from.';
 
 CREATE OR REPLACE TABLE ACCOUNT_SCORE (
-    case_id      VARCHAR(60)   NOT NULL COMMENT IS 'Case (or WATCH:<account>)',
-    account_id   VARCHAR(40)   NOT NULL COMMENT IS 'Account scored',
-    as_of        TIMESTAMP     NOT NULL COMMENT IS 'Moment the score is for',
-    score        DOUBLE        NOT NULL COMMENT IS 'Mule-likeness 0..1 (sum of signal contributions)',
-    band         VARCHAR(6)    NOT NULL COMMENT IS 'MULE (>= 0.70), REVIEW (>= 0.40) or HONEST: an input to the rules, never shown as a verdict',
-    account_type VARCHAR(10)            COMMENT IS 'savings, current, nodal, pool or escrow',
-    never_account_hold BOOLEAN NOT NULL COMMENT IS 'TRUE for nodal, pool and escrow accounts: never fully held (SOP 9.1(iii))',
-    stmt_id      DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
-) COMMENT IS 'Step 3 output: score and band per account.';
+    case_id        VARCHAR(60)   NOT NULL COMMENT IS 'Case (or WATCH:<account>)',
+    account_id     VARCHAR(40)   NOT NULL COMMENT IS 'Account scored',
+    as_of          TIMESTAMP     NOT NULL COMMENT IS 'Moment the scores are for',
+    snapshot_id    DECIMAL(18,0)          COMMENT IS 'SCORE_SNAPSHOT row that keeps these numbers for good',
+    weight_version DECIMAL(9,0)  NOT NULL COMMENT IS 'SCORING_WEIGHTS version used',
+    pass_through   DOUBLE        NOT NULL COMMENT IS 'Pass-through score 0..1: does money run straight through?',
+    fraud_exposure DOUBLE        NOT NULL COMMENT IS 'Fraud exposure score 0..1: does it keep getting fraud money?',
+    account_pattern VARCHAR(20)  NOT NULL COMMENT IS 'PIPE_FOR_FRAUD, FAST_MOVER, EXPOSED_BUSINESS, ORDINARY_CUSTOMER or GREY_ZONE: a pattern of money, never a verdict on the holder',
+    fraud_linked_credits DECIMAL(9,0)     COMMENT IS 'E4: fraud-linked credits in the window',
+    fraud_out_share DOUBLE               COMMENT IS 'E4: share of fraud-linked money that left within an hour',
+    other_out_share DOUBLE               COMMENT IS 'E4: the same share for the account''s other money',
+    fraud_money_leaves_fast BOOLEAN NOT NULL COMMENT IS 'E4: fraud share >= 0.50 and at least 0.30 above the other share',
+    fraud_case_count DOUBLE              COMMENT IS 'Distinct complaints (last 30 days 1, days 31-90 0.5)',
+    fraud_money_share DOUBLE             COMMENT IS 'Fraud-linked money / all money received (the size check)',
+    fraud_linked_inr DECIMAL(18,2)       COMMENT IS 'Fraud-linked money received in 90 days (the Medium step''s ceiling)',
+    ladder_step    VARCHAR(6)    NOT NULL COMMENT IS 'NONE, WEAK, MEDIUM or STRONG: the freeze ladder (a suggestion; the officer decides)',
+    account_type   VARCHAR(10)            COMMENT IS 'savings, current, nodal, pool or escrow',
+    never_account_hold BOOLEAN   NOT NULL COMMENT IS 'TRUE for nodal, pool and escrow accounts: never fully held (SOP 9.1(iii)), never an automatic hold on new money',
+    stmt_id        DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
+) COMMENT IS 'Step 3 output (D-57): two scores, the account type and the ladder step per account.';
+
+CREATE OR REPLACE TABLE SCORE_SNAPSHOT (
+    snapshot_id    DECIMAL(18,0) IDENTITY COMMENT IS 'Snapshot number; every decision cites one',
+    case_id        VARCHAR(60)   NOT NULL COMMENT IS 'Case (or WATCH:<account>) the scoring ran for',
+    account_id     VARCHAR(40)   NOT NULL COMMENT IS 'Account',
+    computed_at    TIMESTAMP     NOT NULL COMMENT IS 'Decision time (simulated clock)',
+    weight_version DECIMAL(9,0)  NOT NULL COMMENT IS 'Weights used',
+    pass_through   DOUBLE        NOT NULL COMMENT IS 'Pass-through score',
+    fraud_exposure DOUBLE        NOT NULL COMMENT IS 'Fraud exposure score',
+    account_pattern VARCHAR(20)  NOT NULL COMMENT IS 'Account type',
+    fraud_money_leaves_fast BOOLEAN NOT NULL COMMENT IS 'E4',
+    fraud_case_count DOUBLE              COMMENT IS 'Fraud cases counted for the ladder',
+    ladder_step    VARCHAR(6)    NOT NULL COMMENT IS 'Freeze ladder step',
+    signals_text   VARCHAR(4000)          COMMENT IS 'Every signal as name=value/m, so an old hold is explained with the numbers of its day',
+    config_version DECIMAL(9,0)           COMMENT IS 'config/scoring.yaml version',
+    stmt_id        DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'Append-only record of every scoring (D-57): the hold record cites the snapshot as it stood at the moment of the decision.';
 
 -- ---------------------------------------------------------------- the rules engine, the maker's proposals, the checker
 
@@ -340,11 +412,12 @@ CREATE OR REPLACE TABLE CASE_ACCOUNT (
     balance_now_inr   DECIMAL(18,2)          COMMENT IS 'Balance at the hold time',
     hold_amount_inr   DECIMAL(18,2)          COMMENT IS 'Mandatory hold: the trail amount, never more than the balance or the reported amount',
     onward_share_inr  DECIMAL(18,2)          COMMENT IS 'Victim money this bank sent to this other-bank account (onward entry)',
-    band              VARCHAR(6)             COMMENT IS 'Account evidence summary: MULE, REVIEW or HONEST (input to the rules, not a verdict)',
-    score             DOUBLE                 COMMENT IS 'Mule-likeness 0..1 from ACCOUNT_SCORE',
-    pass_through      DOUBLE                 COMMENT IS 'Share of credits sent on within an hour (90 days)',
-    cash_exits        DOUBLE                 COMMENT IS 'Cash or crypto withdrawals (90 days)',
-    complaint_links   DOUBLE                 COMMENT IS 'Distinct fraud tickets that paid into it in 7 days',
+    account_pattern   VARCHAR(20)            COMMENT IS 'Account type from ACCOUNT_SCORE (input to the rules, never shown as a verdict)',
+    pass_through_score DOUBLE                COMMENT IS 'Pass-through score 0..1',
+    exposure_score    DOUBLE                 COMMENT IS 'Fraud exposure score 0..1',
+    ladder_step       VARCHAR(6)             COMMENT IS 'Freeze ladder step: NONE, WEAK, MEDIUM or STRONG',
+    fraud_linked_inr  DECIMAL(18,2)          COMMENT IS 'Fraud-linked money received in 90 days',
+    snapshot_id       DECIMAL(18,0)          COMMENT IS 'Scoring snapshot behind these facts',
     stmt_id           DECIMAL(9,0)           COMMENT IS 'Exasol statement that produced this row'
 ) COMMENT IS 'Rules engine input: every fact the action rules read, one row per account on the trail.';
 
@@ -354,7 +427,7 @@ CREATE OR REPLACE TABLE CASE_ACTION (
     account_id        VARCHAR(80)   NOT NULL COMMENT IS 'Account or exit',
     bank_id           VARCHAR(20)            COMMENT IS 'Bank holding the account',
     hop               DECIMAL(3,0)  NOT NULL COMMENT IS 'Hops from the ticket''s payment',
-    action_code       VARCHAR(20)   NOT NULL COMMENT IS 'MANDATORY_HOLD, HOLD_MARKER, RECORD_EXIT, ONWARD_ENTRY, NONE (automatic) or PROPOSE_NARROW, PROPOSE_FULL_FREEZE (officer)',
+    action_code       VARCHAR(20)   NOT NULL COMMENT IS 'MANDATORY_HOLD, HOLD_MARKER, RECORD_EXIT, ONWARD_ENTRY, NONE (automatic) or PROPOSE_NARROW, PROPOSE_LARGER_HOLD, PROPOSE_FULL_FREEZE (officer)',
     act_mode          VARCHAR(10)   NOT NULL COMMENT IS 'AUTOMATIC (the rules require it; done at any hour), OFFICER (a judgment call; only proposed) or INFO',
     amount_inr        DECIMAL(18,2)          COMMENT IS 'Amount to hold, record or report; for proposals, the proposed amount',
     current_hold_inr  DECIMAL(18,2)          COMMENT IS 'For proposals: the mandatory hold already on the account',
@@ -362,8 +435,8 @@ CREATE OR REPLACE TABLE CASE_ACTION (
     other_victims_inr DECIMAL(18,2)          COMMENT IS 'Other victims'' money in the account',
     balance_now_inr   DECIMAL(18,2)          COMMENT IS 'Balance at the hold time',
     trail_amount_inr  DECIMAL(18,2)          COMMENT IS 'Amount the trail names for the account',
-    band              VARCHAR(6)             COMMENT IS 'Account evidence summary (input, not a label shown as a verdict)',
-    score             DOUBLE                 COMMENT IS 'Mule-likeness 0..1',
+    account_pattern   VARCHAR(20)            COMMENT IS 'Account type (input, not a label shown as a verdict)',
+    snapshot_id       DECIMAL(18,0)          COMMENT IS 'Scoring snapshot behind the action',
     reason_code       VARCHAR(30)   NOT NULL COMMENT IS 'Which rule in config/rules.yaml produced the action',
     legal_basis       VARCHAR(300)           COMMENT IS 'Legal basis of the action, from the rule''s fixed citation list',
     action_status     VARCHAR(10)   NOT NULL COMMENT IS 'TO_DO, DONE (automatic); PROPOSED (officer, see PROPOSAL); INFO',
@@ -374,7 +447,7 @@ CREATE OR REPLACE TABLE PROPOSAL (
     proposal_id     DECIMAL(18,0) IDENTITY COMMENT IS 'Proposal number',
     case_id         VARCHAR(40)   NOT NULL COMMENT IS 'Case',
     account_id      VARCHAR(80)   NOT NULL COMMENT IS 'Account, exit or other bank''s account the proposal is about',
-    action_code     VARCHAR(20)   NOT NULL COMMENT IS 'MANDATORY_HOLD, HOLD_MARKER, RECORD_EXIT, ONWARD_ENTRY, KYC_PACKET, SEND_BACK, LINK_DUPLICATE, WATCH_HOLD, RECORD_SPLIT (automatic) or PROPOSE_NARROW, PROPOSE_FULL_FREEZE, UNMATCHED_NOTICE, PROPOSE_RELEASE, PROPOSE_PRE_ALERT (the officer''s five decisions)',
+    action_code     VARCHAR(20)   NOT NULL COMMENT IS 'MANDATORY_HOLD, HOLD_MARKER, RECORD_EXIT, ONWARD_ENTRY, KYC_PACKET, SEND_BACK, LINK_DUPLICATE, PROACTIVE_HOLD, RECORD_SPLIT (automatic; WATCH_HOLD in older runs) or PROPOSE_NARROW, PROPOSE_LARGER_HOLD, PROPOSE_FULL_FREEZE, UNMATCHED_NOTICE, PROPOSE_RELEASE (officer; PROPOSE_PRE_ALERT in older runs)',
     act_mode        VARCHAR(10)   NOT NULL COMMENT IS 'AUTOMATIC or OFFICER',
     amount_inr      DECIMAL(18,2)          COMMENT IS 'Amount proposed',
     proposed_by     VARCHAR(10)   NOT NULL COMMENT IS 'pipeline (fixed order), llm (the local model chose to propose it), watch or intake',
@@ -404,7 +477,7 @@ CREATE OR REPLACE TABLE HOLD_LEDGER (
     case_id         VARCHAR(40)   NOT NULL COMMENT IS 'Case the hold is for',
     viewing_bank_id VARCHAR(20)   NOT NULL COMMENT IS 'This bank',
     account_id      VARCHAR(80)   NOT NULL COMMENT IS 'Account held',
-    hold_kind       VARCHAR(15)   NOT NULL COMMENT IS 'LIEN (amount only), ACCOUNT_FREEZE (whole account, officer only) or MARKER (catch later credits, first layer)',
+    hold_kind       VARCHAR(15)   NOT NULL COMMENT IS 'LIEN (amount only), ACCOUNT_FREEZE (whole account, officer only) or MARKER (catch later credits, first layer). A proactive hold is a LIEN on one credit',
     amount_inr      DECIMAL(18,2)          COMMENT IS 'Amount under lien; for a freeze, the balance it locked',
     hold_tag        VARCHAR(20)            COMMENT IS 'Whose money: the victim tag, or NOT_LINKED (caught on a mule-like account after the first pass; not linked to a reported victim yet)',
     source_txn_id   VARCHAR(40)            COMMENT IS 'For a watch hold: the credit it caught',
@@ -415,14 +488,38 @@ CREATE OR REPLACE TABLE HOLD_LEDGER (
     action_code     VARCHAR(20)   NOT NULL COMMENT IS 'Action that led to it',
     reason_text     VARCHAR(2000)          COMMENT IS 'Why, in words',
     proposal_id     DECIMAL(18,0)          COMMENT IS 'Proposal the checker carried out',
-    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it',
+    legal_basis     VARCHAR(20)   DEFAULT 'police_notice' COMMENT IS 'police_notice (the SOP, under a police notice) or rbi_draft (temporary debit hold on a suspected mule transaction, RBI draft KYC Amendment Directions 2026)',
+    proactive       BOOLEAN       DEFAULT FALSE COMMENT IS 'TRUE for a proactive hold: new money from a first-time payer into an eligible account, held before anyone complained (D-60)',
+    payer_type      VARCHAR(12)            COMMENT IS 'Proactive holds: flagged, own_customer or other_bank',
+    payer_account   VARCHAR(80)            COMMENT IS 'Proactive holds: who paid',
+    snapshot_id     DECIMAL(18,0)          COMMENT IS 'Scoring snapshot behind the decision',
+    hold_mode       VARCHAR(12)            COMMENT IS 'Proactive holds: the mode it was placed in (rbi_draft or current_sop)',
+    holder_told_at  TIMESTAMP              COMMENT IS 'rbi_draft: when the holder was told',
+    check_due_at    TIMESTAMP              COMMENT IS 'Proactive holds: the next-day check is due by 18:00 on the next working day',
+    checked_at      TIMESTAMP              COMMENT IS 'When the officer confirmed it at the next-day check',
+    checked_by      VARCHAR(60)            COMMENT IS 'Who confirmed it',
+    explanation_due_on TIMESTAMP           COMMENT IS 'rbi_draft: hold + 20 days',
+    explained_at    TIMESTAMP              COMMENT IS 'rbi_draft: when the holder explained',
+    decide_by       TIMESTAMP              COMMENT IS 'rbi_draft: hold + 30 days, or the explanation + 10 days',
+    expires_on      TIMESTAMP              COMMENT IS 'rbi_draft: hold + 60 days, unless the police direct otherwise',
+    referred_at     TIMESTAMP              COMMENT IS 'rbi_draft: when it was referred to the police through CFCFRMS',
+    police_reply_due_on TIMESTAMP          COMMENT IS 'rbi_draft: referral + 30 days, never later than expires_on',
+    police_direction VARCHAR(8)            COMMENT IS 'KEEP or RELEASE, when the police directed',
+    review_state    VARCHAR(16)            COMMENT IS 'Proactive holds: NEXT_DAY_CHECK, CONFIRMED, EXPLAINED, REFER_DRAFTED, REFERRED, POLICE_KEEP, GENUINE, LINKED or CLOSED',
+    escalated_at    TIMESTAMP              COMMENT IS 'When the case went to the Department Head',
+    must_decide_at  TIMESTAMP              COMMENT IS 'Day 50: when the must-decide alert went out',
+    closed_why      VARCHAR(60)            COMMENT IS 'Why a proactive hold ended: linked to a complaint, released after an explanation, released at the limit ...',
+    compliance_miss BOOLEAN       DEFAULT FALSE COMMENT IS 'TRUE when it was released at day 60 with no decision recorded',
+    linked_case_id  VARCHAR(40)            COMMENT IS 'The complaint that later named the held credit',
+    linked_at       TIMESTAMP              COMMENT IS 'When that complaint reached the bank'
 ) COMMENT IS 'Simulated core banking hold ledger. Only the checker writes it: automatic holds up to the reported amount, and what an officer approved.';
 
 CREATE OR REPLACE TABLE PORTAL_ENTRY (
     entry_id          DECIMAL(18,0) IDENTITY COMMENT IS 'Entry number',
     case_id           VARCHAR(40)   NOT NULL COMMENT IS 'Case',
     viewing_bank_id   VARCHAR(20)   NOT NULL COMMENT IS 'This bank (filing it)',
-    entry_kind        VARCHAR(10)   NOT NULL COMMENT IS 'ONWARD (money moved to another bank), EXIT (money left banking), KYC (holder details), SEND_BACK (ticket returned for correction) or PRE_ALERT (a new payer may be an unreported victim, D-53)',
+    entry_kind        VARCHAR(10)   NOT NULL COMMENT IS 'ONWARD (money moved to another bank), EXIT (money left banking), KYC (holder details), SEND_BACK (ticket returned for correction), PRE_ALERT (a held payment the payer should be asked about, D-64) or REFERRAL (a proactive hold kept and referred to the police, D-63)',
     from_account      VARCHAR(80)            COMMENT IS 'Own account the money left from',
     account_id        VARCHAR(80)   NOT NULL COMMENT IS 'Receiving account, exit, the account whose KYC this is, or the account a sent-back ticket names',
     bank_id           VARCHAR(20)            COMMENT IS 'Receiving bank (ONWARD) or holding bank (KYC)',
@@ -457,7 +554,7 @@ CREATE OR REPLACE TABLE DECISION (
     case_id            VARCHAR(40)   NOT NULL COMMENT IS 'Case',
     viewing_bank_id    VARCHAR(20)   NOT NULL COMMENT IS 'This bank',
     account_id         VARCHAR(80)   NOT NULL COMMENT IS 'Account decided on',
-    action_code        VARCHAR(20)   NOT NULL COMMENT IS 'PROPOSE_NARROW, PROPOSE_FULL_FREEZE, UNMATCHED_NOTICE, PROPOSE_RELEASE or PROPOSE_PRE_ALERT',
+    action_code        VARCHAR(20)   NOT NULL COMMENT IS 'PROPOSE_NARROW, PROPOSE_LARGER_HOLD, PROPOSE_FULL_FREEZE, UNMATCHED_NOTICE, PROPOSE_RELEASE, PROACTIVE_CONFIRM, PROACTIVE_RELEASE, PROACTIVE_KEEP_REFER or PRE_ALERT_SEND (PROPOSE_PRE_ALERT in older runs)',
     proposal_id        DECIMAL(18,0)          COMMENT IS 'Proposal decided',
     decision_outcome   VARCHAR(10)   NOT NULL COMMENT IS 'APPROVED, EDITED or REJECTED',
     amount_inr         DECIMAL(18,2)          COMMENT IS 'Amount the officer approved (may differ from the proposal when EDITED)',
@@ -475,13 +572,18 @@ CREATE OR REPLACE TABLE DECISION (
 CREATE OR REPLACE TABLE WATCH_LIST (
     account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Own account watched',
     case_id         VARCHAR(40)   NOT NULL COMMENT IS 'Case it is watched for',
-    first_pass      VARCHAR(12)   NOT NULL COMMENT IS 'MULE_LIKE, HONEST (an honest receiver: new money is not held) or CHECKED (added by the watch, never held)',
+    first_pass      VARCHAR(12)   NOT NULL COMMENT IS 'MULE_LIKE (typed Pipe for fraud or Fast mover), HONEST (any other type: new money is not held) or CHECKED (added by the watch, never held)',
     reported_inr    DECIMAL(18,2)          COMMENT IS 'The ticket''s reported amount: the most this case may ever hold on the account',
     added_at        TIMESTAMP     NOT NULL COMMENT IS 'Simulated clock',
     added_why       VARCHAR(400)           COMMENT IS 'In plain words',
     left_at         TIMESTAMP              COMMENT IS 'When it left the watch',
     left_why        VARCHAR(20)            COMMENT IS 'CLOSED (officer closed the case), POLICE_CONFIRMED (a later notice backed by an FIR) or DAY_75 (no police direction in 75 days)',
-    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it',
+    eligibility_reason VARCHAR(20)         COMMENT IS 'layer1_ticket (a victim paid it directly in a ticket at this bank), suspect_registry, or NULL (D-60)',
+    account_pattern VARCHAR(20)            COMMENT IS 'Account type from the latest scoring',
+    proactive_allowed BOOLEAN    DEFAULT FALSE COMMENT IS 'TRUE: an eligibility reason, typed Pipe for fraud or Fast mover, and not nodal, pool or escrow',
+    eligibility_checked_at TIMESTAMP       COMMENT IS 'When eligibility was last decided',
+    snapshot_id     DECIMAL(18,0)          COMMENT IS 'Scoring snapshot behind proactive_allowed'
 ) COMMENT IS 'Accounts the agent keeps watching after the first pass, with the first-pass decision that sets what the watch may do.';
 
 CREATE OR REPLACE TABLE PAYMENT_REQUEST (
@@ -528,7 +630,7 @@ CREATE OR REPLACE TABLE WATCH_EVENT (
     account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Watched account',
     case_id         VARCHAR(40)            COMMENT IS 'Case the account is watched for',
     event_at        TIMESTAMP     NOT NULL COMMENT IS 'When it happened (simulated clock)',
-    event_kind      VARCHAR(24)   NOT NULL COMMENT IS 'NEW_MONEY_HELD, NEW_MONEY_ABOVE_NOTICE, NEW_MONEY_HONEST, CASHOUT_BLOCKED, TRANSFER_BLOCKED, RECIPIENT_WATCHED, RECIPIENT_BUSINESS, RECIPIENT_OTHER_BANK, MOVED, LINKED_TO_VICTIM, WATCH_LEFT, RELEASE_FLAGGED, PRE_ALERT_READY, PRE_ALERT_SENT, PRE_ALERT_NOT_NEEDED or PRE_ALERT_ANSWERED',
+    event_kind      VARCHAR(24)   NOT NULL COMMENT IS 'NEW_MONEY_HELD, NEW_MONEY_ABOVE_NOTICE, NEW_MONEY_HONEST, CASHOUT_BLOCKED, TRANSFER_BLOCKED, RECIPIENT_WATCHED, RECIPIENT_BUSINESS, RECIPIENT_OTHER_BANK, MOVED, LINKED_TO_VICTIM, WATCH_LEFT, RELEASE_FLAGGED, PROACTIVE_HOLD, NEW_MONEY_PASSED, LAYERING_HELD, PRE_ALERT_READY, PRE_ALERT_SENT, PRE_ALERT_ANSWERED, PRE_ALERT_CONFIRMED, PRE_ALERT_GENUINE, PRE_ALERT_NOT_NEEDED, ESCALATED, REFER_DRAFTED, MUST_DECIDE, REFERRED, POLICE_KEEP, HOLDER_EXPLAINED, HOLD_RELEASED or HOLD_RELEASED_LIMIT',
     amount_inr      DECIMAL(18,2)          COMMENT IS 'Amount involved',
     counterparty    VARCHAR(200)           COMMENT IS 'Other side: account, ATM, wallet',
     channel         VARCHAR(10)            COMMENT IS 'Channel',
@@ -539,6 +641,94 @@ CREATE OR REPLACE TABLE WATCH_EVENT (
     sentence        VARCHAR(1000)          COMMENT IS 'What happened and why, in plain words (fixed template, no model)',
     stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
 ) COMMENT IS 'The watch: what happened on watched accounts after the first pass, and what the agent did about it.';
+
+-- ---------------------------------------------------------------- proactive holds and pre-alerts (D-60 to D-65)
+
+CREATE OR REPLACE TABLE PAYMENT_CHECK (
+    check_id        DECIMAL(18,0) IDENTITY COMMENT IS 'Row number',
+    account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Eligible account the credit landed in',
+    case_id         VARCHAR(40)            COMMENT IS 'The notice behind the watch',
+    txn_id          VARCHAR(40)   NOT NULL COMMENT IS 'Credit checked',
+    checked_at      TIMESTAMP     NOT NULL COMMENT IS 'When it landed (simulated clock): only what was known then is used',
+    check_result    VARCHAR(4)    NOT NULL COMMENT IS 'hold or pass',
+    payer_type      VARCHAR(12)            COMMENT IS 'flagged, own_customer or other_bank',
+    account_pattern VARCHAR(20)            COMMENT IS 'Account type at the time',
+    checks_json     VARCHAR(4000)          COMMENT IS 'Every check with its value and result',
+    snapshot_id     DECIMAL(18,0)          COMMENT IS 'Scoring snapshot used',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'Payment checks on arrival (D-61): every credit into an eligible account, held or passed, with each check''s value.';
+
+CREATE OR REPLACE TABLE HOLDER_EXPLANATION (
+    account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Account whose holder explained',
+    txn_id          VARCHAR(40)   NOT NULL COMMENT IS 'The held credit it is about',
+    explained_at    TIMESTAMP     NOT NULL COMMENT IS 'When the explanation arrived (simulated clock)',
+    explanation     VARCHAR(1000)          COMMENT IS 'What the holder said',
+    processed_at    TIMESTAMP              COMMENT IS 'When the clock sweep took it in'
+) COMMENT IS 'Simulated input: the holder''s explanation of a proactive hold (draft: within 20 days).';
+
+CREATE OR REPLACE TABLE POLICE_DIRECTION (
+    account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Account',
+    txn_id          VARCHAR(40)   NOT NULL COMMENT IS 'The held credit',
+    direction       VARCHAR(8)    NOT NULL COMMENT IS 'KEEP or RELEASE',
+    reference       VARCHAR(100)           COMMENT IS 'The police reference',
+    directed_at     TIMESTAMP     NOT NULL COMMENT IS 'When (simulated clock)',
+    processed_at    TIMESTAMP              COMMENT IS 'When the clock sweep took it in'
+) COMMENT IS 'Simulated input: what the police directed after a referral.';
+
+CREATE OR REPLACE TABLE PAYER_RESPONSE (
+    txn_id          VARCHAR(40)   NOT NULL COMMENT IS 'The payment the payer was asked about',
+    response        VARCHAR(16)   NOT NULL COMMENT IS 'reported_fraud or genuine',
+    responded_at    TIMESTAMP     NOT NULL COMMENT IS 'When (simulated clock)',
+    note            VARCHAR(400)           COMMENT IS 'What the payer said',
+    processed_at    TIMESTAMP              COMMENT IS 'When the clock sweep took it in'
+) COMMENT IS 'Simulated input: the payer''s answer to a pre-alert, so the demo can show each ending.';
+
+CREATE OR REPLACE TABLE PRE_ALERT (
+    pre_alert_id    DECIMAL(18,0) IDENTITY COMMENT IS 'Pre-alert number',
+    hold_id         DECIMAL(18,0) NOT NULL COMMENT IS 'The proactive hold it follows',
+    case_id         VARCHAR(40)   NOT NULL COMMENT IS 'The notice behind the watch',
+    account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Account the payment went into',
+    txn_id          VARCHAR(40)   NOT NULL COMMENT IS 'The payment',
+    utr             VARCHAR(40)            COMMENT IS 'Its UTR',
+    amount_inr      DECIMAL(18,2) NOT NULL COMMENT IS 'Amount',
+    paid_at         TIMESTAMP     NOT NULL COMMENT IS 'When it was paid',
+    payer_account   VARCHAR(80)            COMMENT IS 'Who paid',
+    payer_bank_id   VARCHAR(20)            COMMENT IS 'The payer''s bank',
+    payer_type      VARCHAR(12)   NOT NULL COMMENT IS 'own_customer or other_bank',
+    route           VARCHAR(12)   NOT NULL COMMENT IS 'fraud_team (a call task) or cfcfrms (a report to the police)',
+    alert_status    VARCHAR(20)   NOT NULL COMMENT IS 'sent, waiting_for_officer, answered, confirmed, genuine or not_needed',
+    alert_text      VARCHAR(4000) NOT NULL COMMENT IS 'Fixed template filled from the database: facts only, never "victim" or "mule"',
+    created_at      TIMESTAMP     NOT NULL COMMENT IS 'Simulated clock',
+    sent_at         TIMESTAMP              COMMENT IS 'When it went out',
+    sent_by         VARCHAR(60)            COMMENT IS 'agent (Pipe for fraud: automatic) or the officer (Fast mover)',
+    ended_at        TIMESTAMP              COMMENT IS 'When it ended',
+    ending_note     VARCHAR(1000)          COMMENT IS 'How it ended, in plain words',
+    minutes_early   DECIMAL(9,0)           COMMENT IS 'Minutes between the hold and the payer''s complaint',
+    complaint_draft VARCHAR(2000)          COMMENT IS 'confirmed, own customer: the NCRP complaint the bank files on their behalf',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'Pre-alerts (D-64): after a proactive hold, someone who can reach the payer is told, so the payer can say whether they meant to pay. A pre-alert never holds more money.';
+
+CREATE OR REPLACE TABLE FRAUD_TEAM_TASK (
+    task_id         DECIMAL(18,0) IDENTITY COMMENT IS 'Task number',
+    pre_alert_id    DECIMAL(18,0) NOT NULL COMMENT IS 'Pre-alert it carries out',
+    payer_account   VARCHAR(80)   NOT NULL COMMENT IS 'Our customer to call',
+    call_script     VARCHAR(1000) NOT NULL COMMENT IS 'What to say (fixed template)',
+    facts_text      VARCHAR(1000) NOT NULL COMMENT IS 'The payment facts',
+    created_at      TIMESTAMP     NOT NULL COMMENT IS 'Simulated clock',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'Simulated fraud-team call tasks: the pre-alert route when the payer banks with us.';
+
+CREATE OR REPLACE TABLE LAYERING_RECORD (
+    record_id       DECIMAL(18,0) IDENTITY COMMENT IS 'Record number',
+    account_id      VARCHAR(40)   NOT NULL COMMENT IS 'Account the money went into',
+    payer_account   VARCHAR(80)   NOT NULL COMMENT IS 'The flagged account that paid it',
+    txn_id          VARCHAR(40)   NOT NULL COMMENT IS 'The payment',
+    amount_inr      DECIMAL(18,2) NOT NULL COMMENT IS 'Amount',
+    hold_id         DECIMAL(18,0)          COMMENT IS 'The proactive hold on it',
+    recorded_at     TIMESTAMP     NOT NULL COMMENT IS 'Simulated clock',
+    detail          VARCHAR(1000)          COMMENT IS 'In plain words, for the police',
+    stmt_id         DECIMAL(9,0)           COMMENT IS 'Exasol statement that wrote it'
+) COMMENT IS 'Money moving between flagged accounts: held and recorded for the police as layering, no pre-alert (the payer is not a victim).';
 
 -- ---------------------------------------------------------------- the agent's runs, the morning log, today's desk
 

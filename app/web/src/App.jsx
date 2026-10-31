@@ -2,19 +2,19 @@ import { useState } from "react";
 import { api, SNAPSHOT } from "./api.js";
 import { Logo } from "./components/bits.jsx";
 import { clock, plural } from "./format.js";
+import { setShowManual, useShowManual } from "./demo.js";
 import { useLoad, useOfficer, useRoute } from "./hooks.js";
 import Case from "./pages/Case.jsx";
 import Compare from "./pages/Compare.jsx";
 import { Audit, Holds } from "./pages/Ledger.jsx";
 import Narrator from "./pages/Narrator.jsx";
-import Notices from "./pages/Notices.jsx";
 import Queue from "./pages/Queue.jsx";
 import Record from "./pages/Record.jsx";
 import Review from "./pages/Review.jsx";
 
-// The officer's app has five tabs. The demo views (manual vs system, the whole night) and the replay controls live
+// The officer's app has four tabs. The demo views (manual vs system, the whole night) and the replay controls live
 // in the dark Demo mode bar above it: judges see that bar, officers never do.
-const TABS = [["review", "Review"], ["queue", "Complaints"], ["notices", "Notices"], ["holds", "Holds"], ["audit", "Audit log"]];
+const TABS = [["review", "Review"], ["queue", "Complaints"], ["holds", "Holds"], ["audit", "Audit log"]];
 const MORNING = "2026-10-18 09:00:00";
 const DAY_END = "2026-10-18 23:59:00";
 const CAPTION = {
@@ -22,10 +22,17 @@ const CAPTION = {
   narrator: "Shows three banks at once, which no single bank's officer can see.",
 };
 
+const LATER = "2026-12-18 00:00:00";      // day 61 of the overnight holds: the draft's clocks run out
+
 function DemoBar({ page, onRan }) {
   const [busy, setBusy] = useState(null);
   const [note, setNote] = useState(null);
+  const cfg = useLoad(() => api.config().catch(() => null), [note]);
+  const mode = cfg.data?.proactive_hold_mode || "rbi_draft";
+  const other = mode === "rbi_draft" ? "current_sop" : "rbi_draft";
+  const MODE = { rbi_draft: "Draft mode (RBI draft)", current_sop: "Current SOP mode" };
   const view = page === "compare" ? "compare" : page === "narrator" ? "narrator" : "console";
+  const manual = useShowManual();
   async function run(key, fn, say) {
     setBusy(key);
     setNote(null);
@@ -40,27 +47,41 @@ function DemoBar({ page, onRan }) {
   }
   return (
     <div className="demobar" role="region" aria-label="Demo controls">
-      <div className="wrap" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "8px 20px", paddingTop: 6, paddingBottom: 6 }}>
-        <span className="db-label"><span className="db-dot" aria-hidden="true" />Demo mode</span>
-        <nav className="seg" aria-label="Demo views">
+      <div className="wrap" style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, paddingTop: 8, paddingBottom: 8 }}>
+        {/* one bucket for the demo simulation: the demo text switch and every control that runs the simulated night */}
+        <div className="db-bucket" role="group" aria-label="Demo simulation">
+          <button className="db-label db-toggle" type="button" aria-pressed={manual} onClick={() => setShowManual(!manual)}
+            title="Show or hide the demo comparison with today's manual process">
+            <span className="db-dot" aria-hidden="true" />Demo mode
+            <span className={`db-switch${manual ? " on" : ""}`}>{manual ? "Manual process shown" : "Show manual process"}</span>
+          </button>
+          {page === "review" || page === "" ? (
+            <span style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+              <span className="db-note" title="Proactive holds: the RBI draft's temporary debit hold, or only the room under the existing notice (today's SOP)">{MODE[mode]}</span>
+              <button className="db-act" type="button" disabled={!!busy} onClick={() => run("mode", () => api.night(MORNING, true, "pipeline", other),
+                (r) => `Switched to ${MODE[other].toLowerCase()} and reran the night to ${clock(r.until)} (${plural(r.events, "event")}, ${r.seconds} s).`)}>
+                {busy === "mode" ? "Rerunning…" : `Switch to ${MODE[other].replace(" mode", "").replace(" (RBI draft)", "")}`}</button>
+              <button className="db-act" type="button" disabled={!!busy} onClick={() => run("night", () => api.night(MORNING, true, "pipeline", mode),
+                (r) => `The night ran from ${clock(r.from)} to ${clock(r.until)}: ${plural(r.events, "event")} across the three banks, in ${r.seconds} s.`)}>
+                {busy === "night" ? "Running the night…" : "Replay the night to 09:00"}</button>
+              <button className="db-act" type="button" disabled={!!busy} onClick={() => run("day", () => api.night(DAY_END, false),
+                (r) => `Ran on to ${clock(r.until)}: every complaint of 18 Oct arrived and was handled (${plural(r.events, "event")}, ${r.seconds} s).`)}>
+                {busy === "day" ? "Running the rest of the day…" : "Run the rest of the day"}</button>
+              <button className="db-act" type="button" disabled={!!busy} onClick={() => run("later", () => api.night(LATER, false),
+                (r) => `Jumped ahead to ${String(r.until).slice(0, 10)}: the overnight holds' clocks ran (${plural(r.events, "event")}, ${r.seconds} s).`)}>
+                {busy === "later" ? "Jumping ahead…" : "Jump ahead 60 days"}</button>
+              <button className="db-act" type="button" disabled={!!busy} onClick={() => run("reset", () => api.reset(), () => "Reset: every complaint waits on the portal again.")}>
+                {busy === "reset" ? "Resetting…" : "Reset"}</button>
+            </span>
+          ) : <span>{CAPTION[view] || "Judges see this bar. Officers never do."}</span>}
+        </div>
+        <nav className="seg" aria-label="Demo views" style={{ alignSelf: "center" }}>
           <a className={view === "console" ? "on" : ""} href="#/review" aria-current={view === "console" ? "page" : undefined}>Officer console</a>
           <a className={view === "compare" ? "on" : ""} href="#/compare" aria-current={view === "compare" ? "page" : undefined}>Manual vs system</a>
           <a className={view === "narrator" ? "on" : ""} href="#/narrator" aria-current={view === "narrator" ? "page" : undefined}>The whole night</a>
         </nav>
-        {page === "review" || page === "" ? (
-          <span style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            <button className="db-act" type="button" disabled={!!busy} onClick={() => run("night", () => api.night(MORNING, true),
-              (r) => `The night ran from ${clock(r.from)} to ${clock(r.until)}: ${plural(r.events, "event")} across the three banks, in ${r.seconds} s.`)}>
-              {busy === "night" ? "Running the night…" : "Replay the night to 09:00"}</button>
-            <button className="db-act" type="button" disabled={!!busy} onClick={() => run("day", () => api.night(DAY_END, false),
-              (r) => `Ran on to ${clock(r.until)}: every complaint of 18 Oct arrived and was handled (${plural(r.events, "event")}, ${r.seconds} s).`)}>
-              {busy === "day" ? "Running the rest of the day…" : "Run the rest of the day"}</button>
-            <button className="db-act" type="button" disabled={!!busy} onClick={() => run("reset", () => api.reset(), () => "Reset: every complaint waits on the portal again.")}>
-              {busy === "reset" ? "Resetting…" : "Reset"}</button>
-          </span>
-        ) : <span>{CAPTION[view] || "Judges see this bar. Officers never do."}</span>}
       </div>
-      {note && <div className="wrap" role="status" style={{ paddingBottom: 8, color: "#e4e9f0" }}>{note}</div>}
+      {note && <div className="wrap" role="status" style={{ paddingBottom: 8, color: "#e4e9f0", textAlign: "center" }}>{note}</div>}
     </div>
   );
 }
@@ -86,8 +107,12 @@ export default function App() {
   const [version, setVersion] = useState(0);         // a demo run or reset: every page loads again
   const [tick, setTick] = useState(0);               // a decision: only the waiting count reloads
   const inbox = useLoad(() => api.inbox(), [version, tick]);
+  const pro = useLoad(() => api.proactive().catch(() => null), [version, tick]);
   const [page, a, b] = route;
-  const waiting = inbox.data?.waiting?.length ?? null;
+  // the same count as Review's "Decisions for you": proposals, plus proactive holds held overnight and due
+  const waiting = inbox.data ? (inbox.data.waiting?.length || 0) + (pro.data?.held_overnight?.length || 0)
+    + (inbox.data.done || []).filter((t) => ["FAILED", "CHECK_FAILED"].includes(t.run_status)).length
+    + (pro.data?.queue?.length || 0) + (pro.data?.review?.length || 0) : null;
   const tab = page === "case" ? "queue" : page === "record" ? "holds" : page;
   const bump = () => setTick((v) => v + 1);
   const ran = () => setVersion((v) => v + 1);
@@ -99,7 +124,6 @@ export default function App() {
   else if (page === "compare") body = <Compare key={`${a || ""}-${version}`} caseId={a} />;
   else if (page === "queue") body = <Queue key={version} onChange={bump} />;
   else if (page === "holds") body = <Holds key={version} />;
-  else if (page === "notices") body = <Notices key={version} officer={officer} onChange={bump} />;
   else if (page === "audit") body = <Audit key={`${a || ""}-${version}`} caseId={a} officer={officer} onChange={bump} />;
   else if (page === "narrator") body = <Narrator key={version} victim={a} />;
   else body = <Review key={version} officer={officer} onChange={bump} />;

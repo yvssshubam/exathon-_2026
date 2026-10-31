@@ -1,20 +1,24 @@
-// The account's 90-day history in plain words, from the eight signals the database computed.
+// The account's 90-day history in plain words, from the nine v2 signals the database computed (D-57).
 // The words describe; the rules engine decides. Nothing here changes an amount.
 import { age, stay } from "./format.js";
 
 const byName = (signals) => Object.fromEntries((signals || []).map((s) => [s.signal_name, s.signal_value]));
+const pct = (v) => `${Math.round(Number(v || 0) * 100)}%`;
+export const TYPE_NAMES = { PIPE_FOR_FRAUD: "Pipe for fraud", FAST_MOVER: "Fast mover", EXPOSED_BUSINESS: "Exposed business",
+  ORDINARY_CUSTOMER: "Ordinary customer", GREY_ZONE: "Grey zone" };
 
-// Rows for the "Why it looks like ..." table on the case page.
+// Rows for the "What the history shows" table on the case page.
 export function evidenceRows(signals, openedOn, at) {
   const v = byName(signals);
   const rows = [];
   if (v.median_dwell_minutes != null) rows.push(["Money usually stays in the account", stay(v.median_dwell_minutes)]);
-  if (v.pass_through_ratio != null) rows.push(["Goes out within an hour", `${Math.round(v.pass_through_ratio * 100)}%`]);
-  if (v.large_payer_share != null)
-    rows.push(["Payments come from", v.large_payer_share < 0.2 ? "Many small payers" : v.large_payer_share > 0.8 ? "A few large payers" : "A mix of payers"]);
-  if (v.cash_or_crypto_exits != null) rows.push(["Cash or crypto withdrawals", v.cash_or_crypto_exits ? String(Math.round(v.cash_or_crypto_exits)) : "None"]);
-  if (v.complaint_linked_credits_7d) rows.push(["Fraud complaints that paid it in 7 days", String(Math.round(v.complaint_linked_credits_7d))]);
-  if (openedOn) rows.push(["Account age", age(openedOn, at)]);
+  if (v.passed_on_within_hour != null) rows.push(["Sent on within an hour", pct(v.passed_on_within_hour)]);
+  if (v.cashed_out_within_hour != null) rows.push(["Cash or crypto within an hour", pct(v.cashed_out_within_hour)]);
+  if (v.top3_payer_share != null)
+    rows.push(["Payments come from", v.top3_payer_share < 0.2 ? "Many small payers" : v.top3_payer_share > 0.8 ? "A few large payers" : "A mix of payers"]);
+  if (v.money_from_flagged_share) rows.push(["Money from flagged accounts", pct(v.money_from_flagged_share)]);
+  if (v.direct_complaints_7d) rows.push(["Fraud complaints that paid it in 7 days", String(Math.round(v.direct_complaints_7d))]);
+  if (openedOn) rows.push(["Account age (context, not scored)", age(openedOn, at)]);
   return rows;
 }
 
@@ -24,30 +28,30 @@ export function evidenceBullets(signals, inflows) {
   const v = byName(signals);
   const out = [];
   if (v.median_dwell_minutes != null) out.push(`Money usually stays in the account for ${longStay(v.median_dwell_minutes)}`);
-  if (v.pass_through_ratio != null) out.push(`${v.pass_through_ratio < 0.5 ? "Only " : ""}${Math.round(v.pass_through_ratio * 100)}% of incoming money goes out within an hour`);
-  if (v.large_payer_share != null && v.large_payer_share < 0.2) out.push("Receives many small payments, like a shop");
-  if (v.cash_or_crypto_exits != null) out.push(v.cash_or_crypto_exits ? `${Math.round(v.cash_or_crypto_exits)} cash or crypto withdrawals` : "No cash or crypto withdrawals");
+  if (v.passed_on_within_hour != null) out.push(`${v.passed_on_within_hour < 0.5 ? "Only " : ""}${pct(v.passed_on_within_hour)} of incoming money goes out within an hour`);
+  if (v.top3_payer_share != null && v.top3_payer_share < 0.2) out.push("Receives many small payments, like a shop");
+  if (v.cashed_out_within_hour != null) out.push(v.cashed_out_within_hour ? `${pct(v.cashed_out_within_hour)} taken out as cash or crypto within an hour` : "No cash or crypto taken out right after money arrives");
   const linked = inflows || [];
   if (linked.length === 1) out.push(`Only one payment linked to fraud: ₹${Number(linked[0].amount_inr).toLocaleString("en-IN")} from ${linked[0].from_name} at ${String(linked[0].ts).slice(11, 16)}`);
   else if (linked.length > 1) out.push(`${linked.length} payments linked to fraud on this trail`);
   return out;
 }
 
-// One line for the mule table: "20 days old · 88% leaves within 1 h · 3 cash or crypto withdrawals"
+// One line for a decision list: "Fast mover · pass-through 0.85 · fraud exposure 0.13"
 export function evidenceLine(p, at) {
   const parts = [];
   if (p.opened_on) {
     const days = Math.round((new Date(String(at || p.received_at || "2026-10-18").slice(0, 10)) - new Date(String(p.opened_on).slice(0, 10))) / 86400000);
     parts.push(days >= 365 ? `${age(p.opened_on, at || p.received_at)} old` : `${days} days old`);
   }
-  if (p.pass_through != null) parts.push(`${Math.round(p.pass_through * 100)}% leaves within 1 h`);
-  if (p.cash_exits != null) parts.push(`${Math.round(p.cash_exits)} cash or crypto withdrawal${Math.round(p.cash_exits) === 1 ? "" : "s"}`);
-  if (p.complaint_links > 1) parts.push(`paid by ${Math.round(p.complaint_links)} fraud complaints this week`);
+  if (p.account_pattern) parts.push(TYPE_NAMES[p.account_pattern] || p.account_pattern);
+  if (p.pass_through_score != null) parts.push(`pass-through ${Number(p.pass_through_score).toFixed(2)}`);
+  if (p.exposure_score != null) parts.push(`fraud exposure ${Number(p.exposure_score).toFixed(2)}`);
   return parts.join(" · ");
 }
 
-export function evidenceTitle(band) {
-  if (band === "HONEST") return "Why this looks like a genuine business";
-  if (band === "MULE") return "Why this looks like a pass-through account";
+export function evidenceTitle(pattern) {
+  if (pattern === "ORDINARY_CUSTOMER") return "Why this looks like an ordinary customer";
+  if (pattern === "PIPE_FOR_FRAUD" || pattern === "FAST_MOVER") return "Why money looks like it runs through this account";
   return "What the account's history shows";
 }

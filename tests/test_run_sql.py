@@ -32,6 +32,35 @@ def test_include_inlines_python_file(tmp_path: Path):
     ]
 
 
+def test_semicolon_in_a_comment_does_not_end_the_statement():
+    sql = "SELECT a\n  -- the first part;\n  FROM t;\n"
+    assert split_statements(sql) == ["SELECT a\n  -- the first part;\n  FROM t"]
+
+
+def _open_brackets(stmt: str) -> int:
+    """Brackets left open, ignoring comments and string literals."""
+    depth, i, n = 0, 0, len(stmt)
+    while i < n:
+        if stmt.startswith("--", i):
+            i = stmt.find("\n", i) if "\n" in stmt[i:] else n
+            continue
+        if stmt[i] == "'":
+            i = stmt.find("'", i + 1) + 1 or n
+            continue
+        depth += {"(": 1, ")": -1}.get(stmt[i], 0)
+        i += 1
+    return depth
+
+
+def test_every_repo_sql_statement_is_whole():
+    """A statement cut short (for example at a ';' the splitter mistook for its end) leaves a bracket open."""
+    for path in sorted((ROOT / "sql").rglob("*.sql")):
+        for i, stmt in enumerate(split_statements(path.read_text(encoding="utf-8")), 1):
+            if stmt.lstrip().upper().startswith(("CREATE OR REPLACE PYTHON3", "CREATE PYTHON3")):
+                continue
+            assert _open_brackets(stmt) == 0, f"{path.relative_to(ROOT)} statement {i}: {stmt.splitlines()[0][:80]}"
+
+
 def test_unterminated_script_is_an_error():
     with pytest.raises(ValueError, match="missing a '/'"):
         split_statements("CREATE PYTHON3 SCALAR SCRIPT PH.H() RETURNS INT AS\ndef run(ctx):\n    return 1\n")
@@ -46,11 +75,11 @@ def test_repo_sql_files_parse_and_are_numbered():
     from pipeline.run_sql import BANK_SQL, PORTAL_SQL
 
     assert [p.name for p in sql_files(BANK_SQL)] == ["010_schema.sql", "015_smoke_udf.sql", "050_attribute_udf.sql",
-                                                     "090_views.sql"]
+                                                     "052_match_udf.sql", "090_views.sql"]
     assert [p.name for p in sql_files(PORTAL_SQL)] == ["010_portal.sql"]
     schema = split_statements((BANK_SQL / "010_schema.sql").read_text())
     tables = [s for s in schema if s.upper().startswith("CREATE OR REPLACE TABLE")]
-    assert len(tables) == 43
+    assert len(tables) == 56
     for stmt in tables:                       # every table says what it is for
         assert ") COMMENT IS '" in stmt, stmt.splitlines()[0]
     for folder in ("bank", "portal", "lab", "learn", "steps", "amlworld"):
@@ -62,7 +91,7 @@ def test_every_bank_gets_its_own_schema_and_names_stay_unqualified():
     from pipeline.run_sql import plan
 
     schemas = [schema for schema, _ in plan()]
-    assert schemas.count("PH_X") == schemas.count("PH_Y") == schemas.count("PH_Z") == 4
+    assert schemas.count("PH_X") == schemas.count("PH_Y") == schemas.count("PH_Z") == 5
     assert schemas.count("PH_PORTAL") == 1
     for folder in ("bank", "steps"):          # bank SQL runs in whichever bank schema is open: no PH. prefix
         for f in sql_files(ROOT / "sql" / folder):

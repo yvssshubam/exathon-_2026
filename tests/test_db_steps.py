@@ -71,16 +71,23 @@ def test_attribution_matches_the_oracle_as_bank_x_sees_it(maker):
 
 
 def test_scores_match_the_oracle(maker, world):
+    """Scoring v2 (D-57): the two scores and the type, as the Python reference computes them."""
     from pipeline.load_cases import bank_rows
-    from tests.score_oracle import score, signals
+    from tests.score_oracle import classify, signals
 
-    rows = dict(bank_rows(world, BANK), COMPLAINTS=world["COMPLAINTS"])
-    got = {a: (float(s), b) for a, s, b in q(maker, "SELECT account_id, score, band FROM ACCOUNT_SCORE "
-                                                     "WHERE case_id = 'CASE_DEMO'")}
+    rows = dict(bank_rows(world, BANK), COMPLAINTS=world["COMPLAINTS"],
+                SUSPECT_REGISTRY=world["SUSPECT_REGISTRY"])
+    got = {a: (float(pt), float(fe), pat) for a, pt, fe, pat in q(
+        maker, "SELECT account_id, pass_through, fraud_exposure, account_pattern FROM ACCOUNT_SCORE "
+               "WHERE case_id = 'CASE_DEMO'")}
     assert set(got) == {"ACC_A", "ACC_C", "ACC_D"}                    # Bank X scores only its own accounts
-    for acc, (s, band) in got.items():
-        want_score, want_band = score(signals(rows, demo, acc, AS_OF))
-        assert band == want_band and s == pytest.approx(want_score, abs=1e-6), acc
+    for acc, (pt, fe, pattern) in got.items():
+        want = classify(signals(rows, demo, acc, AS_OF))
+        assert pattern == want["account_type"], acc
+        assert pt == pytest.approx(want["pass_through"], abs=0.02), acc
+        assert fe == pytest.approx(want["fraud_exposure"], abs=0.02), acc
+    snaps = q(maker, "SELECT COUNT(*), MIN(weight_version) FROM SCORE_SNAPSHOT WHERE case_id = 'CASE_DEMO'")[0]
+    assert int(snaps[0]) == 3 and int(snaps[1]) == 0                  # every scoring leaves a snapshot
 
 
 def test_the_rules_engine_matches_the_oracle(maker, world):

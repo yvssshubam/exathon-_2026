@@ -174,8 +174,8 @@ def clock_now() -> str | None:
 
 ACTION_SQL = """
     SELECT account_id, bank_id, hop, action_code, act_mode, amount_inr, current_hold_inr, victim_amount_inr,
-           other_victims_inr, balance_now_inr, trail_amount_inr, band, score, reason_code, legal_basis,
-           action_status, stmt_id
+           other_victims_inr, balance_now_inr, trail_amount_inr, account_pattern, snapshot_id, reason_code,
+           legal_basis, action_status, stmt_id
     FROM CASE_ACTION WHERE case_id = {c} AND viewing_bank_id = {b}"""
 
 
@@ -208,7 +208,24 @@ def config():
         "lane": RULES["lane_a"],
         "model": {"enabled": llm["enabled"], "name": llm["model"] if llm["enabled"] else None},
         "desk_hours": [10, 18],
+        "account_types": {k: v["name"] for k, v in SCORING["account_types"].items()},
+        "cutoffs": SCORING["cutoffs"],
+        "proactive_hold_mode": hold_mode_now(),
     }
+
+
+def hold_mode_now() -> str:
+    """The proactive-hold mode of the loaded run (RUN_SETTING), else config/rules.yaml (D-62)."""
+    from pipeline.proactive import mode
+
+    try:
+        conn = _open("maker", "BANK_X")
+    except Exception:
+        return RULES["proactive"]["proactive_hold_mode"]
+    try:
+        return mode(conn)
+    finally:
+        conn.close()
 
 
 @app.get("/api/clock")
@@ -224,6 +241,8 @@ class NightRun(BaseModel):
     mode: str = Field("pipeline", pattern="^(pipeline|llm)$")
     reset: bool = Field(True, description="Reload the data and start the night again first")
     banks: list[str] | None = Field(None, description="Only these banks (e.g. BANK_Z to open its desk)")
+    hold_mode: str | None = Field(None, pattern="^(rbi_draft|current_sop)$",
+                                  description="Proactive holds under the RBI draft or today's SOP (with reset)")
 
 
 @app.post("/api/night/run")
@@ -235,7 +254,7 @@ def night_run(body: NightRun):
         check_bank(b)
     started = time.perf_counter()
     try:
-        r = run_night(body.until, body.mode, body.reset, body.banks, quiet=True)
+        r = run_night(body.until, body.mode, body.reset, body.banks, quiet=True, hold_mode=body.hold_mode)
     except steps.StepFailed as exc:
         raise HTTPException(500, str(exc)) from exc
     return {"from": r["from"], "until": r["until"], "events": r["events"], "lines": r["lines"],
@@ -338,8 +357,10 @@ def proposal_rows(conn, where: str, params: dict) -> list[dict]:
         SELECT p.proposal_id, p.case_id, p.account_id, p.action_code, p.act_mode, p.amount_inr, p.proposed_by,
                p.proposed_at, p.reasons_json, p.draft_text, p.draft_by, p.claims_check, p.proposal_status,
                p.checker_note, p.checked_at, p.stmt_id, t.received_at, acc.opened_on, acc.account_type,
-               acc.holder_type, ca.balance_now_inr, ca.victim_amount_inr, ca.other_victims_inr, ca.band,
-               ca.pass_through, ca.cash_exits, ca.complaint_links,
+               acc.holder_type, ca.balance_now_inr, ca.victim_amount_inr, ca.other_victims_inr, ca.account_pattern,
+               ca.pass_through_score, ca.exposure_score, ca.ladder_step, ca.fraud_linked_inr,
+               (SELECT MAX(s.fraud_case_count) FROM ACCOUNT_SCORE s WHERE s.case_id = p.case_id
+                  AND s.account_id = p.account_id) AS fraud_case_count,
                (SELECT SUM(h.amount_inr) FROM HOLD_LEDGER h WHERE h.account_id = p.account_id AND h.case_id = p.case_id
                   AND h.hold_status = 'ACTIVE' AND h.hold_kind = 'LIEN') AS current_hold_inr,
                (SELECT MIN(h.placed_at) FROM HOLD_LEDGER h WHERE h.account_id = p.account_id AND h.case_id = p.case_id
@@ -623,7 +644,7 @@ def trail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
                                  f"transaction")
     facts = {f["account_id"]: f for f in rows(conn, """
         SELECT ca.account_id, ca.bank_id, ca.hop, ca.is_exit, ca.is_own_bank, ca.victim_amount_inr,
-               ca.balance_now_inr, ca.band, acc.holder_name, acc.holder_type
+               ca.balance_now_inr, ca.account_pattern, acc.holder_name, acc.holder_type
         FROM CASE_ACCOUNT ca LEFT JOIN ACCOUNT acc ON acc.account_id = ca.account_id
         WHERE ca.case_id = {c} AND ca.viewing_bank_id = {b}""", {"c": case_id, "b": bank})}
     acts: dict[str, list[dict]] = {}
@@ -649,7 +670,7 @@ def trail(case_id: str, bank: str = Query("BANK_X"), conn=Depends(get_conn)):
             "label": exit_label if kind == "exit" else (f.get("holder_name") or acc),
             "bank_id": f.get("bank_id"), "bank_name": bank_name(f.get("bank_id")),
             "holder_type": f.get("holder_type"), "victim_amount_inr": f.get("victim_amount_inr"),
-            "balance_now_inr": f.get("balance_now_inr"), "evidence": f.get("band"),
+            "balance_now_inr": f.get("balance_now_inr"), "evidence": f.get("account_pattern"),
             "done": headline(auto) if auto else None,
             "waiting": [headline(a) for a in mine if a["act_mode"] == "OFFICER" and (acc, a["action_code"]) in waiting],
         })
@@ -682,14 +703,17 @@ def account_panel(case_id: str, account_id: str, bank: str = Query("BANK_X"), co
         account["bank_name"] = bank_name(account["bank_id"])
     facts = one(conn, "SELECT * FROM CASE_ACCOUNT WHERE case_id = {c} AND viewing_bank_id = {b} "
                       "AND account_id = {a}", {"c": case_id, "b": bank, "a": account_id})
-    score = one(conn, "SELECT score, band, stmt_id FROM ACCOUNT_SCORE WHERE case_id = {c} AND account_id = {a}",
+    score = one(conn, "SELECT pass_through, fraud_exposure, account_pattern, ladder_step, snapshot_id, weight_version, "
+                      "fraud_out_share, other_out_share, fraud_money_leaves_fast, fraud_case_count, "
+                      "fraud_linked_credits, stmt_id FROM ACCOUNT_SCORE WHERE case_id = {c} AND account_id = {a}",
                 {"c": case_id, "a": account_id})
+    if score:
+        score["type_name"] = SCORING["account_types"].get(score["account_pattern"], {}).get("name")
     signals = rows(conn, """
-        SELECT signal_name, signal_value, weight, mule_likeness, contribution, sentence, mule_rank, honest_rank
-        FROM ACCOUNT_SIGNALS WHERE case_id = {c} AND account_id = {a} ORDER BY mule_rank""",
+        SELECT score_name, signal_name, signal_value, weight, m_value, contribution, sentence, high_rank, low_rank
+        FROM ACCOUNT_SIGNALS WHERE case_id = {c} AND account_id = {a} ORDER BY score_name, high_rank""",
                    {"c": case_id, "a": account_id})
-    top_key = "mule_rank" if score and score["band"] in ("MULE", "REVIEW") else "honest_rank"
-    reasons = [s["sentence"] for s in sorted(signals, key=lambda s: s[top_key])][: SCORING["top_reasons"]]
+    reasons = top_reasons(signals, score)
     names = holder_names(conn)
     acts = [present(a, names) for a in rows(conn, ACTION_SQL + " AND account_id = {a} ORDER BY act_mode DESC",
                                            {"c": case_id, "b": bank, "a": account_id})]
@@ -727,6 +751,23 @@ def account_panel(case_id: str, account_id: str, bank: str = Query("BANK_X"), co
             "proposals": proposal_rows(conn, "p.case_id = {c} AND p.account_id = {a}",
                                        {"c": case_id, "a": account_id}),
             "watch": watch_rows(conn, bank, account_id)}
+
+
+def top_reasons(signals: list[dict], score: dict | None) -> list[str]:
+    """Per score, the top signals on the side that decides it, plus the strongest one pointing the other way
+    (D-57: the rules choose the reasons)."""
+    out = []
+    for name in ("pass_through", "fraud_exposure"):
+        value = float((score or {}).get(name) or 0)
+        mine = [s for s in signals if s["score_name"] == name and s["sentence"]]
+        key = "high_rank" if value >= 0.5 else "low_rank"
+        side = [s for s in mine if (float(s["m_value"] or 0) >= 0.5) == (value >= 0.5)]
+        other = [s for s in mine if s not in side]
+        out += [s["sentence"] for s in sorted(side, key=lambda s: s[key])][: SCORING["top_reasons"]]
+        if other:
+            out.append("Against: " + sorted(other, key=lambda s: s["low_rank" if key == "high_rank" else
+                                                                     "high_rank"])[0]["sentence"])
+    return out
 
 
 @app.get("/api/cases/{case_id}/log")
@@ -1016,11 +1057,39 @@ def read_notice(body: NoticeIn, bank: str = Query("BANK_X")):
 
 @app.get("/api/prealerts")
 def prealerts(conn=Depends(get_conn)):
-    """Pre-alerts (DECISIONS D-53): new money from a sender that never paid an account already on hold, with no
-    complaint behind it; where that account is on hold now; and the alert for the police. Sending it is the officer's
-    decision (approve, with the text as sent)."""
+    """Pre-alerts (D-64): after a proactive hold, someone who can reach the payer is told. Pipe for fraud: sent at
+    once; Fast mover: waiting for the officer's click. The retired D-53 pre-alerts of older runs follow."""
     labels = ticket_labels(conn)
+    names = holder_names(conn)
     out = []
+    for a in rows(conn, "SELECT p.*, h.amount_inr AS held_inr, h.hold_status, h.legal_basis, "
+                        "b.bank_name AS payer_bank, s.account_pattern, s.pass_through, s.fraud_exposure, "
+                        "w.eligibility_reason "
+                        "FROM PRE_ALERT p JOIN HOLD_LEDGER h ON h.hold_id = p.hold_id LEFT JOIN BANK b "
+                        "ON b.bank_id = p.payer_bank_id LEFT JOIN SCORE_SNAPSHOT s ON s.snapshot_id = h.snapshot_id "
+                        "LEFT JOIN (SELECT account_id, MAX(eligibility_reason) AS eligibility_reason FROM WATCH_LIST "
+                        "WHERE left_at IS NULL GROUP BY account_id) w ON w.account_id = p.account_id "
+                        "ORDER BY p.pre_alert_id"):
+        status = {"sent": "SENT", "waiting_for_officer": "WAITING"}.get(a["alert_status"], a["alert_status"].upper())
+        out.append({"alert_id": f"PA-{int(a['pre_alert_id'])}", "pre_alert_id": a["pre_alert_id"],
+                    "received_at": a["paid_at"], "account_id": a["account_id"],
+                    "account_name": names.get(a["account_id"], a["account_id"]),
+                    "sender_text": (f"an account at {a['payer_bank'] or 'another bank'} ending "
+                                    f"{str(a['payer_account'] or '')[-4:]}" if a["payer_type"] == "other_bank" else
+                                    f"our own customer, account ending {str(a['payer_account'] or '')[-4:]}"),
+                    "amount_inr": a["amount_inr"], "utr": a["utr"], "held_inr": a["held_inr"],
+                    "held_total_inr": a["held_inr"], "holds": [], "alert_text": a["alert_text"],
+                    "alert_status": status, "route": a["route"], "sent_by": a["sent_by"], "sent_at": a["sent_at"],
+                    "minutes_early": a["minutes_early"], "ending_note": a["ending_note"],
+                    "complaint_draft": a["complaint_draft"], "reported_case_id": None, "reported_label": None,
+                    "reported_at": a["ended_at"] if a["alert_status"] == "answered" else None,
+                    "closed_note": a["ending_note"] if a["alert_status"] in ("not_needed", "genuine") else None,
+                    "waiting": a["alert_status"] == "waiting_for_officer", "proactive": True,
+                    "legal_basis": a["legal_basis"], "label": labels.get(a["case_id"], a["case_id"]),
+                    "account_pattern": a["account_pattern"],
+                    "type_name": SCORING["account_types"].get(a["account_pattern"] or "", {}).get("name"),
+                    "pass_through": a["pass_through"], "fraud_exposure": a["fraud_exposure"],
+                    "eligibility_reason": a["eligibility_reason"], "hold_id": a["hold_id"]})
     for p in proposal_rows(conn, "p.action_code = 'PROPOSE_PRE_ALERT'", {}):
         r = p["reasons"]
         holds = rows(conn, """
@@ -1058,6 +1127,162 @@ def prealerts(conn=Depends(get_conn)):
                     else None, "waiting": p["proposal_status"] == "WAITING"})
     out.sort(key=lambda a: str(a["received_at"] or ""), reverse=True)
     return out
+
+
+# ---------------------------------------------------------------- proactive holds (D-60 to D-65)
+
+@app.get("/api/proactive")
+def proactive_view(conn=Depends(get_conn)):
+    """Every proactive hold with its card (the payment, the checks it passed, the type with both scores and the top
+    reasons, the legal basis and mode, days left, the pre-alert), the queue items the clocks raised, and the mode."""
+    from pipeline import proactive
+
+    now = clock_now()
+    cards = proactive.hold_cards(conn, now)
+    for c in cards:
+        c["label"] = ticket_labels(conn).get(c["case_id"], c["case_id"]) if not c["case_id"].startswith("REGISTRY:") \
+            else "Suspect Registry"
+    held_overnight = [c for c in cards if c["hold_status"] == "ACTIVE" and c["review_state"] == "NEXT_DAY_CHECK"]
+    return {"clock": now, "mode": proactive.mode(conn), "held_overnight": held_overnight,
+            "queue": proactive.queue_items(cards), "holds": cards,
+            "review": review_accounts(conn)}
+
+
+def review_accounts(conn) -> list[dict]:
+    """Held accounts the rules make no suggestion for (scoring v2, D-57): the grey zone, where one score is between
+    the cut-offs, and exposed businesses, which get fraud money but keep their own. The officer decides each one; an
+    account leaves the list once an officer has recorded a review of it since the last reset."""
+    out = rows(conn, """
+        SELECT s.account_id, a.holder_name, a.account_type, a.opened_on, s.account_pattern, s.pass_through,
+               s.fraud_exposure, s.case_id, s.snapshot_id, s.ladder_step,
+               (SELECT SUM(h.amount_inr) FROM HOLD_LEDGER h WHERE h.account_id = s.account_id
+                  AND h.case_id = s.case_id AND h.hold_status = 'ACTIVE') AS held_inr
+        FROM ACCOUNT_SCORE s JOIN ACCOUNT a ON a.account_id = s.account_id
+        WHERE s.account_pattern IN ('EXPOSED_BUSINESS', 'GREY_ZONE') AND s.case_id NOT LIKE 'WATCH:%'
+          AND EXISTS (SELECT 1 FROM HOLD_LEDGER h WHERE h.account_id = s.account_id AND h.case_id = s.case_id
+                      AND h.hold_status = 'ACTIVE')
+          AND NOT EXISTS (SELECT 1 FROM AUDIT_LOG l WHERE l.event_name = 'account_reviewed'
+                          AND l.account_id = s.account_id AND l.case_id = s.case_id
+                          AND l.event_id > (SELECT COALESCE(MAX(event_id), 0) FROM AUDIT_LOG WHERE event_name = 'seed'))
+        ORDER BY s.account_id""")
+    labels = ticket_labels(conn)
+    for r in out:
+        r["label"] = labels.get(r["case_id"], r["case_id"])
+    return out
+
+
+class ReviewAct(BaseModel):
+    officer: str = Field(..., description="Officer deciding; required")
+    reason: str = Field(..., description="Why the hold stays as it is; required")
+
+
+@app.post("/api/review/{case_id}/{account_id}/keep")
+def review_keep(case_id: str, account_id: str, body: ReviewAct, bank: str = Query("BANK_X"),
+                checker=Depends(get_checker)):
+    """A grey-zone or exposed-business account reviewed: the officer keeps the hold as it is. Recorded in the audit log
+    with the officer's name and reason; to change the hold, the officer works from the complaint instead."""
+    # imported under another name: this module has an /api/audit route called audit
+    from pipeline.db import audit as write_audit
+
+    officer, reason = (body.officer or "").strip(), (body.reason or "").strip()
+    if not officer or not reason:
+        raise HTTPException(422, "An officer name and a reason are required.")
+    now = clock_now()
+    if not now:
+        raise HTTPException(409, "The night has not run yet")
+    write_audit(checker, "account_reviewed", case_id, f"kept the hold as it is: {reason}"[:2000], actor=officer[:60],
+          sim_at=now, account_id=account_id)
+    return {"reviewed": account_id, "case_id": case_id, "at": now}
+
+
+class OfficerAct(BaseModel):
+    officer: str = Field(..., description="Officer deciding; required")
+    reason: str = Field(..., description="Why; required for every officer action")
+
+
+class BulkConfirm(OfficerAct):
+    proactive_ids: list[int] = Field(..., description="Clear cases (hold numbers) to confirm together")
+
+
+def _proactive_act(fn, hold_id: int, body: OfficerAct, bank: str, checker) -> dict:
+    from pipeline.checker import Checker
+
+    now = clock_now()
+    if not now:
+        raise HTTPException(409, "The night has not run yet")
+    try:
+        decision = fn(Checker(checker, check_bank(bank)), hold_id, body.officer, body.reason, now)
+    except DecisionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"decision_id": decision, "at": now}
+
+
+@app.post("/api/proactive/{proactive_id}/confirm")
+def proactive_confirm(proactive_id: int, body: OfficerAct, bank: str = Query("BANK_X"), checker=Depends(get_checker)):
+    """The next-day check: the officer confirms an overnight proactive hold (through the checker)."""
+    from pipeline import proactive
+
+    return _proactive_act(proactive.confirm, proactive_id, body, bank, checker)
+
+
+@app.post("/api/proactive/confirm-clear")
+def proactive_confirm_clear(body: BulkConfirm, bank: str = Query("BANK_X"), checker=Depends(get_checker)):
+    """Confirm clear cases together (Pipe for fraud, both scores outside the grey zone, no payer response). Each is
+    checked and recorded on its own; anything not clear is refused, the rest go through."""
+    from pipeline import proactive
+    from pipeline.checker import Checker
+
+    now = clock_now()
+    ck = Checker(checker, check_bank(bank))
+    done, refused = [], []
+    for pid in body.proactive_ids:
+        try:
+            done.append({"hold_id": pid, "decision_id": proactive.confirm(ck, pid, body.officer, body.reason, now,
+                                                                           bulk=True)})
+        except DecisionError as exc:
+            refused.append({"hold_id": pid, "why": str(exc)})
+    return {"confirmed": done, "refused": refused, "at": now}
+
+
+@app.post("/api/proactive/{proactive_id}/release")
+def proactive_release(proactive_id: int, body: OfficerAct, bank: str = Query("BANK_X"), checker=Depends(get_checker)):
+    from pipeline import proactive
+
+    return _proactive_act(proactive.release, proactive_id, body, bank, checker)
+
+
+@app.post("/api/proactive/{proactive_id}/keep-and-refer")
+def proactive_keep_and_refer(proactive_id: int, body: OfficerAct, bank: str = Query("BANK_X"),
+                             checker=Depends(get_checker)):
+    from pipeline import proactive
+
+    return _proactive_act(proactive.keep_and_refer, proactive_id, body, bank, checker)
+
+
+@app.post("/api/prealerts/{pre_alert_id}/send")
+def prealert_send(pre_alert_id: int, body: OfficerAct, bank: str = Query("BANK_X"), checker=Depends(get_checker)):
+    """A Fast mover's pre-alert, sent from its hold card with one click (through the checker)."""
+    from pipeline import proactive
+
+    return _proactive_act(proactive.send_by_officer, pre_alert_id, body, bank, checker)
+
+
+@app.get("/api/outcomes")
+def outcomes(conn=Depends(get_conn)):
+    """Module 7: holds confirmed by a victim, holds released after an explanation, minutes early (synthetic data)."""
+    from pipeline import proactive
+
+    return proactive.outcomes(conn)
+
+
+@app.get("/api/labels.csv", response_class=PlainTextResponse)
+def labels_csv(conn=Depends(get_conn)):
+    """The label export for the scoring model: account, snapshot, label (1 confirmed by a victim, 0 released after
+    an explanation). The demo never trains on it: the data is synthetic."""
+    lines = ["account_id,snapshot_id,label"]
+    lines += [f"{a},{int(s) if s is not None else ''},{int(lab)}" for a, s, lab in conn.execute(
+        "SELECT account_id, snapshot_id, label FROM PROACTIVE_HOLD_LABEL ORDER BY account_id, snapshot_id").fetchall()]
+    return "\n".join(lines) + "\n"
 
 
 @app.get("/api/holds")
@@ -1149,7 +1374,16 @@ DECIDED_WORDS = {"PROPOSE_NARROW": "Reduced the hold on {name} to {amt}", "PROPO
                  "PROPOSE_RELEASE": "Released the hold on {name}",
                  "PROPOSE_PRE_ALERT": "Sent the pre-alert about the {amt} into {name}",
                  "HOLD_AGAIN": "Held {name} again, {amt}", "UNFREEZE": "Unfroze {name}",
-                 "RELEASE": "Released the near-match hold on {name}"}
+                 "RELEASE": "Released the near-match hold on {name}",
+                 "PROPOSE_LARGER_HOLD": "Approved a larger hold on {name}, {amt}",
+                 "PROACTIVE_CONFIRM": "Confirmed the overnight hold on {name}, {amt}",
+                 "PROACTIVE_RELEASE": "Released the proactive hold on {name}, {amt}",
+                 "PROACTIVE_KEEP_REFER": "Kept the hold on {name} and referred it to the police, {amt}",
+                 "PRE_ALERT_SEND": "Sent the pre-alert about the {amt} into {name}"}
+PROACTIVE_EVENTS = ("PROACTIVE_HOLD", "NEW_MONEY_PASSED", "PRE_ALERT_SENT", "PRE_ALERT_READY", "LAYERING_HELD",
+                    "PRE_ALERT_ANSWERED", "PRE_ALERT_CONFIRMED", "PRE_ALERT_GENUINE", "PRE_ALERT_NOT_NEEDED",
+                    "ESCALATED", "REFER_DRAFTED", "MUST_DECIDE", "REFERRED", "POLICE_KEEP", "HOLD_RELEASED",
+                    "HOLD_RELEASED_LIMIT", "HOLDER_EXPLAINED")
 
 
 @app.get("/api/story")
@@ -1163,10 +1397,14 @@ def story(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     victims = dict(conn.execute("SELECT case_id, victim_tag FROM COMPLAINT").fetchall())
     out = []
 
-    def add(t, kind, who, what, case, ref):
+    basis_of = {int(h): (b, bool(pr)) for h, b, pr in conn.execute(
+        "SELECT hold_id, COALESCE(legal_basis, 'police_notice'), COALESCE(proactive, FALSE) FROM HOLD_LEDGER"
+    ).fetchall()}
+
+    def add(t, kind, who, what, case, ref, basis=None, proactive=False):
         out.append({"t": str(t)[:19] if t else None, "kind": kind, "who": who, "what": what, "case_id": case,
                     "label": labels.get(case or "", case), "victim": victim_name(victims.get(case)) if case else None,
-                    "ref": ref})
+                    "ref": ref, "legal_basis": basis, "proactive": bool(proactive)})
 
     paid = {c: (amt, ts, ch) for c, amt, ts, ch in conn.execute(
         "SELECT k.case_id, t.amount_inr, t.ts, t.channel FROM INTAKE_CHECK k JOIN TXN t ON t.txn_id = k.matched_txn_id"
@@ -1190,11 +1428,15 @@ def story(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
     for w in watch_rows(conn, bank):
         text = w["sentence"] or ""
         text = text[7:] if text[:2].isdigit() and text[2:3] == ":" else text
+        b, pr = basis_of.get(int(w["hold_id"]), (None, False)) if w.get("hold_id") else (None, False)
+        pr = pr or w["event_kind"] in PROACTIVE_EVENTS
         add(w["event_at"], "watch", "After the hold", text[:1].upper() + text[1:], w.get("case_id"),
-            f"watch {int(w['event_id'])}")
+            f"watch {int(w['event_id'])}", b, pr)
     for d in rows(conn, "SELECT decision_id, case_id, account_id, action_code, decision_outcome, amount_inr, "
-                        "decided_by, decided_at, reason_text FROM DECISION ORDER BY decision_id"):
+                        "decided_by, decided_at, reason_text, statement_ids FROM DECISION ORDER BY decision_id"):
         name = names.get(d["account_id"], d["account_id"])
+        m = re.search(r"hold:PH-H(\d+)", d.get("statement_ids") or "")
+        d_basis, d_pro = basis_of.get(int(m[1]), (None, False)) if m else (None, False)
         if d["decision_outcome"] == "REJECTED":
             what = f"Kept the hold on {name} as it was"
         else:
@@ -1202,7 +1444,7 @@ def story(bank: str = Query("BANK_X"), conn=Depends(get_conn)):
                 name=name, amt=inr(d["amount_inr"]) if d["amount_inr"] else "")
         add(d["decided_at"], "officer", d["decided_by"], what + (f'. Reasons signed: {d["reason_text"]}'
                                                                 if d["reason_text"] else "."), d["case_id"],
-            f"decision D-{int(d['decision_id']):02d}")
+            f"decision D-{int(d['decision_id']):02d}", d_basis, d_pro)
     for log_id, to in conn.execute("SELECT log_id, period_to FROM MORNING_LOG WHERE viewing_bank_id = {b}",
                                    {"b": bank}).fetchall():
         add(to, "note", "The system", "Filed the handover note for the morning desk.", None, f"note {int(log_id)}")

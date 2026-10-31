@@ -58,8 +58,8 @@ TOOLS = {t.name: t for t in (
     Tool("trace_money", "Follow the payment forward through this bank's accounts (Exasol, CONNECT BY)."),
     Tool("attribute_victim_share", "Work out each victim's rupees in each account (Exasol Python UDF: LIBR, and pro "
                                    "rata between several victims)."),
-    Tool("get_account_evidence", "Read each own account's 90-day history: eight signals (nine with the learned one) "
-                                 "with reasons, cross-ticket evidence and refused attempts (Exasol SQL)."),
+    Tool("get_account_evidence", "Score each own account's 90-day history on two questions, pass-through and fraud "
+                                 "exposure (nine signals, learned weights), and type it (Exasol SQL and UDF)."),
     Tool("allowed_actions", "Ask the rules engine what these facts allow per account: automatic, the officer's "
                             "decision, or nothing."),
     Tool("word_reasons", "Turn the rules engine's structured reasons into plain words, for narrow and widen "
@@ -407,11 +407,13 @@ class MakerBackend:
 
     def get_account_evidence(self) -> ToolResult:
         self.steps.score(self.conn, self.case_id, self.bank, self.placed_at)
-        rows = self._q("SELECT COALESCE(acc.holder_name, s.account_id), s.band, s.score FROM ACCOUNT_SCORE s "
-                       "JOIN ACCOUNT acc ON acc.account_id = s.account_id "
+        from pipeline.proactive import type_name
+
+        rows = self._q("SELECT COALESCE(acc.holder_name, s.account_id), s.account_pattern, s.pass_through, "
+                       "s.fraud_exposure FROM ACCOUNT_SCORE s JOIN ACCOUNT acc ON acc.account_id = s.account_id "
                        "WHERE s.case_id = {c} ORDER BY s.account_id").fetchall()
-        words = {"MULE": "pass-through pattern", "REVIEW": "mixed pattern", "HONEST": "ordinary-customer pattern"}
-        text = "; ".join(f"{n}: {words.get(band, band)} ({float(s):.2f})" for n, band, s in rows)
+        text = "; ".join(f"{n}: {type_name(pattern)} (pass-through {float(pt):.2f}, fraud exposure {float(fe):.2f})"
+                         for n, pattern, pt, fe in rows)
         return ToolResult(f"account evidence at this bank: {text or 'no own accounts on the trail'}",
                           self._stmts("ACCOUNT_SCORE"))
 
@@ -500,12 +502,13 @@ class MakerBackend:
             out.append({"account_id": acc, "action_code": "RECORD_SPLIT", "amount": None,
                         "reasons": {"trigger": "first_pass"}, "text": "Record how the money held here splits "
                                                                       "between the victims whose money reached it."})
-        for acc, band in self._q(
-                "SELECT ca.account_id, ca.band FROM CASE_ACCOUNT ca WHERE ca.case_id = {c} "
+        for acc, pattern, snapshot_id in self._q(
+                "SELECT ca.account_id, ca.account_pattern, ca.snapshot_id FROM CASE_ACCOUNT ca WHERE ca.case_id = {c} "
                 "AND ca.viewing_bank_id = {b} "
                 "AND ca.is_own_bank AND NOT ca.is_exit ORDER BY ca.hop, ca.account_id").fetchall():
             out.append({"account_id": acc, "action_code": "WATCH_ADD", "amount": None,
-                        "reasons": {"band": band, "trigger": "first_pass"},
+                        "reasons": {"pattern": pattern, "trigger": "first_pass",
+                                    "snapshot_id": None if snapshot_id is None else int(snapshot_id)},
                         "text": "Keep watching this account after the first pass."})
         return out
 

@@ -2,9 +2,7 @@
 
 _Synthetic data (IBM AMLworld HI-Small); laundering labels, not cyber-fraud mule labels._
 
-Deployed: gradient-boosted trees (200 trees of depth 2), scored in Exasol SQL from LEARNED_TREE.
-
-One more signal next to the eight hand-set ones (DECISIONS D-51), weight 0.05 of 1.05: it can move a score a little, and the hand-set signals still decide the band.
+**Benchmark only, not used in live scoring.** Since DECISIONS D-57 and D-58, live scores use explainable weights (hand-set until a retrained version is approved through `make learn`). The gradient-boosted trees below (200 trees of depth 2, plain numpy, scored in Exasol SQL from LEARNED_TREE) are kept as a benchmark of how much a learned model could add. This report was generated under D-51, when the model was a small extra signal; its numbers stand, its role has changed.
 
 Trained on 12963 accounts (2143 flagged); tested on 3220 held-out accounts (536 flagged). Features as of 2026-10-17 16:19:00.
 
@@ -12,14 +10,14 @@ Trained on 12963 accounts (2143 flagged); tested on 3220 held-out accounts (536 
 
 | Score | AUC |
 | --- | ---: |
-| **The model (deployed)** | **0.870** |
+| **Boosted trees (benchmark)** | **0.870** |
 | The hand-set weights on the signals AMLworld holds | 0.537 |
 | The hand-set weights plus the model at weight 0.05 | 0.726 |
 | Logistic regression, every input (not deployed) | 0.771 |
 | Logistic regression on those signals only, no connection inputs | 0.637 |
 | Boosted trees on every input | 0.870 |
 
-AUC: the chance that a random flagged account rates above a random other one (0.5 is a coin toss). The model ranks the held-out accounts better than the hand-set weights.
+AUC: the chance that a random flagged account rates above a random other one (0.5 is a coin toss). The trees rank the held-out accounts better than the hand-set weights.
 
 The trees rank the held-out accounts better than the logistic regression; the price of trees is that a rating is the sum of many small trees, not one weight per input. They are scored in SQL like the rest, and the logistic regression stays one retrain away.
 

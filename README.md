@@ -9,6 +9,8 @@ judgment calls, each written up with its reasons and the case against.
 Built by **Team Data Dynamos** for **ExaThon India 2026** (Track 01: Money, Risk & Regulation). Every number is
 computed in **Exasol Personal** and every number on screen traces to the Exasol statement that produced it.
 
+**Demo video:** [Watch on Google Drive](https://drive.google.com/file/d/1B0AotBv9ShRvmwmEPaquk9ePxzQUFhd1/view?usp=drivesdk)
+
 **Pitch deck:** [docs/Proportionate_Holds_deck.pdf](docs/Proportionate_Holds_deck.pdf)
 
 ## Problem statement
